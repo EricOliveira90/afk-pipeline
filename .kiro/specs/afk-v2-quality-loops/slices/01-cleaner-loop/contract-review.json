@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "verdict": "ACCEPT",
+  "findings": [
+    {
+      "id": "F-01",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-13"],
+      "evidence": "\"gateIds\": [\"tests\", \"acceptance:behaviors\"]",
+      "expected": "Per the contract's own definition-of-done rule — \"Every manifest entry whose claim has a type-level half carries typecheck among its gateIds\" — B-13 would carry typecheck, because its `then` asserts the escalation's `{ version: 1, class: \"BASELINE_IS_WRONG\", ... }` shape in the FinalReviewFinding vocabulary and the appended fresh `PersistedQualityStage` entry, both of which are declared types.",
+      "observed": "B-13 declares only `tests` and `acceptance:behaviors`. The type-level halves it leans on are held by B-14's and B-12's typecheck entries rather than its own, so the omission costs no evidence — a stale escalation or persisted-stage type would still redden `typecheck` through those entries.",
+      "clearCondition": "Either `typecheck` is added to B-13's `gateIds`, or B-13's `then` is left as-is on the understanding that its type-level halves are gated through B-14 and B-12. No revision is required for the contract to lock.",
+      "state": "OPEN",
+      "revisionCitation": null
+    }
+  ]
+}

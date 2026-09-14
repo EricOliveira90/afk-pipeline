@@ -25,6 +25,18 @@ export const ORCHESTRATOR_OWNED_SLICE_FILENAMES: readonly string[] = [
 ];
 
 /**
+ * The one artifact a `"declared-only"` caller may write into the slice
+ * directory (#87 B-11): the cleaner's `BASELINE_IS_WRONG` escalation.
+ *
+ * Declared privately here rather than imported from `src/cleaner-stage.ts`,
+ * the same way `src/gate-policy.ts` re-declares `{behaviorId}` — the
+ * classifier this module owns must not import the stage it classifies for.
+ * `src/escalation.test.ts` pins the two spellings together, so they cannot
+ * drift.
+ */
+export const CLEANER_ESCALATION_ARTIFACT_NAME = "cleaner-escalation.json";
+
+/**
  * The reserved `findingIds` identity for a **pre-build scope discovery**:
  * a generator that learns the locked file scope is too narrow *before* it
  * has any finding to cite.
@@ -255,6 +267,19 @@ function normalizeDirKey(raw: string): string {
  * A path git reported that the manifest's rules cannot even normalize is
  * reported as out-of-scope rather than skipped: an unclassifiable path is
  * not a proof that the tree is clean.
+ *
+ * ## Why the prefix exemption is optional (#87 B-11)
+ *
+ * The prefix exemption above is written for a *negotiating* tree: the agents
+ * that reach this function through the pre-build guard and the `candidate`
+ * scope source legitimately write the slice's artifacts as they work. A
+ * post-approval writing role has the opposite licence — the accepted
+ * artifacts are finished, and a round that rewrites `feedback-r1.md` to make
+ * a gate green is exactly the laundering this module refuses elsewhere. So
+ * `artifactDirPolicy: "declared-only"` drops the prefix exemption for that
+ * one caller, keeping only the file such a role is *supposed* to write.
+ * Every existing caller omits the argument and gets today's behavior
+ * (P-10).
  */
 export function outOfScopeChangedPaths(args: {
   changedFiles: readonly string[];
@@ -271,6 +296,15 @@ export function outOfScopeChangedPaths(args: {
    * accepted — proven, not assumed. No default: see the docstring.
    */
   acceptedPairIntact: boolean;
+  /**
+   * How the slice artifact directory is treated (#87 B-11). `"exempt-prefix"`
+   * — the default, and every existing caller's behavior — exempts the
+   * directory and everything under it. `"declared-only"` exempts nothing
+   * under it that the manifest does not declare, except
+   * {@link CLEANER_ESCALATION_ARTIFACT_NAME}, which is the one file the
+   * escalating role is asked to write.
+   */
+  artifactDirPolicy?: "exempt-prefix" | "declared-only";
   options?: LaneResourceOptions;
 }): string[] {
   const {
@@ -278,6 +312,7 @@ export function outOfScopeChangedPaths(args: {
     manifest,
     sliceArtifactDir,
     acceptedPairIntact,
+    artifactDirPolicy = "exempt-prefix",
     options,
   } = args;
   const declared = new Set(acceptanceManifestPaths(manifest));
@@ -316,6 +351,18 @@ export function outOfScopeChangedPaths(args: {
       artifactDir !== "" &&
       (key === artifactDir || key.startsWith(`${artifactDir}/`))
     ) {
+      // Under `"declared-only"` the prefix buys nothing: only the escalation
+      // file itself stays exempt, so an undeclared artifact this role rewrote
+      // is named like any other undeclared path (#87 B-11).
+      if (
+        artifactDirPolicy === "exempt-prefix" ||
+        key === normalizeAcceptanceManifestPath(
+          `${artifactDir}/${CLEANER_ESCALATION_ARTIFACT_NAME}`,
+        )
+      ) {
+        continue;
+      }
+      offenders.push(display);
       continue;
     }
     if (migrationPathsIn([key], options).length > 0) continue;

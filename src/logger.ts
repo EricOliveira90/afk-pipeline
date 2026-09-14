@@ -9,7 +9,11 @@ import { join } from "node:path";
 import type { InvocationStats } from "./agent-provider.js";
 import type { PromptAssemblyRole } from "./context-envelope.js";
 import type { SanityGateResult } from "./preship.js";
-import { readRunEvents } from "./run-events.js";
+import { readRunEvents, type RunEvent } from "./run-events.js";
+import {
+  MAX_CLEANER_ROUNDS,
+  MAX_FINAL_EVALUATION_ATTEMPTS,
+} from "./bounds.js";
 import {
   assertNever,
   bucketFor,
@@ -132,6 +136,142 @@ export function readAdvisoryGateOutcomes(
         ]
       : [],
   );
+}
+
+/**
+ * What one post-approval quality stage cost a slice, and what it bought (#97
+ * B-09) — one entry per `(ghIssue, stage)`.
+ *
+ * The same shape both the run summary and the draft PR body render, for the
+ * reason {@link AdvisoryGateOutcome} exists: two derivations of "what did the
+ * cleaner do" would eventually disagree, and this is a number an operator uses
+ * to decide whether to keep paying for the stage.
+ *
+ * Measurement only (ADR 0063). Nothing here is thresholded, alerted on, or read
+ * by any gate.
+ */
+export interface QualityStageOutcome {
+  ghIssue: string;
+  sliceNumber: string;
+  stage: string;
+  /** From `quality-stage-policy`; `false` for a stage the run declared none of. */
+  enabled: boolean;
+  /** The last outcome the stage's attempts reported, or `"(none)"` when it ran none. */
+  outcome: string;
+  roundsUsed: number;
+  roundLimit: number;
+  /** Wall clock: the sum of this stage's attempt durations. */
+  elapsedMs: number;
+  /** Model time: the sum of the matching `stage-duration` samples; `0` with none. */
+  modelMs: number;
+  /** Every gate the stage's attempts declared, de-duplicated, in first-seen order. */
+  gateIds: string[];
+  /** The subset served from the gate cache, de-duplicated the same way. */
+  cacheReusedGateIds: string[];
+  /** `reuse` when the run recorded a `final-evaluation-reuse` for this slice. */
+  finalDecision: "reuse" | "evaluate";
+}
+
+/**
+ * The agent role whose `stage-duration` samples are this stage's model time.
+ *
+ * The two literal roles the orchestrator's own `phase-started` / `phase-ended`
+ * events already carry, so the match is on facts already on the stream and this
+ * reader adds no writer (`src/stage-durations.ts` stays read-only).
+ */
+const MODEL_TIME_AGENT: Record<string, string> = {
+  cleaner: "cleaner",
+  "final-evaluation": "evaluator-final",
+};
+
+/**
+ * The one derivation behind {@link readQualityStageOutcomes} and the summary's
+ * per-slice rows, so the file and the stream cannot disagree (#97 B-09/B-10).
+ */
+function deriveQualityStageOutcomes(
+  events: readonly RunEvent[],
+): QualityStageOutcome[] {
+  const attempts = events.flatMap((event) =>
+    event.type === "quality-stage-attempt" ? [event] : [],
+  );
+  const policyFor = (stage: string): boolean | undefined =>
+    events.flatMap((event) =>
+      event.type === "quality-stage-policy" && event.stage === stage
+        ? [event.enabled]
+        : [],
+    )[0];
+  const reusedIssues = new Set(
+    events.flatMap((event) =>
+      event.type === "final-evaluation-reuse" ? [event.ghIssue] : [],
+    ),
+  );
+  const outcomes = new Map<string, QualityStageOutcome>();
+  for (const attempt of attempts) {
+    const key = `${attempt.ghIssue}|${attempt.stage}`;
+    let entry = outcomes.get(key);
+    if (entry === undefined) {
+      entry = {
+        ghIssue: attempt.ghIssue,
+        sliceNumber: attempt.sliceNumber,
+        stage: attempt.stage,
+        enabled: policyFor(attempt.stage) ?? true,
+        outcome: attempt.outcome,
+        roundsUsed: 0,
+        roundLimit:
+          attempt.stage === "cleaner"
+            ? MAX_CLEANER_ROUNDS
+            : MAX_FINAL_EVALUATION_ATTEMPTS,
+        elapsedMs: 0,
+        modelMs: 0,
+        gateIds: [],
+        cacheReusedGateIds: [],
+        finalDecision: reusedIssues.has(attempt.ghIssue)
+          ? "reuse"
+          : "evaluate",
+      };
+      outcomes.set(key, entry);
+    }
+    // The last attempt's outcome is the stage's: a stage that ended EXHAUSTED
+    // after two FAILs is exhausted, not failing.
+    entry.outcome = attempt.outcome;
+    // A released round 0 spent no round, which is the whole point of it.
+    if (attempt.stageRound > 0) entry.roundsUsed += 1;
+    entry.elapsedMs += attempt.durationMs;
+    for (const gateId of attempt.gateIds) {
+      if (!entry.gateIds.includes(gateId)) entry.gateIds.push(gateId);
+    }
+    for (const gateId of attempt.cacheReusedGateIds) {
+      if (!entry.cacheReusedGateIds.includes(gateId)) {
+        entry.cacheReusedGateIds.push(gateId);
+      }
+    }
+  }
+  for (const entry of outcomes.values()) {
+    const agent = MODEL_TIME_AGENT[entry.stage];
+    if (agent === undefined) continue;
+    entry.modelMs = events.reduce(
+      (total, event) =>
+        event.type === "stage-duration" &&
+        event.ghIssue === entry.ghIssue &&
+        event.agent === agent
+          ? total + event.durationMs
+          : total,
+      0,
+    );
+  }
+  return [...outcomes.values()];
+}
+
+/**
+ * Every post-approval quality stage a run recorded attempts for, in the order
+ * the stream first named them. `[]` for a run directory with no events, no
+ * attempt event, or no `events.jsonl` at all — an absent section, never a
+ * throw, because a PR body must not depend on a log file.
+ */
+export function readQualityStageOutcomes(
+  runDir: string,
+): QualityStageOutcome[] {
+  return deriveQualityStageOutcomes(readRunEvents(runDir)?.events ?? []);
 }
 
 export interface RunLog {
@@ -609,6 +749,68 @@ ${reuseEvents
   )
   .join("\n")}
 `;
+    /**
+     * Which quality stages this run was running under (#274, PRD D10 item 2).
+     *
+     * Rendered from the `quality-stage-policy` event alone, so the summary and
+     * `events.jsonl` cannot disagree — the same rule as Applied Waivers and
+     * Final Evaluation Reuse above. Unlike those two, the enabled/disabled
+     * distinction is the whole content, so the disabled case renders its line
+     * too: a summary that fell silent when the cleaner was off could not be
+     * told from one written before the stage existed.
+     *
+     * A historical stream carries no such event and therefore renders no
+     * section, which keeps every pre-#274 summary byte-identical. The header
+     * lines are #274's; the per-slice rows beneath them are #97's (B-10), and a
+     * stream with the header event but no attempt event renders the header lines
+     * and no table — so every #274-era summary stays byte-identical too (P-07).
+     */
+    const stagePolicyEvents = runEvents.filter(
+      (event) => event.type === "quality-stage-policy",
+    );
+    // The same derivation `readQualityStageOutcomes` exposes, over this run's
+    // own events: the summary and the PR body read one function (#97 B-09).
+    const qualityStageOutcomes = deriveQualityStageOutcomes(runEvents);
+    const qualityStageRows =
+      qualityStageOutcomes.length === 0
+        ? ""
+        : `
+| Slice | Stage | Enabled | Outcome | Rounds | Elapsed | Model time | Gates | Cache-reused gates | Final decision |
+|-------|-------|---------|---------|--------|---------|------------|-------|--------------------|----------------|
+${qualityStageOutcomes
+  .map(
+    (outcome) =>
+      `| #${outcome.ghIssue} | ${outcome.stage} | ` +
+      `${outcome.enabled ? "yes" : "no"} | ${outcome.outcome} | ` +
+      `${outcome.roundsUsed}/${outcome.roundLimit} | ${outcome.elapsedMs}ms | ` +
+      `${outcome.modelMs}ms | ` +
+      `${outcome.gateIds.length === 0 ? "—" : outcome.gateIds.join(", ")} | ` +
+      `${
+        outcome.cacheReusedGateIds.length === 0
+          ? "—"
+          : outcome.cacheReusedGateIds.join(", ")
+      } | ${outcome.finalDecision} |`,
+  )
+  .join("\n")}
+`;
+    const qualityStageSection =
+      stagePolicyEvents.length === 0
+        ? ""
+        : `
+## Quality Stages
+
+${stagePolicyEvents
+  .map(
+    (event) =>
+      `- \`${event.stage}\`: ${event.enabled ? "enabled" : "disabled"} — ` +
+      `${
+        event.gateIds.length === 0
+          ? "no gates declared"
+          : `gates ${event.gateIds.map((id) => `\`${id}\``).join(", ")}`
+      } (source: ${event.source})`,
+  )
+  .join("\n")}
+${qualityStageRows}`;
     const dependencyRows = this.dependencyHolds
       .map(
         (hold) =>
@@ -662,7 +864,7 @@ Finished: ${finishedAt!.toISOString()}
 ${rows}
 ${totalsRow}
 ${dependencySection}${adoptionSection}
-${gateSection}${advisorySection}${coverageSection}${isolationSection}${finalReuseSection}${resolutionSection}${waiverSection}
+${gateSection}${advisorySection}${coverageSection}${isolationSection}${finalReuseSection}${resolutionSection}${waiverSection}${qualityStageSection}
 
 Pre-ship sanity gate: ${sanityGateLabel(sanityGate)}
 Architect review: ${architectVerdict ?? "N/A"}${architectDetail ? ` — ${architectDetail}` : ""}

@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "classification": "NON_CONVERGENCE",
+  "round": 2,
+  "attempt": 1,
+  "findings": [
+    {
+      "id": "F-22",
+      "severity": "BLOCKING",
+      "state": "OPEN",
+      "unresolved": true,
+      "plannerPosition": null,
+      "plannerEvidence": null,
+      "evaluatorEvidence": "\"      \\\"architecture.md\\\",\" (acceptance-manifest.json fileScope) against the definition of done's \"its `fileScope` is exactly the \\\"Files expected to change\\\" list, each path spelled as `git ls-files` reports it — `ARCHITECTURE.md` in that upper-case spelling, so the `scope` gate, which compares path strings rather than case-folded ones, does not report the build order's last commit as an out-of-scope change on a case-insensitive checkout\" (contract.md:629-634)"
+    },
+    {
+      "id": "F-23",
+      "severity": "BLOCKING",
+      "state": "OPEN",
+      "unresolved": true,
+      "plannerPosition": null,
+      "plannerEvidence": null,
+      "evaluatorEvidence": "\"Exactly two new spawned pipeline scenarios exist, the two named in the test plan's harness tier 2 ... No third spawned scenario is added\" (contract.md:646-651) against B-03's unrevised observable \"a fixture run on src/qa-orchestration.test.ts's \\\"final evaluation and reuse\\\" fixture shows the journal entering the cleaner stage before the stub stage\" (acceptance-manifest.json B-03 observableResult)"
+    }
+  ]
+}

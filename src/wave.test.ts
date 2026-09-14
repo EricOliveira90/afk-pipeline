@@ -413,7 +413,7 @@ describe("runWave", () => {
     ).not.toThrow();
   }, 240_000);
 
-  it("runs disjoint slices in parallel lanes", async () => {
+  it("[behavior:#274:B-06] runs disjoint slices in parallel lanes", async () => {
     const repo = makeRepo();
     const slices: Slice[] = [
       { number: "01", ghIssue: "401", title: "Alpha", type: "AFK", blockedBy: [], userStories: "" },
@@ -439,6 +439,16 @@ describe("runWave", () => {
 
     expect(outcomes.get("401")?.phase).toBe("PASS");
     expect(outcomes.get("402")?.phase).toBe("PASS");
+    // #274: the quality-stage record is a run-level fact, emitted once beside
+    // `run-started`. `runWave` is the per-slice layer and never emits it, so
+    // dispatching two slices cannot make the count scale with N. The single
+    // record itself is asserted on the `runPipeline` stream in
+    // src/orchestrator-runs.test.ts.
+    expect(
+      readRunEvents(logger.runDir)?.events.filter(
+        (event) => event.type === "quality-stage-policy",
+      ),
+    ).toEqual([]);
   }, 240_000);
 
   it("partitions normalized concrete and explicit no-change scope from acceptance manifests", async () => {

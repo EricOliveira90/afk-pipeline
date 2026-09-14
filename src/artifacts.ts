@@ -731,11 +731,47 @@ export function archiveContractReviewRecord(details: {
  * `final-`. Exported so the in-scope tests can assert the mapping directly —
  * the alternative was a second spelling of the same three prefixes in a test
  * helper, which is exactly the drift the map exists to prevent.
+ *
+ * Four-way since #87 B-09: `"cleaner"` gets its own branch and not the
+ * `else → "final"` fallback, which would file a cleaner escalation under the
+ * final evaluator's prefix and make the two indistinguishable in one archive
+ * directory.
  */
-export function qaArchivePrefix(stage: QAReviewStage): "qa" | "uat" | "final" {
+export function qaArchivePrefix(
+  stage: QAReviewStage,
+): "qa" | "uat" | "final" | "cleaner" {
   if (stage === "deterministic") return "qa";
   if (stage === "shared-preview") return "uat";
+  if (stage === "cleaner") return "cleaner";
   return "final";
+}
+
+/**
+ * Preserve one cleaner round's agent log (#87 B-09).
+ *
+ * Modelled on {@link archiveScopeEscalationAttempt} over
+ * {@link archiveEvidenceCopy}, so a repeated stamp spills into the writing run's
+ * own subdirectory rather than overwriting the first round's log — the cleaner's
+ * commit rationale is in that log, and it is the only account of the round's
+ * reasoning that survives a reset.
+ */
+export function archiveCleanerLog(details: {
+  /** The agent log the invocation streamed to. */
+  source: string;
+  archiveDir: string;
+  round: number;
+  attempt: number;
+  /** The writing run's id, for the spill location. */
+  runId: string;
+}): string | null {
+  const { source, archiveDir, round, attempt, runId } = details;
+  if (!existsSync(source)) return null;
+  return archiveEvidenceCopy({
+    source,
+    archiveDir,
+    name: `cleaner-log-r${round}-a${attempt}.log`,
+    runId,
+  });
 }
 
 /** Preserve one evaluator's raw canonical artifact when it exists. */

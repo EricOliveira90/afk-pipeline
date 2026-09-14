@@ -38,7 +38,8 @@
   "files": [
     "dist",
     "prompts",
-    "agents"
+    "agents",
+    "templates"
   ],
   "devDependencies": {
     "@types/node": "^22",

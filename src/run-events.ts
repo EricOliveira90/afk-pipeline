@@ -15,6 +15,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { SliceLifecycle } from "./slice-lifecycle.js";
+import type { GatePolicy } from "./gate-policy.js";
 import type { BehaviorCoverageStatus } from "./acceptance-gate.js";
 import type {
   GateFailureKind,
@@ -133,7 +134,11 @@ export type RunEventPayload =
         // The final evaluator (#96 B-06) is journaled the same way and for the
         // same reason: it has a manifest-only role contract today, so its
         // reading time has no `prompt-assembly` event to pair with.
-        | "evaluator-final";
+        | "evaluator-final"
+        // The cleaner (#87 B-12) likewise: a prompt-only, manifest-declared
+        // role with no `PromptAssemblyRole` membership, so this event is where
+        // its invocation is accounted for.
+        | "cleaner";
       /** Evaluator attempt within the round, when the role retries. */
       attempt?: number;
       /** Provider-exposed token names and counts, never renamed. */
@@ -384,6 +389,76 @@ export type RunEventPayload =
        */
       failureKind?: GateFailureKind;
     }
+  | {
+      /**
+       * Whether one quality stage is switched on for this run, and by what
+       * (#274, PRD D10 item 1). Emitted exactly once per run, immediately
+       * after `run-started`, from the run's own `loadGatePolicy` snapshot —
+       * never per slice and never from a candidate worktree (#251), because
+       * the fact it records is a property of the run's rulebook, not of any
+       * tree being judged.
+       *
+       * Recorded even when the stage is off. A run that says nothing about the
+       * cleaner cannot be read as evidence of either state, and "was the
+       * cleaner on?" is the first question asked of a run that shipped
+       * unexpectedly clean or unexpectedly dirty work.
+       *
+       * Additive, so `EVENTS_SCHEMA_VERSION` stays 1 — the same way
+       * `behavior-coverage`, `approved-baseline` and `final-evaluation-reuse`
+       * arrived. Built by {@link buildQualityStagePolicyEvent} rather than
+       * inline at the emission site, so both the enabled and the disabled
+       * branch have one pure, testable derivation.
+       */
+      type: "quality-stage-policy";
+      stage: "cleaner";
+      enabled: boolean;
+      /** The declared gate ids in declaration order; `[]` when disabled. */
+      gateIds: string[];
+      source: "afk.config.json";
+    }
+  | {
+      /**
+       * One post-approval quality attempt, measured (#97, PRD story 17's ROI
+       * dataset). One event per cleaner round and one per final-evaluation
+       * attempt; a reuse emits none, because nothing ran.
+       *
+       * Measurement, never a gate (ADR 0063): nothing thresholds, alerts on, or
+       * branches on any number here — the same rule `stage-duration` above is
+       * kept under. What it answers is what a quality stage cost and what it
+       * bought, per attempt, from the one stream both the summary and the PR
+       * body read.
+       *
+       * `durationMs` is the attempt's whole wall clock, gates included, because
+       * a round's cost to the run is the time the run waited for it, not the
+       * time the agent spent typing. `inputTreeId === outputTreeId` says the
+       * attempt changed nothing — a released round 0 is exactly that — and an
+       * absent `outputTreeId` says no tree of this attempt survived to be named.
+       *
+       * Additive, so `EVENTS_SCHEMA_VERSION` stays 1, the same way
+       * `quality-stage-policy` above arrived.
+       */
+      type: "quality-stage-attempt";
+      ghIssue: string;
+      sliceNumber: string;
+      /** The generator round the approval this attempt follows happened in. */
+      round: number;
+      stage: "cleaner" | "final-evaluation";
+      /** The attempt's number *within its stage*: cleaner round, or `0` for a round-0 release. */
+      stageRound: number;
+      /** The attempt number the artifacts of this attempt are named with. */
+      attempt: number;
+      inputTreeId: string;
+      outputTreeId?: string;
+      /** Every gate the attempt declared, in declaration order. */
+      gateIds: string[];
+      /** The attempt's own outcome vocabulary — the stage's, not a shared enum. */
+      outcome: string;
+      startedAt: string;
+      endedAt: string;
+      durationMs: number;
+      /** The subset of `gateIds` served from the gate cache (D17's `reused`). */
+      cacheReusedGateIds: string[];
+    }
   | { type: "run-ended"; outcome: "SUCCEEDED" | "FAILED" | "ABORTED" }
   | { type: "slice-outcome"; slice: SliceLifecycle }
   | {
@@ -497,6 +572,80 @@ export type RunEvent = RunEventPayload & {
 export interface RunEvents {
   version: number;
   events: RunEvent[];
+}
+
+/**
+ * The one derivation of the `quality-stage-policy` payload (#274).
+ *
+ * Pure, and pure on purpose: it reads only the policy snapshot it is handed,
+ * so the recorded fact cannot drift from the rulebook the run is actually
+ * enforcing. `null` — no `afk.config.json`, or one with no `gatePolicy` — and
+ * a policy with no `clean` member are the same answer, because the member's
+ * presence is the cleaner stage's only switch (`GatePolicyClean`).
+ *
+ * The gate ids travel in declaration order, which is the order the cleaner
+ * would run them in; sorting them here would make the record disagree with
+ * the file it was read from.
+ */
+export function buildQualityStagePolicyEvent(
+  policy: GatePolicy | null,
+): Extract<RunEventPayload, { type: "quality-stage-policy" }> {
+  const clean = policy?.clean;
+  return {
+    type: "quality-stage-policy",
+    stage: "cleaner",
+    enabled: clean !== undefined,
+    gateIds: clean === undefined ? [] : clean.gates.map((gate) => gate.id),
+    source: "afk.config.json",
+  };
+}
+
+/**
+ * The one derivation of the `quality-stage-attempt` payload (#97 B-06).
+ *
+ * Modelled on {@link buildQualityStagePolicyEvent} and pure for the same
+ * reason: two emission sites — the cleaner's round seam and the final
+ * evaluation's attempt loop — produce this event, and a second inline copy of
+ * the shape is how the two start disagreeing about what a field means.
+ *
+ * The optional members are omitted rather than set to `undefined`, so a
+ * serialized line carries only what the attempt actually knows.
+ */
+export function buildQualityStageAttemptEvent(attempt: {
+  ghIssue: string;
+  sliceNumber: string;
+  round: number;
+  stage: "cleaner" | "final-evaluation";
+  stageRound: number;
+  attempt: number;
+  inputTreeId: string;
+  outputTreeId?: string;
+  gateIds: readonly string[];
+  outcome: string;
+  startedAt: string;
+  endedAt: string;
+  durationMs: number;
+  cacheReusedGateIds: readonly string[];
+}): Extract<RunEventPayload, { type: "quality-stage-attempt" }> {
+  return {
+    type: "quality-stage-attempt",
+    ghIssue: attempt.ghIssue,
+    sliceNumber: attempt.sliceNumber,
+    round: attempt.round,
+    stage: attempt.stage,
+    stageRound: attempt.stageRound,
+    attempt: attempt.attempt,
+    inputTreeId: attempt.inputTreeId,
+    ...(attempt.outputTreeId !== undefined
+      ? { outputTreeId: attempt.outputTreeId }
+      : {}),
+    gateIds: [...attempt.gateIds],
+    outcome: attempt.outcome,
+    startedAt: attempt.startedAt,
+    endedAt: attempt.endedAt,
+    durationMs: attempt.durationMs,
+    cacheReusedGateIds: [...attempt.cacheReusedGateIds],
+  };
 }
 
 /** Serialize one event as a single JSON line (newline-terminated). */

@@ -1,0 +1,60 @@
+{
+  "version": 2,
+  "verdict": "PASS",
+  "failureClass": "NONE",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-01",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-02", "B-03", "B-12"],
+      "summary": "The restore re-dispatch never refreshed the cleaner result it routes from, so a second RESTORE was routed to the no-op post-approval stub and the restore round's bytes were attributed to that stub in the change summary.",
+      "evidence": "src/orchestrator.ts:8111-8119 now replaces the standing `cleaner` result with the re-dispatch's result (merging `ran`, the first dispatch's `inputTreeId`, and a monotonic `roundsSpent`), and `cleanerWrote()` / `stageInputTreeId()` at :7269-7272 are functions read at each use rather than a snapshot, so `buildWritingStageIds` at :7930-7940 is rebuilt per attempt. The new S4 scenario on the shared `finalEvaluationFixture` (src/qa-orchestration-gates.test.ts:1791) drives two consecutive RESTORE verdicts with the cleaner as the only writing stage and asserts `fixture.stageCalls` is exactly one call with no `repair` (:1879-1884), three cleaner rounds each routed to the cleaner (:1874, :1893-1899), and that every attempt's change summary attributes README.md to `cleaner` with an empty `post-approval-writing` span (:1928-1936). Probe: `pnpm vitest run src/qa-orchestration-gates.test.ts` — 27 passed, exit 0, including \"routes a second restore to the cleaner too, and chains each restore round onto the tree it started from  43110ms\".",
+      "expected": "Both restores route to `cleaner`; the injected post-approval writing stage is never called with `repair: \"RESTORE\"`; the second attempt's change summary attributes the restore round's paths to `cleaner` with an empty `post-approval-writing` span; a regression test on the shared fixture covers it.",
+      "observed": "All of it holds on the run's own stream and artifacts, asserted by S4, which passes.",
+      "clearCondition": "A run whose final evaluator returns a `RESTORE` on two consecutive attempts, with the cleaner as the only stage that writes, routes both restores to `cleaner`: the injected post-approval writing stage is never called with `repair: \"RESTORE\"`, and the change summary written for the second attempt attributes the restore round's changed paths to `cleaner` with an empty `post-approval-writing` span. A regression test on the shared `finalEvaluationFixture` covers it.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-02",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-08"],
+      "summary": "The `quality-stage-attempt` event for a final-evaluation attempt set `inputTreeId` to the graded tree rather than to the cited baseline tree.",
+      "evidence": "src/orchestrator.ts:7747-7749 now computes `attemptInputTreeId = citesBaseline ? persistedBaseline!.treeId : acceptedTreeId` and passes it as `inputTreeId` at :7760, with `outputTreeId: currentFinalTreeId` at :7761. S1 (src/qa-orchestration-gates.test.ts:1606-1613) asserts both slots on the run's own stream: `finalAttempts[0].inputTreeId` equals `view.baselineTreeId` and is not equal to `outputTreeId`. Probe: `pnpm vitest run src/qa-orchestration-gates.test.ts` — 27 passed, exit 0, including \"a cleaner commit faces the final evaluator, and both stages report what they cost  28915ms\".",
+      "expected": "A final-evaluation `quality-stage-attempt` line carries the cited approved-baseline tree id as `inputTreeId` and the graded tree id as `outputTreeId`, with both values asserted on the run's own stream in S1.",
+      "observed": "Both values are emitted correctly and both are asserted in S1, which passes.",
+      "clearCondition": "A final-evaluation `quality-stage-attempt` line carries the cited approved-baseline tree id as `inputTreeId` and the graded tree id as `outputTreeId`, asserted on the run's own stream (both values, not just `outputTreeId`) in the S1 scenario.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-03",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-09"],
+      "summary": "`src/logger.ts` contained a raw NUL byte used as a pooling-key separator, which made git treat the whole file as binary.",
+      "evidence": "Probe: byte scan of the reviewed tree — `[System.IO.File]::ReadAllBytes('src/logger.ts')` counted 0 bytes equal to 0 (same for orchestrator.ts, final-evaluation.ts, cleaner-stage.ts, run-events.ts, ship-gate.ts). `git diff --numstat 8bbb969..HEAD -- src/logger.ts` renders `171  4  src/logger.ts` — a textual line diff, not `-  -`. The pooling key is now the plain `` `${attempt.ghIssue}|${attempt.stage}` `` at src/logger.ts (deriveQualityStageOutcomes).",
+      "expected": "`git diff --text=never main...HEAD -- src/logger.ts` renders a textual line diff, and `src/logger.ts` contains no byte equal to 0.",
+      "observed": "The file is textual and NUL-free; git reports a line diff of 171 insertions / 4 deletions.",
+      "clearCondition": "`git diff --text=never main...HEAD -- src/logger.ts` renders a textual line diff, and `src/logger.ts` contains no byte equal to 0.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-04",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-07"],
+      "summary": "A restore re-dispatch's rounds reported the original accepted tree as `inputTreeId` rather than the cleaner-committed tree the round actually started from.",
+      "evidence": "src/cleaner-stage.ts:610-612 now resolves `startTreeId = input.repair ? resolveCandidateTreeId(ctx.worktreeDir) : acceptedTreeId`, and both the round loop (:695) and `finish()` (:710) report that tree. S4 asserts the chain on the run's own stream: `cleanerAttempts[1].inputTreeId === cleanerAttempts[0].outputTreeId` and `cleanerAttempts[2].inputTreeId === cleanerAttempts[1].outputTreeId`, with every attempt's output differing from its input (src/qa-orchestration-gates.test.ts:1900-1914). The unit-level pin is src/cleaner-stage.test.ts:1138 (\"reports the tree the restore round actually started from, not the approved baseline\"). Probes: `pnpm vitest run src/qa-orchestration-gates.test.ts` — 27 passed, exit 0; `pnpm vitest run src/final-evaluation.test.ts src/logger.test.ts src/ship-gate.test.ts src/cleaner-stage.test.ts` — 175 passed, exit 0.",
+      "expected": "A restore re-dispatch's `quality-stage-attempt` lines name the tree the round actually started from as `inputTreeId` — the previous cleaner round's output — asserted on the run's own stream.",
+      "observed": "Each restore round names its predecessor's output tree, asserted on the stream in S4 and pinned by a unit test; both pass.",
+      "clearCondition": "A restore re-dispatch's `quality-stage-attempt` lines name the tree the round actually started from as `inputTreeId` — the previous cleaner round's output — asserted on the run's own stream.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    }
+  ]
+}

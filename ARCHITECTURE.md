@@ -23,10 +23,11 @@ entry in `afk.config.json`. Cap: 150 lines.
 | Merge resolution | One scoped resolution round for a conflicted wave merge (#132, ADR 0029, 0039) | `src/merge-resolution.ts` | — |
 | Run identity | Provider-qualified state, branch, and worktree names (ADR 0002, 0053) | `src/run-identity.ts` | — |
 | Run records | Persisted slice state, journal, events, snapshots (ADR 0018, 0031, 0056) | `src/run-state.ts`, `src/run-journal.ts` | `src/file-lock.ts`, `src/adoption-provenance.ts`, `src/run-events.ts`, `src/run-snapshot.ts`, `src/slice-lifecycle.ts`, `src/stage-durations.ts`, `src/exact-stage-resume.ts` |
-| Gates | Orchestrator-owned gate execution, declarations, and evidence | `src/gate-runner.ts`, `src/base-gates.ts`, `src/candidate-gate-phase.ts`, `src/post-qa-gates.ts`, `src/scope-gate.ts`, `src/acceptance-gate.ts`, `src/skip-gate.ts` | `src/candidate-gate-policy.ts`, `src/migration-gate.ts`, `src/qa-gate-authorization.ts`, `src/gate-cache.ts` |
+| Gates | Orchestrator-owned gate execution, declarations, and evidence | `src/gate-runner.ts`, `src/base-gates.ts`, `src/candidate-gate-phase.ts`, `src/post-qa-gates.ts`, `src/scope-gate.ts`, `src/acceptance-gate.ts`, `src/skip-gate.ts`, `src/suppression-gate.ts` | `src/candidate-gate-policy.ts`, `src/migration-gate.ts`, `src/qa-gate-authorization.ts`, `src/gate-cache.ts` |
 | Slice selection | Match CLI selectors to slice numbers or issue IDs | `src/slice-selector.ts` | — |
 | Review rails | Contract/QA lifecycle, candidate review isolation, accepted-candidate policy (PRD 1, PRD 3, PRD 4) | `src/contract-review.ts`, `src/qa-review.ts`, `src/change-summary.ts` | `src/convergence-coordinator.ts`, `src/accepted-candidate.ts`, `src/contract-convergence.ts`, `src/qa-convergence.ts`, `src/non-progress.ts`, `src/artifacts.ts`, `src/scope-amendment.ts`, `src/slice-scope.ts`, `src/acceptance-manifest.ts` |
-| Final evaluation | Exact-tree reuse decision, final review schema, finding routing, final verdict (PRD 4 D9, D19, D20) | `src/final-evaluation.ts` | — |
+| Final evaluation | Exact-tree reuse decision, final review schema, finding routing to the stage that actually wrote, final verdict (PRD 4 D9, D19, D20; PRD 5 D12, #97) | `src/final-evaluation.ts` | — |
+| Post-approval quality stages | Bounded post-approval rounds that make declared *clean* gates green without changing approved behavior, re-dispatched with the final evaluator's `RESTORE` findings under the same round budget and reverted whole when none is left; each attempt reported as `quality-stage-attempt` ROI evidence, never as a gate (PRD 5 D2/D4/D10–D12, ADR 0063, #87, #97) | `src/cleaner-orchestration.ts` | `src/cleaner-stage.ts`, `src/suppression-gate.ts`, `prompts/cleaner.md`, `src/run-events.ts` |
 | Manifest and claims | `afk.json` scope, migration prefix reservation (ADR 0034) | `src/afk-manifest.ts` | `src/migration-claims.ts` |
 | PRD inputs | `issues.md` → DAG; PRD directory reading | `src/issues-parser.ts` | `src/prd-reader.ts`, `src/prd-hold.ts` |
 | Ship path | Pre-ship gate, ship gate, terminal handoff (ADR 0033) | `src/ship-gate.ts` | `src/preship.ts`, `src/handoff.ts` |
@@ -50,7 +51,26 @@ entry in `afk.config.json`. Cap: 150 lines.
   with evidence, not an inline check in the orchestrator. A check the
   orchestrator computes itself supplies `run` instead of `command` (never
   both) and reports through `GateFindings`; `src/scope-gate.ts` and
-  `src/skip-gate.ts` are the worked examples.
+  `src/skip-gate.ts` are the worked examples. A finding kind is a field on
+  `GateFindings`, pinned to the evidence version that introduced it:
+  `suppressions` carries `{ path, line, detectorId }` triples from
+  `src/suppression-gate.ts` and is evidence version 4 only (#87), so a reader of
+  an older artifact never has to guess whether an absent field means "none" or
+  "not yet counted".
+- Post-approval writing stages (`PostApprovalWritingStage` in
+  `src/final-evaluation.ts`) — a stage that runs after the approval commit and
+  before the merge takes `{ worktreeDir, stageId, repair? }` and is wired at the
+  one accept seam in `src/orchestrator.ts`. The cleaner session
+  (`src/cleaner-orchestration.ts`) owns resume, dispatch, persistence, restore
+  state, and terminal decisions; the orchestrator retains generator,
+  final-evaluation, and slice-lifecycle authority. Its implementation
+  (`src/cleaner-stage.ts`, `prompts/cleaner.md`) runs under `gatePolicy.clean`:
+  round 0 gates the accepted tree; later rounds gate their checkpoint against
+  the clean gates **plus the full approval gate set**, reverting regressions
+  with `git reset --hard`. Every exit resets (ADR 0051), and remaining rounds
+  are compared rather than incremented (ADR 0050). `BASELINE_IS_WRONG` returns
+  to the generator with the baseline invalidated; exhaustion goes stuck naming
+  every red gate. A restore (`repair`) skips round 0 on the cleaner's green output.
 - Gate cost (`gatePolicy.cost` → `resolveTestCostPlan` in `src/base-gates.ts`)
   — a gate's price is declared, not discovered: `expectedCostMs` decides what
   the generator's verification command may contain, `prerequisiteGateIds`
@@ -88,6 +108,14 @@ entry in `afk.config.json`. Cap: 150 lines.
   persisted per candidate tree, and only a graded attempt spends the
   `MAX_FINAL_EVALUATION_ATTEMPTS` budget: a `RETURN_TO_GENERATOR` finding
   re-enters the implementation loop and spends a generator round instead (D19).
+  A `RESTORE` is routed to the stage that **actually wrote** — the last id
+  `buildWritingStageIds` reports — re-dispatched with `repair: { findings }` under
+  its own `roundsSpent` budget, whose exhaustion resets its range whole (#97).
+- Quality-stage ROI evidence (`quality-stage-attempt` in `src/run-events.ts`,
+  `readQualityStageOutcomes` in `src/logger.ts`) — one event per cleaner round and
+  final-evaluation attempt carries both trees, timings, gate ids, outcome and
+  cache-reused gate ids, pooled per `(ghIssue, stage)` for the summary rows and the
+  draft PR alike; a measured stage adds an event, never a gate (ADR 0063, D10–D11).
 - Merge resolution (`resolveMergeConflict` in `src/wave.ts`, body in
   `src/merge-resolution.ts`) — a real textual conflict spends one scoped round
   in the slice's own worktree, inside the merge mutex the refused attempt

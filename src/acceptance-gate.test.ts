@@ -290,10 +290,20 @@ describe("resolveBindableGateCatalog", () => {
         ),
       ),
     ).toContain("typecheck");
+  });
+
+  it("[behavior:#87:B-10] pins the written gate-evidence version at 4", () => {
     // 3 since #86: version 3 added the optional cache/prerequisite/advisory
     // markers. The `version: 2` fixture above is an acceptance *manifest*, a
     // different document with its own version line, and stays 2.
-    expect(GATE_EVIDENCE_VERSION).toBe(3);
+    //
+    // 4 since #87: version 4 added the optional `GateFindings.suppressions`
+    // field the in-process `suppressions` gate reports its
+    // `{ path, line, detectorId }` triples through. Readers still accept 1-3
+    // (P-06), so this pin is the shipped writer's version, not the minimum a
+    // reader admits — and it is not bumped again for a field that already
+    // exists.
+    expect(GATE_EVIDENCE_VERSION).toBe(4);
   });
 });
 

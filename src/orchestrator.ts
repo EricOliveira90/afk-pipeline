@@ -171,14 +171,20 @@ import {
   type RunState,
 } from "./run-state.js";
 import {
+  buildWritingStageIds,
+  CLEANER_STAGE_ID,
   decideFinalReuse,
   decideFinalVerdict,
   FINAL_REPORT_FILENAME,
   FINAL_REVIEW_FILENAME,
+  noopPostApprovalWritingStage,
   POST_APPROVAL_WRITING_STAGE_ID,
   routeFinalReviewFinding,
   validateFinalReview,
+  type PostApprovalWritingStage,
 } from "./final-evaluation.js";
+import { createCleanerOrchestrationSession } from "./cleaner-orchestration.js";
+import { createCleanerContinuation } from "./cleaner-continuation.js";
 import {
   resolveRunScope,
   type ResolvedRunScope,
@@ -447,26 +453,13 @@ function formatBaseGateCatalog(catalog: readonly BindableGate[]): string {
     .join("\n");
 }
 /**
- * The internal shape of a post-approval writing stage (#96 B-03). Not
- * exported: the stage is an implementation detail of this module's accepted-
- * candidate path, and a stage id plus a function is the whole of it.
+ * The post-approval writing stage (#96 B-03) now lives in
+ * `src/final-evaluation.ts` and is re-exported through this module's existing
+ * `PipelineConfig` field. The type moved with #87 B-03 so
+ * `src/final-evaluation.test.ts` can assert the signature and the default seam
+ * P-02 locks without importing the orchestrator; the shape, the `repair`
+ * marker and the synchronous return are unchanged.
  */
-type PostApprovalWritingStage = (input: {
-  /** The slice worktree, checked out at the approved candidate. */
-  worktreeDir: string;
-  /** The stage's own id, so a write can be attributed without guessing. */
-  stageId: string;
-  /**
-   * Set only when a final-evaluation `PRESERVATION` (or restorable drift)
-   * finding routed back here (#96 B-08): the stage is being asked to put back
-   * what it wrote over, not to write again. Absent on the first call, which is
-   * what lets a stage distinguish its own turn from its own repair.
-   */
-  repair?: "RESTORE";
-}) => void;
-
-/** Production behavior: nothing, until PRD 5 (#96 B-03). */
-const noopPostApprovalWritingStage: PostApprovalWritingStage = () => {};
 
 export interface SharedPreviewConfig {
   /** Deterministic command that validates migrations before remote apply. */
@@ -1011,7 +1004,14 @@ export interface SliceContext {
         sliceNumber: string;
         round: number;
         attempt?: number;
-        role: "evaluator-qa" | "evaluator-uat" | "evaluator-final";
+        role:
+          | "evaluator-qa"
+          | "evaluator-uat"
+          | "evaluator-final"
+          // The cleaner (#87 B-12) is dispatched the same way: prompt-only and
+          // manifest-declared, so its completion is journaled here rather than
+          // paired with a `prompt-assembly` event.
+          | "cleaner";
       };
     },
   ) => ReturnType<AgentProvider["invoke"]>;
@@ -1077,7 +1077,14 @@ export function makeSliceContext(
         sliceNumber: string;
         round: number;
         attempt?: number;
-        role: "evaluator-qa" | "evaluator-uat" | "evaluator-final";
+        role:
+          | "evaluator-qa"
+          | "evaluator-uat"
+          | "evaluator-final"
+          // The cleaner (#87 B-12) is dispatched the same way: prompt-only and
+          // manifest-declared, so its completion is journaled here rather than
+          // paired with a `prompt-assembly` event.
+          | "cleaner";
       };
     },
   ) => {
@@ -6773,6 +6780,130 @@ export async function runSliceExecute(
             );
           }
           /**
+           * The commit the accepted tree sits on, captured here and not
+           * re-resolved later (#97 B-04).
+           *
+           * The reset target for a restore that arrives with no cleaner round
+           * left to spend: the whole cleaner range goes, not one round of it,
+           * because a stage that cannot repair what it broke has to leave the
+           * tree the approval was given. `HEAD` at that point is a cleaner
+           * commit, so resolving it then would reset to the damage.
+           */
+          const acceptedCommitSha = git.resolveCommit(ctx.worktreeDir, "HEAD");
+          /**
+           * The cleaner stage (#87 B-03): after the approval commit and before
+           * the post-approval writing stage, so the tree it cleans is the one
+           * the gates authorized and the QA verdict is tied to, and so the
+           * writing stage's own output is never what a clean gate reads.
+           *
+           * Every argument the stage needs is a value this round already
+           * resolved — the declarations, the cost plan, the launch waivers, the
+           * evidence directory and the gate bounds. Nothing here re-reads the
+           * candidate's worktree for policy: `ctx.runGatePolicy` is the run's
+           * snapshot, for the same reason the feedback-integrity gate takes it
+           * (#251) — a candidate that could author `gatePolicy.clean` could
+           * delete the stage that checks it.
+           */
+          const cleanerSession = createCleanerOrchestrationSession({
+            run: {
+              repoRoot: config.repoRoot,
+              runSlug: pipelineRunSlug(
+                config.prdSlug,
+                config.provider ?? kiroProvider,
+              ),
+              prdSlug: config.prdSlug,
+              reviewArchiveDir,
+              logger,
+            },
+            slice: {
+              ghIssue: slice.ghIssue,
+              number: slice.number,
+              tag: ctx.tag,
+              worktreeDir: ctx.worktreeDir,
+              relSliceDir: ctx.relSliceDir,
+              absSliceDir: ctx.absSliceDir,
+              featureRef: featBranch,
+            },
+            generatorRound: round,
+            accepted: {
+              treeId: acceptedTreeId,
+              commitSha: acceptedCommitSha,
+            },
+            invoke,
+            invocationBounds: longCommandRoleBounds({
+              idleTimeoutMs: timeoutMs,
+              idleWarningIntervalMs: heartbeatMs,
+              maxDurationMs: config.maxAgentDurationMs,
+            }),
+            stageInput: {
+              ...(ctx.runGatePolicy?.clean
+                ? { clean: ctx.runGatePolicy.clean }
+                : {}),
+              runPolicy: ctx.runGatePolicy,
+              skipDetectors: costPlan.skipDetectors,
+              testFileGlobs: costPlan.testFileGlobs,
+              waivers: launchWaivers,
+              acceptedPairIntact,
+              regressionDeclarations: [
+                ...preQaDeclarations,
+                ...fullSuiteDeclarations,
+              ],
+              gatePhase: {
+                repoRoot: config.repoRoot,
+                ghIssue: slice.ghIssue,
+                sliceNumber: slice.number,
+                tag: ctx.tag,
+                round,
+                evidenceDir,
+                cache: gateCache,
+                ...(signal ? { signal } : {}),
+                infrastructureRetries:
+                  config.infrastructureRetries ??
+                  DEFAULT_INFRASTRUCTURE_RETRIES,
+                inactivityTimeoutMs:
+                  config.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+                wallClockTimeoutMs:
+                  DEFAULT_BASE_GATE_WALL_CLOCK_TIMEOUT_MS,
+                heartbeatIntervalMs:
+                  config.heartbeatIntervalMs ??
+                  DEFAULT_HEARTBEAT_INTERVAL_MS,
+                ...(gatePrepare ? { prepare: gatePrepare } : {}),
+              },
+              ...(gatePrepare ? { prepare: gatePrepare } : {}),
+              options: {
+                migrationPathPattern: config.migrationPathPattern,
+              },
+            },
+            ...(signal ? { signal } : {}),
+          });
+          const cleanerContinuation = createCleanerContinuation(
+            cleanerSession,
+            {
+              returnToGenerator: (failureSet, note) => {
+                generatorFailureSet = failureSet;
+                retryNote = note;
+              },
+              finishStuck: (reason, artifactReferences) => {
+                stuckReferences.push(...artifactReferences);
+                return finishStuck(reason);
+              },
+            },
+          );
+          const initialCleaner = await cleanerContinuation.advance({
+            kind: "INITIAL",
+          });
+          if (initialCleaner.kind === "RETURN_TO_GENERATOR") {
+            if (implementationAttempt < implementationAttemptLimit) continue;
+            return finishStuck(
+              `The cleaner returned slice #${slice.ghIssue} to the ` +
+                `generator with no implementation round left to spend. ` +
+                retryNote,
+            );
+          }
+          if (initialCleaner.kind === "STUCK") {
+            return initialCleaner.terminal;
+          }
+          /**
            * The post-approval writing stage, and the reuse decision it decides
            * (#96 B-03/B-01/B-02).
            *
@@ -6790,6 +6921,27 @@ export async function runSliceExecute(
            */
           const writingStage =
             config.postApprovalWritingStage ?? noopPostApprovalWritingStage;
+          /**
+           * The tree the writing stage is handed (#97 B-02): the cleaner's own
+           * output when it committed one, and otherwise the accepted tree. It is
+           * the "before" a restore is decided against — a tree the writing stage
+           * left byte-identical is a stage that wrote nothing to restore from.
+           *
+           * A function, read at each use rather than captured once, because a
+           * restore re-dispatch moves the cleaner's output tree: the "before"
+           * for the next attempt's restore decision is the tree that dispatch
+           * left, and a snapshot taken before the first attempt would make every
+           * later attempt compare the graded tree against a tree no stage was
+           * handed (QA-01).
+           */
+          const cleanerWrote = (): boolean =>
+            cleanerContinuation.current.ran &&
+            cleanerContinuation.current.outputTreeId !==
+              cleanerContinuation.current.inputTreeId;
+          const stageInputTreeId = (): string =>
+            cleanerWrote()
+              ? cleanerContinuation.current.outputTreeId
+              : acceptedTreeId;
           writingStage({
             worktreeDir: ctx.worktreeDir,
             stageId: POST_APPROVAL_WRITING_STAGE_ID,
@@ -7019,6 +7171,10 @@ export async function runSliceExecute(
               // archived names stay unique even when a previous round already
               // spent attempts on an earlier tree.
               const finalAttempt = attemptEntries.length + 1;
+              // The attempt's wall clock starts here, before the tree it grades
+              // is even committed: what the attempt cost the run is the time the
+              // run waited for it, gates and evaluator alike (#97 B-08).
+              const attemptStartedAt = Date.now();
               // The tree the evaluator grades has to be committed before it is
               // named: a restore the writing stage just performed, and the
               // previous attempt's artifacts, are both still loose here.
@@ -7048,6 +7204,61 @@ export async function runSliceExecute(
                 { materialize: false },
               );
               const currentFinalTreeId = finalCheckpoint.treeId;
+              /**
+               * The reuse decision, re-asked of *this* iteration's tree (#97
+               * B-04).
+               *
+               * A no-op on the first iteration — the tree is the one the outer
+               * decision already answered `evaluate` about. It matters after a
+               * revert: a restore refused for want of a cleaner round resets the
+               * cleaner's whole range back to the accepted commit, and the
+               * accepted tree is the tree the baseline authorizes. Spending an
+               * evaluator attempt on it would grade a tree that already has an
+               * approval on record.
+               */
+              const iterationReuse = decideFinalReuse({
+                finalTreeId: currentFinalTreeId,
+                baseline: persistedBaseline
+                  ? {
+                      treeId: persistedBaseline.treeId,
+                      ...(baselineAuthorizedTreeId
+                        ? { approvedTreeId: baselineAuthorizedTreeId }
+                        : {}),
+                    }
+                  : null,
+                invalidatedCandidateTreeIds,
+              });
+              if (iterationReuse.decision === "reuse") {
+                recordFinalEvaluation(
+                  config.repoRoot,
+                  finalRunSlug,
+                  slice.ghIssue,
+                  {
+                    decision: "reuse",
+                    finalTreeId: currentFinalTreeId,
+                    ...(citesBaseline
+                      ? {
+                          baselineTreeId: persistedBaseline!.treeId,
+                          baselineArtifactPath:
+                            persistedBaseline!.artifactPath,
+                        }
+                      : {}),
+                    attempts: [...attemptEntries],
+                    invalidatedCandidateTreeIds,
+                  },
+                );
+                logger.event({
+                  type: "final-evaluation-reuse",
+                  ghIssue: slice.ghIssue,
+                  sliceNumber: slice.number,
+                  round,
+                  finalTreeId: currentFinalTreeId,
+                  baselineTreeId: persistedBaseline!.treeId,
+                });
+                logger.phase(`${ctx.tag}: ${iterationReuse.reason}`);
+                passedFinalEvaluation = true;
+                break;
+              }
               // The evaluator's leading input (#96 B-04/B-06): baseline →
               // final, with the range attributed to the one post-approval
               // writing stage that produced it. A verdict reached without it
@@ -7064,13 +7275,48 @@ export async function runSliceExecute(
                       ),
                       baselineRef: persistedBaseline!.treeId,
                       finalRef: currentFinalTreeId,
-                      stages: [
-                        {
-                          stageId: POST_APPROVAL_WRITING_STAGE_ID,
-                          fromRef: persistedBaseline!.treeId,
-                          toRef: currentFinalTreeId,
-                        },
-                      ],
+                      /**
+                       * One span per stage that wrote, tiling the whole range
+                       * (#97 B-12). Before this slice the range was one span
+                       * attributed to the writing stage, which named the cleaner's
+                       * commits as somebody else's work — the exact
+                       * misattribution the evaluator then graded.
+                       *
+                       * The cleaner's span starts at the baseline rather than at
+                       * the accepted tree because the tiling has to be exact: the
+                       * QA-window artifacts committed between the two are inside
+                       * the cleaner's span, and no stage's span may be skipped.
+                       * The writing stage's span may legitimately be empty — the
+                       * production stage is a no-op — and an empty span is still
+                       * the truthful attribution of an empty change.
+                       *
+                       * Tiled from `cleanerWrote()` / `stageInputTreeId()`, the
+                       * same two readings `buildWritingStageIds` is given below,
+                       * so a restore re-dispatch moves the seam here and the
+                       * route together: attributing this attempt's bytes to the
+                       * cleaner while routing its restore at the stub is the
+                       * disagreement B-02 exists to make impossible (QA-01).
+                       */
+                      stages: cleanerWrote()
+                        ? [
+                            {
+                              stageId: CLEANER_STAGE_ID,
+                              fromRef: persistedBaseline!.treeId,
+                              toRef: stageInputTreeId(),
+                            },
+                            {
+                              stageId: POST_APPROVAL_WRITING_STAGE_ID,
+                              fromRef: stageInputTreeId(),
+                              toRef: currentFinalTreeId,
+                            },
+                          ]
+                        : [
+                            {
+                              stageId: POST_APPROVAL_WRITING_STAGE_ID,
+                              fromRef: persistedBaseline!.treeId,
+                              toRef: currentFinalTreeId,
+                            },
+                          ],
                     }).path,
                   ).replace(/\\/g, "/")
                 : "not generated — no approved baseline is cited for this slice";
@@ -7156,6 +7402,44 @@ export async function runSliceExecute(
                   return null;
                 }
               })();
+              /**
+               * One `quality-stage-attempt` per final-evaluation attempt (#97
+               * B-08), whatever the attempt decided. A reuse never reaches this
+               * loop and so emits none — which is the point: the absence of an
+               * event is what "the approval was reused" costs.
+               *
+               * `inputTreeId` is the tree the attempt was *measured against* —
+               * the approved baseline it cites — and `outputTreeId` is the tree
+               * it graded. The pair is what makes the event answer "what changed
+               * between the approval and the thing about to merge?", which is
+               * the tree-identity fact PRD D11 asks this family for; two copies
+               * of the graded tree answer nothing (QA-02). With no baseline
+               * cited, the accepted tree is the only "before" this run has.
+               */
+              const attemptInputTreeId = citesBaseline
+                ? persistedBaseline!.treeId
+                : acceptedTreeId;
+              const emitFinalAttemptEvent = (outcome: string): void => {
+                const endedAt = Date.now();
+                logger.recordQualityStageAttempt({
+                  ghIssue: slice.ghIssue,
+                  sliceNumber: slice.number,
+                  round,
+                  stage: "final-evaluation",
+                  stageRound: finalAttempt,
+                  attempt: finalAttempt,
+                  inputTreeId: attemptInputTreeId,
+                  outputTreeId: currentFinalTreeId,
+                  gateIds: [SCOPE_GATE_ID],
+                  outcome,
+                  startedAt: new Date(attemptStartedAt).toISOString(),
+                  endedAt: new Date(endedAt).toISOString(),
+                  durationMs: endedAt - attemptStartedAt,
+                  cacheReusedGateIds: (finalScopeEvidence?.results ?? [])
+                    .filter((result) => result.cacheReused === true)
+                    .map((result) => result.gateId),
+                });
+              };
               /**
                * One evaluator invocation, in a disposable worktree at the final
                * checkpoint (#96 B-06, PRD D8/D9). Only `final-review.json` and
@@ -7309,11 +7593,29 @@ export async function runSliceExecute(
                * review that failed is routed here and never reaches it.
                */
               if (reviewValidation.ok && reviewValidation.review.verdict === "FAIL") {
+                // The stages that actually wrote, in run order (#97 B-01/B-02):
+                // the list a `RESTORE` is resolved against, so the round goes to
+                // the stage that made the change rather than to whichever stage
+                // happens to be last in the code.
+                const writingStageIds = buildWritingStageIds({
+                  cleaner: cleanerContinuation.current.ran
+                    ? {
+                        ran: true,
+                        inputTreeId:
+                          cleanerContinuation.current.inputTreeId,
+                        outputTreeId:
+                          cleanerContinuation.current.outputTreeId,
+                      }
+                    : null,
+                  stageInputTreeId: stageInputTreeId(),
+                  finalTreeId: currentFinalTreeId,
+                });
                 const routes = reviewValidation.review.findings.map(
                   (finding) => ({
                     finding,
                     route: routeFinalReviewFinding(finding, {
                       candidateTreeId: currentFinalTreeId,
+                      writingStageIds,
                     }),
                   }),
                 );
@@ -7331,6 +7633,7 @@ export async function runSliceExecute(
                     outcome: "RETURNED_TO_GENERATOR",
                   });
                   persistAttempts();
+                  emitFinalAttemptEvent("RETURNED_TO_GENERATOR");
                   invalidateFinalEvaluationBaseline(
                     config.repoRoot,
                     finalRunSlug,
@@ -7362,9 +7665,9 @@ export async function runSliceExecute(
                   returnToGenerator = true;
                   break;
                 }
-                // Every finding restores, so the writing stage that wrote over
-                // the approved behavior gets it back — and the attempt is
-                // spent, because an evaluator read the tree.
+                // Every finding restores, so the stage that wrote over the
+                // approved behavior gets it back — and the attempt is spent,
+                // because an evaluator read the tree.
                 attemptEntries.push({
                   attempt: finalAttempt,
                   candidateTreeId: currentFinalTreeId,
@@ -7372,20 +7675,43 @@ export async function runSliceExecute(
                   outcome: "GRADED",
                 });
                 persistAttempts();
+                emitFinalAttemptEvent("GRADED");
                 finalBlockers = reviewValidation.review.findings.map(
                   (finding) => `${finding.id}: ${finding.summary}`,
                 );
+                const restoreFindings = routes.map(({ finding }) => finding);
+                // Every restore in this review goes to one stage: the routes
+                // agree on it, because they are all resolved against the same
+                // list. `routes[0]` reads that agreed target off the first route.
+                const restoreStageId =
+                  routes[0] && routes[0].route.target === "writing-stage"
+                    ? routes[0].route.stageId
+                    : POST_APPROVAL_WRITING_STAGE_ID;
                 logger.phase(
-                  `${ctx.tag}: final evaluation asked the post-approval ` +
-                    `writing stage to restore ` +
-                    `${reviewValidation.review.findings
+                  `${ctx.tag}: final evaluation asked ${restoreStageId} to ` +
+                    `restore ${restoreFindings
                       .map((finding) => finding.id)
                       .join(", ")}`,
                   "error",
                 );
+                if (restoreStageId === CLEANER_STAGE_ID) {
+                  const restoredCleaner = await cleanerContinuation.advance({
+                    kind: "RESTORE",
+                    findings: restoreFindings,
+                    discardArtifacts: [finalReviewPath, finalReportPath],
+                  });
+                  if (restoredCleaner.kind === "RETURN_TO_GENERATOR") {
+                    returnToGenerator = true;
+                    break;
+                  }
+                  if (restoredCleaner.kind === "STUCK") {
+                    return restoredCleaner.terminal;
+                  }
+                  continue;
+                }
                 writingStage({
                   worktreeDir: ctx.worktreeDir,
-                  stageId: POST_APPROVAL_WRITING_STAGE_ID,
+                  stageId: restoreStageId,
                   repair: "RESTORE",
                 });
                 continue;
@@ -7420,6 +7746,7 @@ export async function runSliceExecute(
                 outcome: "GRADED",
               });
               persistAttempts();
+              emitFinalAttemptEvent(finalVerdict.verdict);
               finalBlockers = dispatchFailure
                 ? [
                     ...finalVerdict.blockers,
@@ -7916,6 +8243,22 @@ export async function runPipeline(
       recordPrompts: config.recordPrompts ?? false,
     },
   );
+  // The run's gate policy, snapshotted once, here — before any agent has run,
+  // and before the wave loop exists to ask about it. Every gate whose rulebook
+  // it is reads it from this one binding, so no gate can be handed the policy
+  // the candidate it is judging now presents (#251), and a mid-run edit to the
+  // base checkout cannot move the rules either.
+  //
+  // It is read immediately after the `run-started` line rather than beside the
+  // cheap-gate catalog below so that the quality-stage record can be the very
+  // next event (#274): a malformed policy still refuses the launch after the
+  // first `run.log` line, exactly as it did when this sat lower down.
+  const runGatePolicy = loadGatePolicy(repoRoot);
+  // Whether the cleaner stage is on for this run, recorded once per run — not
+  // per slice — and recorded in both states, because a run that says nothing
+  // is not evidence that the stage was off (#274, PRD D10 item 1). No run.log
+  // line: `event` rather than `phase`, so the human log stays byte-identical.
+  logger.recordQualityStagePolicy(runGatePolicy);
   // --- The cancellation record, written when the signal fires (#114).
   //
   // The wave loop's cancellation sweep further down only runs once
@@ -8104,13 +8447,6 @@ export async function runPipeline(
     resolveCheapGateCatalog(repoRoot),
     config.testCommand,
   );
-  // The run's gate policy, snapshotted here — beside the cheap-gate catalog,
-  // which already resolves this same policy once per run — and before any agent
-  // has run. Every gate whose rulebook it is reads it from the snapshot, so no
-  // gate can be handed the policy the candidate it is judging now presents
-  // (#251), and a mid-run edit to the base checkout cannot move the rules
-  // either.
-  const runGatePolicy = loadGatePolicy(repoRoot);
   let scope: ResolvedRunScope | undefined;
   let baseBranch: string | undefined;
   let draftPrUrl: string | null = null;

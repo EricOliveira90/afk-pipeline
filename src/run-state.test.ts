@@ -24,8 +24,13 @@ import {
   saveSliceStateIfUnchanged,
   approvedBaselineFor,
   recordApprovedBaseline,
+  cleanerRoundsSpent,
+  recordQualityStageOutcome,
+  recordQualityStageRound,
   RUN_STATE_VERSION,
+  type RunState,
 } from "./run-state.js";
+import { cleanerRoundsRemaining, MAX_CLEANER_ROUNDS } from "./bounds.js";
 
 const tempDirs: string[] = [];
 const childProcesses: ChildProcess[] = [];
@@ -144,7 +149,7 @@ describe("adaptLoadedState", () => {
       },
     };
     const adapted = adaptLoadedState(v0, "demo");
-    expect(adapted.version).toBe(5);
+    expect(adapted.version).toBe(RUN_STATE_VERSION);
     expect(adapted.slices["100"]!.phase).toBe("PASS");
     expect(adapted.slices["100"]!.mergedToFeature).toBe(true);
     expect(adapted.slices["200"]!.phase).toBe("STUCK");
@@ -161,7 +166,7 @@ describe("adaptLoadedState", () => {
       },
     };
     const adapted = adaptLoadedState(v1, "demo");
-    expect(adapted.version).toBe(5);
+    expect(adapted.version).toBe(RUN_STATE_VERSION);
     expect(adapted.slices["100"]!.phase).toBe("PASS");
   });
 
@@ -352,7 +357,7 @@ describe("loadRunState + saveSliceState end-to-end", () => {
     );
 
     const loaded = loadRunState(repo, slug);
-    expect(loaded.version).toBe(5);
+    expect(loaded.version).toBe(RUN_STATE_VERSION);
     expect(loaded.slices["100"]!.phase).toBe("PASS");
     expect(isSliceComplete(loaded, "100")).toBe(true);
     expect(isSliceComplete(loaded, "200")).toBe(false);
@@ -364,7 +369,7 @@ describe("loadRunState + saveSliceState end-to-end", () => {
     });
 
     const onDisk = JSON.parse(readFileSync(file, "utf-8"));
-    expect(onDisk.version).toBe(5);
+    expect(onDisk.version).toBe(RUN_STATE_VERSION);
     expect(onDisk.slices["100"].phase).toBe("PASS");
     expect(onDisk.slices["300"].phase).toBe("ERROR");
     expect(onDisk.slices["300"].error).toBe("boom");
@@ -868,8 +873,10 @@ describe("RunState.appliedWaivers", () => {
     reason: "the module it covered was deleted with it",
   };
 
-  it("[behavior:B-13] upgrades every earlier version to 5 with the field absent", () => {
-    expect(RUN_STATE_VERSION).toBe(5);
+  it("[behavior:B-13] upgrades every earlier version to the current one with the field absent", () => {
+    // The literal the pin used to carry lives in #87's B-14 block below: the
+    // shipped version is that slice's fact, and B-13's is only that every
+    // earlier file arrives at it carrying no waivers.
     for (const version of [undefined, 1, 2, 3, 4]) {
       const adapted = adaptLoadedState(
         {
@@ -883,7 +890,7 @@ describe("RunState.appliedWaivers", () => {
         },
         "demo",
       );
-      expect(adapted.version).toBe(5);
+      expect(adapted.version).toBe(RUN_STATE_VERSION);
       // Absent, not an empty record: "nobody waived anything" and "this file
       // predates waivers" are the same fact to every reader.
       expect(adapted.appliedWaivers).toBeUndefined();
@@ -905,10 +912,12 @@ describe("RunState.appliedWaivers", () => {
       appliedWaivers: { "100": [WAIVER] },
     });
     const file = join(repo, ".afk", "state", "demo.json");
-    expect(JSON.parse(readFileSync(file, "utf-8")).version).toBe(5);
+    expect(JSON.parse(readFileSync(file, "utf-8")).version).toBe(
+      RUN_STATE_VERSION,
+    );
 
     const loaded = loadRunState(repo, "demo");
-    expect(loaded.version).toBe(5);
+    expect(loaded.version).toBe(RUN_STATE_VERSION);
     expect(loaded.appliedWaivers).toEqual({ "100": [WAIVER] });
 
     // And it survives an unrelated focused write, like `resume` does.
@@ -960,6 +969,203 @@ describe("RunState.appliedWaivers", () => {
         "demo",
       ).appliedWaivers,
     ).toBeUndefined();
+  });
+});
+
+/**
+ * v6 is purely additive: a per-issue list of post-approval quality-stage runs
+ * (#87 B-14). A list rather than one record per issue, because a
+ * `BASELINE_IS_WRONG` escalation returns the slice to the generator and the
+ * next approval appends a fresh entry — and tree ids are content-addressed, so
+ * keying by tree would charge the escalating round to the re-approved
+ * candidate's budget whenever the two trees are identical (B-13).
+ */
+describe("[behavior:#87:B-14] persisted quality stages", () => {
+  const REPO_ISSUE = "87";
+
+  it("[behavior:#87:B-14] pins the written schema at 6 and keeps 3-5 assignable", () => {
+    // 5 -> 6 for `qualityStages`, once. `RunState.version` still admits 3, 4
+    // and 5 so a caller or fixture holding an older record keeps compiling,
+    // and nothing reads one of those back out of a loaded state.
+    expect(RUN_STATE_VERSION).toBe(6);
+    const older: RunState["version"][] = [3, 4, 5, 6];
+    expect(older).toContain(RUN_STATE_VERSION);
+  });
+
+  it("[behavior:#87:B-14] reads a version-5 file as \"no stage ran\" and writes nothing", () => {
+    const repo = makeRepo();
+    mkdirSync(join(repo, ".afk", "state"), { recursive: true });
+    const statePath = join(repo, ".afk", "state", "demo.json");
+    const onDisk = `${JSON.stringify(
+      {
+        version: 5,
+        prdSlug: "demo",
+        featureBranch: "feat/demo",
+        slices: { "87": { phase: "PASS", branch: "afk/demo-01" } },
+      },
+      null,
+      2,
+    )}\n`;
+    writeFileSync(statePath, onDisk);
+
+    const loaded = loadRunState(repo, "demo");
+
+    expect(loaded.version).toBe(RUN_STATE_VERSION);
+    expect(loaded.qualityStages).toBeUndefined();
+    expect(cleanerRoundsSpent(undefined)).toBe(0);
+    expect(cleanerRoundsRemaining({ spent: 0 })).toBe(MAX_CLEANER_ROUNDS);
+    // A read is a read: adapting in memory must not rewrite the file, or a
+    // `status` on a run someone else owns would silently upgrade its schema.
+    expect(readFileSync(statePath, "utf8")).toBe(onDisk);
+  });
+
+  it("[behavior:#87:B-14] persists each round as it happens, with its trees, gates and outcome", () => {
+    const repo = makeRepo();
+    saveRunState(repo, {
+      version: RUN_STATE_VERSION,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      slices: {},
+    });
+
+    recordQualityStageRound(repo, "demo", REPO_ISSUE, {
+      round: 1,
+      attempt: 2,
+      inputTreeId: "a".repeat(40),
+      outputTreeId: "b".repeat(40),
+      gateIds: ["clean:format", "scope"],
+      outcome: "REVERTED",
+    });
+    // A round that produced no gated checkpoint records no `outputTreeId` —
+    // a dead dispatch, or a malformed escalation discarded before any gate ran.
+    recordQualityStageRound(repo, "demo", REPO_ISSUE, {
+      round: 2,
+      attempt: 2,
+      inputTreeId: "a".repeat(40),
+      gateIds: [],
+      outcome: "ESCALATION_MALFORMED",
+    });
+    recordQualityStageOutcome(repo, "demo", REPO_ISSUE, "EXHAUSTED");
+
+    const stages = loadRunState(repo, "demo").qualityStages?.[REPO_ISSUE];
+    expect(stages).toHaveLength(1);
+    expect(stages![0]!.stage).toBe("cleaner");
+    expect(stages![0]!.enabled).toBe(true);
+    expect(stages![0]!.outcome).toBe("EXHAUSTED");
+    expect(stages![0]!.rounds).toEqual([
+      {
+        round: 1,
+        attempt: 2,
+        inputTreeId: "a".repeat(40),
+        outputTreeId: "b".repeat(40),
+        gateIds: ["clean:format", "scope"],
+        outcome: "REVERTED",
+      },
+      {
+        round: 2,
+        attempt: 2,
+        inputTreeId: "a".repeat(40),
+        gateIds: [],
+        outcome: "ESCALATION_MALFORMED",
+      },
+    ]);
+  });
+
+  it("[behavior:#87:B-14] leaves a resumed run zero rounds after three recorded ones", () => {
+    const repo = makeRepo();
+    saveRunState(repo, {
+      version: RUN_STATE_VERSION,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      slices: {},
+    });
+
+    for (const round of [1, 2, 3]) {
+      recordQualityStageRound(repo, "demo", REPO_ISSUE, {
+        round,
+        attempt: 1,
+        inputTreeId: "a".repeat(40),
+        outputTreeId: "b".repeat(40),
+        gateIds: ["clean:format"],
+        outcome: "REVERTED",
+      });
+    }
+
+    // The whole point of persisting per round: a resume reads the rounds the
+    // killed run actually spent, so it cannot buy a fourth.
+    const stages = loadRunState(repo, "demo").qualityStages?.[REPO_ISSUE];
+    const spent = cleanerRoundsSpent(stages![0]);
+    expect(spent).toBe(MAX_CLEANER_ROUNDS);
+    expect(cleanerRoundsRemaining({ spent })).toBe(0);
+  });
+
+  it("[behavior:#87:B-14] appends a fresh entry after an escalation, so the re-approval starts at zero", () => {
+    const repo = makeRepo();
+    saveRunState(repo, {
+      version: RUN_STATE_VERSION,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      slices: {},
+    });
+    const escalatedTree = "a".repeat(40);
+
+    recordQualityStageRound(repo, "demo", REPO_ISSUE, {
+      round: 1,
+      attempt: 1,
+      inputTreeId: escalatedTree,
+      gateIds: [],
+      outcome: "ESCALATED",
+    });
+    recordQualityStageOutcome(repo, "demo", REPO_ISSUE, "ESCALATED");
+    // The generator answered without changing tracked content, so the
+    // re-approved tree id is *identical*. A record keyed by tree would hand the
+    // new stage a spent budget; an appended entry does not.
+    recordQualityStageRound(
+      repo,
+      "demo",
+      REPO_ISSUE,
+      {
+        round: 1,
+        attempt: 2,
+        inputTreeId: escalatedTree,
+        outputTreeId: escalatedTree,
+        gateIds: ["clean:format"],
+        outcome: "PASS",
+      },
+      { startNewEntry: true },
+    );
+    recordQualityStageOutcome(repo, "demo", REPO_ISSUE, "PASS");
+
+    const stages = loadRunState(repo, "demo").qualityStages?.[REPO_ISSUE];
+    expect(stages).toHaveLength(2);
+    expect(stages!.map((entry) => entry.outcome)).toEqual(["ESCALATED", "PASS"]);
+    expect(cleanerRoundsSpent(stages![1])).toBe(1);
+    expect(cleanerRoundsRemaining({ spent: cleanerRoundsSpent(stages![1]) })).toBe(
+      MAX_CLEANER_ROUNDS - 1,
+    );
+  });
+
+  it("[behavior:#87:B-14] records a DISABLED stage without pretending a round ran", () => {
+    const repo = makeRepo();
+    saveRunState(repo, {
+      version: RUN_STATE_VERSION,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      slices: {},
+    });
+
+    // This is the recorder's own contract, not the stage's: P-01 requires
+    // `runCleanerStage` to write *nothing* for a clean-less policy, so the
+    // orchestrator never reaches this branch. It exists because the persisted
+    // outcome union admits `DISABLED`, and a union member no writer can produce
+    // is the kind of thing a later stage silently starts relying on.
+    recordQualityStageOutcome(repo, "demo", REPO_ISSUE, "DISABLED");
+
+    const stages = loadRunState(repo, "demo").qualityStages?.[REPO_ISSUE];
+    expect(stages).toEqual([
+      { stage: "cleaner", enabled: false, rounds: [], outcome: "DISABLED" },
+    ]);
+    expect(cleanerRoundsSpent(stages![0])).toBe(0);
   });
 });
 

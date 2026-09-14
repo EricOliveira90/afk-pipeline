@@ -8,14 +8,33 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readAdvisoryGateOutcomes } from "./logger.js";
+import { fileURLToPath } from "node:url";
+import {
+  readAdvisoryGateOutcomes,
+  readQualityStageOutcomes,
+} from "./logger.js";
 import {
   RunJournal as Logger,
   type TerminalOutcome,
 } from "./run-journal.js";
+import {
+  EVENTS_SCHEMA_VERSION,
+  type RunEventPayload,
+} from "./run-events.js";
+import {
+  MAX_CLEANER_ROUNDS,
+  MAX_FINAL_EVALUATION_ATTEMPTS,
+} from "./bounds.js";
+import { parseGatePolicy, type GatePolicy } from "./gate-policy.js";
 import { lifecycle } from "./slice-lifecycle.js";
 
 const tempDirs: string[] = [];
+type QualityStageAttemptInput = Parameters<
+  Logger["recordQualityStageAttempt"]
+>[0];
+type JournalTestInput =
+  | RunEventPayload
+  | { qualityStageAttempt: QualityStageAttemptInput };
 
 afterEach(() => {
   while (tempDirs.length > 0) {
@@ -32,6 +51,34 @@ function makeRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), "afk-logger-"));
   tempDirs.push(dir);
   return dir;
+}
+
+function recordedPayloads(log: Logger): Array<Record<string, unknown>> {
+  return readFileSync(join(log.runDir, "events.jsonl"), "utf-8")
+    .trim()
+    .split("\n")
+    .slice(1)
+    .map((line) => {
+      const { ts: _ts, ...payload } = JSON.parse(line) as Record<
+        string,
+        unknown
+      >;
+      return payload;
+    });
+}
+
+function recordTestInput(log: Logger, input: JournalTestInput) {
+  if ("qualityStageAttempt" in input) {
+    log.recordQualityStageAttempt(input.qualityStageAttempt);
+  } else {
+    log.event(input);
+  }
+}
+
+function qualityStageAttempt(
+  input: QualityStageAttemptInput,
+): JournalTestInput {
+  return { qualityStageAttempt: input };
 }
 
 const PROGRESS = { genRounds: 1, evalRounds: 2 };
@@ -1071,5 +1118,496 @@ describe("Logger events tee (events.jsonl)", () => {
 
     const lines = eventLines(log.runDir);
     expect(lines).toHaveLength(1); // header only
+  });
+});
+
+/**
+ * The quality-stage record (#274): one additive event type, one pure payload
+ * builder, and one `run-summary.md` section rendered from that event alone.
+ *
+ * The builder is proved here rather than in a spawned run — the first rung of
+ * AGENTS.md's ladder. The `enabled: true` branch needs a policy with a `clean`
+ * member, and the only shipped one is `templates/quality-policy/afk.config.json`;
+ * feeding the parsed template to a unit test costs milliseconds, whereas
+ * proving that branch in a real stream would mean giving a spawned fixture
+ * repo a `gatePolicy.clean` — turning the cleaner on inside a scenario that
+ * exists to assert something else — or enabling it for this repository, which
+ * the PRD puts out of scope. The disabled branch is corroborated in a real
+ * stream by the orchestrator-runs and wave `[behavior:#274:B-06]` assertions.
+ */
+describe("[behavior:#274:B-05] the quality-stage-policy event", () => {
+  const TEMPLATE_DIR = fileURLToPath(
+    new URL("../templates/quality-policy", import.meta.url),
+  );
+
+  /** The shipped starter's parsed policy — the one policy with a `clean`. */
+  function templatePolicy(): GatePolicy {
+    const config = JSON.parse(
+      readFileSync(join(TEMPLATE_DIR, "afk.config.json"), "utf-8"),
+    ) as { gatePolicy: unknown };
+    return parseGatePolicy(config.gatePolicy);
+  }
+
+  it("[behavior:#274:B-05] keeps the events schema at version 1, because the member is additive", () => {
+    expect(EVENTS_SCHEMA_VERSION).toBe(1);
+  });
+
+  it("[behavior:#274:B-05] admits the payload as a typed literal", () => {
+    const log = new Logger(makeRepo(), "stage-event-literal");
+    log.recordQualityStagePolicy(templatePolicy());
+    expect(recordedPayloads(log)[0]).toMatchObject({
+      type: "quality-stage-policy",
+      stage: "cleaner",
+      enabled: true,
+      source: "afk.config.json",
+    });
+  });
+
+  it("[behavior:#274:B-07] reads enabled and the gate ids off the shipped template's policy", () => {
+    const log = new Logger(makeRepo(), "stage-policy-enabled");
+    log.recordQualityStagePolicy(templatePolicy());
+    expect(recordedPayloads(log)[0]).toEqual({
+      type: "quality-stage-policy",
+      stage: "cleaner",
+      enabled: true,
+      // Declaration order, not sorted: the record must agree with the file it
+      // was read from, and that is the order the cleaner would run them in.
+      gateIds: [
+        "clean:format",
+        "clean:lint",
+        "clean:typecheck",
+        "clean:coverage-changed",
+        "clean:complexity",
+        "clean:duplication",
+        "clean:architecture",
+      ],
+      source: "afk.config.json",
+    });
+  });
+
+  it("[behavior:#274:B-07] reads a clean-less policy and null alike as disabled", () => {
+    const { clean: _clean, ...cleanLess } = templatePolicy();
+    const disabled = {
+      type: "quality-stage-policy",
+      stage: "cleaner",
+      enabled: false,
+      gateIds: [],
+      source: "afk.config.json",
+    };
+    // The member's presence is the whole switch, so "no policy at all" and "a
+    // policy that declares no clean stage" are one answer, not two.
+    const cleanLessLog = new Logger(makeRepo(), "stage-policy-clean-less");
+    cleanLessLog.recordQualityStagePolicy(cleanLess);
+    expect(recordedPayloads(cleanLessLog)[0]).toEqual(disabled);
+    const nullLog = new Logger(makeRepo(), "stage-policy-null");
+    nullLog.recordQualityStagePolicy(null);
+    expect(recordedPayloads(nullLog)[0]).toEqual(disabled);
+  });
+
+  it("[behavior:#274:B-07] never reaches past the snapshot it is handed", () => {
+    // Pure: no filesystem, no repo root, no per-slice context (#251). Proved
+    // by a hand-built policy the parser never saw producing exactly its ids.
+    const handBuilt = {
+      version: 1 as const,
+      protectedPaths: { gatePolicyPaths: [], testGlobs: [] },
+      riskClasses: [],
+      clean: {
+        gates: [
+          {
+            id: "only:gate",
+            command: "pnpm",
+            args: [],
+            required: true,
+            expectedCostMs: 1,
+          },
+        ],
+        additionalWriteScope: [],
+        suppressionDetectors: [],
+      },
+    };
+    const log = new Logger(makeRepo(), "stage-policy-snapshot");
+    log.recordQualityStagePolicy(handBuilt);
+    expect(recordedPayloads(log)[0]?.gateIds).toEqual(["only:gate"]);
+  });
+});
+
+describe("[behavior:#274:B-08] run-summary.md's Quality Stages section", () => {
+  function summaryWith(
+    slug: string,
+    event?: Extract<RunEventPayload, { type: "quality-stage-policy" }>,
+  ): string {
+    const log = new Logger(makeRepo(), slug);
+    log.restoreCompleted(id("274", "Quality policy starter", "afk/274"));
+    if (event) log.event(event);
+    return log.writeSummary();
+  }
+
+  it("[behavior:#274:B-08] names the stage, its enabled state and every gate id", () => {
+    const md = summaryWith("stage-enabled", {
+      type: "quality-stage-policy",
+      stage: "cleaner",
+      enabled: true,
+      gateIds: ["clean:format", "clean:lint"],
+      source: "afk.config.json",
+    });
+
+    expect(md).toContain("## Quality Stages");
+    const section = md.slice(md.indexOf("## Quality Stages"));
+    expect(section).toContain("`cleaner`: enabled");
+    expect(section).toContain("gates `clean:format`, `clean:lint`");
+    expect(section).toContain("(source: afk.config.json)");
+  });
+
+  it("[behavior:#274:B-08] [behavior:#97:P-07] renders the line in the disabled case too", () => {
+    const md = summaryWith("stage-disabled", {
+      type: "quality-stage-policy",
+      stage: "cleaner",
+      enabled: false,
+      gateIds: [],
+      source: "afk.config.json",
+    });
+
+    // A run that said nothing here could not be read as evidence of either
+    // state — which is the whole reason this section is unconditional.
+    expect(md).toContain("## Quality Stages");
+    const section = md.slice(md.indexOf("## Quality Stages"));
+    expect(section).toContain("`cleaner`: disabled");
+    expect(section).toContain("no gates declared");
+    expect(section).not.toContain("enabled");
+  });
+
+  it("[behavior:#274:B-08] [behavior:#97:P-06] renders no section for a stream without the event", () => {
+    // A historical stream carries none, so its summary stays byte-identical.
+    const md = summaryWith("stage-absent");
+    expect(md).not.toContain("## Quality Stages");
+    expect(md).not.toContain("cleaner");
+    // And every other section still renders: the totals row and the trailing
+    // lines are untouched (P-04).
+    expect(md).toContain("| **Run totals** |");
+    expect(md).toContain("Pre-ship sanity gate: N/A");
+  });
+});
+
+/**
+ * The ROI evidence family (#97 B-06/B-09/B-10).
+ *
+ * Unit tests over a hand-written stream, for the reason the #274 block above
+ * gives: what is being asserted is a derivation from events, and a spawned
+ * pipeline would prove the derivation only incidentally while costing seconds on
+ * every run. The stream really is written and really is read back through
+ * `readRunEvents`, so the serialization is exercised rather than mocked.
+ */
+describe("[behavior:#97:B-06] the quality-stage-attempt event", () => {
+  const ATTEMPT = {
+    ghIssue: "97",
+    sliceNumber: "03",
+    round: 1,
+    stage: "cleaner" as const,
+    stageRound: 2,
+    attempt: 2,
+    inputTreeId: "a".repeat(40),
+    outputTreeId: "b".repeat(40),
+    gateIds: ["clean:format", "scope"],
+    outcome: "PASS",
+    startedAt: "2026-09-13T00:00:00.000Z",
+    endedAt: "2026-09-13T00:00:04.000Z",
+    durationMs: 4_000,
+    cacheReusedGateIds: ["scope"],
+  };
+
+  it("[behavior:#97:B-06] keeps the events schema at version 1, because the member is additive", () => {
+    expect(EVENTS_SCHEMA_VERSION).toBe(1);
+  });
+
+  it("[behavior:#97:B-06] builds exactly PRD D11's fields and nothing else", () => {
+    const log = new Logger(makeRepo(), "attempt-fields");
+    log.recordQualityStageAttempt(ATTEMPT);
+    expect(recordedPayloads(log)[0]).toEqual({
+      type: "quality-stage-attempt",
+      ...ATTEMPT,
+    });
+  });
+
+  it("[behavior:#97:B-06] omits outputTreeId when no tree of the attempt survived", () => {
+    const { outputTreeId: _dropped, ...withoutOutput } = ATTEMPT;
+    const log = new Logger(makeRepo(), "attempt-without-output");
+    log.recordQualityStageAttempt(withoutOutput);
+    const event = recordedPayloads(log)[0]!;
+    // Omitted, not `undefined`: a serialized line carries only what the attempt
+    // actually knows, and `"outputTreeId": null` would be a claim about a tree.
+    expect("outputTreeId" in event).toBe(false);
+  });
+
+  it("[behavior:#97:B-06] copies the id arrays, so a later mutation cannot rewrite the record", () => {
+    const gateIds = ["clean:format"];
+    const cacheReusedGateIds = ["scope"];
+    const log = new Logger(makeRepo(), "attempt-defensive-copies");
+    log.recordQualityStageAttempt({
+      ...ATTEMPT,
+      gateIds,
+      cacheReusedGateIds,
+    });
+    gateIds.push("clean:lint");
+    cacheReusedGateIds.push("clean:lint");
+    const event = recordedPayloads(log)[0]!;
+    expect(event.gateIds).toEqual(["clean:format"]);
+    expect(event.cacheReusedGateIds).toEqual(["scope"]);
+  });
+
+  it("[behavior:#97:B-06] tees through the journal as a typed literal", () => {
+    const attempt: QualityStageAttemptInput = ATTEMPT;
+    const log = new Logger(makeRepo(), "attempt-event-literal");
+    log.recordQualityStageAttempt(attempt);
+    expect(recordedPayloads(log)[0]).toMatchObject({
+      type: "quality-stage-attempt",
+      ...ATTEMPT,
+    });
+  });
+
+  it("[behavior:#97:B-06] records synchronously in call order", () => {
+    const log = new Logger(makeRepo(), "attempt-event-order");
+    log.event({
+      type: "run-started",
+      provider: "stub",
+      runSlug: "attempt-event-order",
+    });
+    log.recordQualityStageAttempt(ATTEMPT);
+    log.recordQualityStagePolicy(null);
+
+    expect(recordedPayloads(log).map((event) => event.type)).toEqual([
+      "run-started",
+      "quality-stage-attempt",
+      "quality-stage-policy",
+    ]);
+  });
+});
+
+describe("[behavior:#97:B-09] readQualityStageOutcomes", () => {
+  /** A run directory holding exactly the events a test names. */
+  function streamWith(
+    slug: string,
+    events: readonly JournalTestInput[],
+  ): Logger {
+    const log = new Logger(makeRepo(), slug);
+    for (const event of events) recordTestInput(log, event);
+    return log;
+  }
+
+  const attempt = (
+    overrides: Partial<QualityStageAttemptInput>,
+  ): JournalTestInput =>
+    qualityStageAttempt({
+      ghIssue: "97",
+      sliceNumber: "03",
+      round: 1,
+      stage: "cleaner",
+      stageRound: 1,
+      attempt: 1,
+      inputTreeId: "a".repeat(40),
+      outputTreeId: "b".repeat(40),
+      gateIds: ["clean:format"],
+      outcome: "FAIL",
+      startedAt: "2026-09-13T00:00:00.000Z",
+      endedAt: "2026-09-13T00:00:01.000Z",
+      durationMs: 1_000,
+      cacheReusedGateIds: [],
+      ...overrides,
+    });
+
+  it("[behavior:#97:B-09] returns one entry per (ghIssue, stage) with the rounds, elapsed and gate ids pooled", () => {
+    const log = streamWith("outcomes-pooled", [
+      {
+        type: "quality-stage-policy",
+        stage: "cleaner",
+        enabled: true,
+        gateIds: ["clean:format"],
+        source: "afk.config.json",
+      },
+      attempt({ stageRound: 1, durationMs: 1_000 }),
+      attempt({
+        stageRound: 2,
+        durationMs: 2_500,
+        outcome: "PASS",
+        gateIds: ["clean:format", "scope"],
+        cacheReusedGateIds: ["scope"],
+      }),
+      attempt({
+        stage: "final-evaluation",
+        stageRound: 1,
+        attempt: 1,
+        gateIds: ["scope"],
+        outcome: "PASS",
+        durationMs: 700,
+      }),
+    ]);
+
+    const outcomes = readQualityStageOutcomes(log.runDir);
+    expect(outcomes.map((outcome) => outcome.stage)).toEqual([
+      "cleaner",
+      "final-evaluation",
+    ]);
+    expect(outcomes[0]).toMatchObject({
+      ghIssue: "97",
+      sliceNumber: "03",
+      stage: "cleaner",
+      enabled: true,
+      // The last attempt's outcome is the stage's: a stage that ended PASS
+      // after one FAIL passed.
+      outcome: "PASS",
+      roundsUsed: 2,
+      roundLimit: MAX_CLEANER_ROUNDS,
+      elapsedMs: 3_500,
+      gateIds: ["clean:format", "scope"],
+      cacheReusedGateIds: ["scope"],
+      // No `final-evaluation-reuse` on this stream, so the tree was graded.
+      finalDecision: "evaluate",
+    });
+    expect(outcomes[1]).toMatchObject({
+      stage: "final-evaluation",
+      roundLimit: MAX_FINAL_EVALUATION_ATTEMPTS,
+      elapsedMs: 700,
+    });
+  });
+
+  it("[behavior:#97:B-09] sums model ms from the stage-duration events already on the stream, matched on issue and agent", () => {
+    const log = streamWith("outcomes-model-ms", [
+      attempt({ stage: "cleaner", stageRound: 1 }),
+      attempt({ stage: "final-evaluation", stageRound: 1, gateIds: ["scope"] }),
+      { type: "stage-duration", ghIssue: "97", agent: "cleaner", durationMs: 900, history: null },
+      { type: "stage-duration", ghIssue: "97", agent: "cleaner", durationMs: 100, history: null },
+      {
+        type: "stage-duration",
+        ghIssue: "97",
+        agent: "evaluator-final",
+        durationMs: 400,
+        history: null,
+      },
+      // Another slice's cleaner, and a role that is neither stage: neither is
+      // this slice's model time.
+      { type: "stage-duration", ghIssue: "98", agent: "cleaner", durationMs: 5_000, history: null },
+      { type: "stage-duration", ghIssue: "97", agent: "generator", durationMs: 5_000, history: null },
+    ]);
+
+    const outcomes = readQualityStageOutcomes(log.runDir);
+    expect(outcomes.find((o) => o.stage === "cleaner")?.modelMs).toBe(1_000);
+    expect(outcomes.find((o) => o.stage === "final-evaluation")?.modelMs).toBe(
+      400,
+    );
+  });
+
+  it("[behavior:#97:B-09] reports model ms 0 when no stage-duration sample exists", () => {
+    // A stage whose `phase-ended` never arrived contributes no sample, and "no
+    // evidence" is `0` rather than a guess.
+    const log = streamWith("outcomes-no-samples", [attempt({})]);
+    expect(readQualityStageOutcomes(log.runDir)[0]?.modelMs).toBe(0);
+  });
+
+  it("[behavior:#97:B-09] counts a released round 0 as an attempt that spent no round", () => {
+    const tree = "c".repeat(40);
+    const log = streamWith("outcomes-round-zero", [
+      attempt({
+        stageRound: 0,
+        attempt: 0,
+        inputTreeId: tree,
+        outputTreeId: tree,
+        outcome: "PASS",
+        durationMs: 120,
+      }),
+    ]);
+    expect(readQualityStageOutcomes(log.runDir)[0]).toMatchObject({
+      roundsUsed: 0,
+      elapsedMs: 120,
+      outcome: "PASS",
+    });
+  });
+
+  it("[behavior:#97:B-09] reads a reuse off the stream as the final decision", () => {
+    const log = streamWith("outcomes-reuse", [
+      attempt({ outcome: "PASS" }),
+      {
+        type: "final-evaluation-reuse",
+        ghIssue: "97",
+        sliceNumber: "03",
+        round: 1,
+        finalTreeId: "b".repeat(40),
+        baselineTreeId: "b".repeat(40),
+      },
+    ]);
+    expect(readQualityStageOutcomes(log.runDir)[0]?.finalDecision).toBe("reuse");
+  });
+
+  it("[behavior:#97:B-09] returns [] for a run directory with no events and for one with no attempt", () => {
+    // An absent block, never a throw: a PR body must not depend on a log file.
+    expect(readQualityStageOutcomes(join(makeRepo(), "nope"))).toEqual([]);
+    const log = streamWith("outcomes-empty", [
+      {
+        type: "quality-stage-policy",
+        stage: "cleaner",
+        enabled: false,
+        gateIds: [],
+        source: "afk.config.json",
+      },
+    ]);
+    expect(readQualityStageOutcomes(log.runDir)).toEqual([]);
+  });
+});
+
+describe("[behavior:#97:B-10] run-summary.md's per-slice quality-stage rows", () => {
+  function summaryWith(
+    slug: string,
+    events: readonly JournalTestInput[],
+  ): string {
+    const log = new Logger(makeRepo(), slug);
+    log.restoreCompleted(id("97", "Changed trees face final evaluation", "afk/97"));
+    for (const event of events) recordTestInput(log, event);
+    return log.writeSummary();
+  }
+
+  const POLICY: RunEventPayload = {
+    type: "quality-stage-policy",
+    stage: "cleaner",
+    enabled: true,
+    gateIds: ["clean:format"],
+    source: "afk.config.json",
+  };
+
+  it("[behavior:#97:B-10] renders one row per entry beneath #274's header lines", () => {
+    const md = summaryWith("rows-rendered", [
+      POLICY,
+      qualityStageAttempt({
+        ghIssue: "97",
+        sliceNumber: "03",
+        round: 1,
+        stage: "cleaner",
+        stageRound: 1,
+        attempt: 1,
+        inputTreeId: "a".repeat(40),
+        outputTreeId: "b".repeat(40),
+        gateIds: ["clean:format", "scope"],
+        outcome: "PASS",
+        startedAt: "2026-09-13T00:00:00.000Z",
+        endedAt: "2026-09-13T00:00:02.000Z",
+        durationMs: 2_000,
+        cacheReusedGateIds: ["scope"],
+      }),
+      { type: "stage-duration", ghIssue: "97", agent: "cleaner", durationMs: 750, history: null },
+    ]);
+
+    const section = md.slice(md.indexOf("## Quality Stages"));
+    // #274's header line still comes first, and the rows sit beneath it (P-07).
+    expect(section.indexOf("`cleaner`: enabled")).toBeLessThan(
+      section.indexOf("| Slice | Stage |"),
+    );
+    expect(section).toContain(
+      `| #97 | cleaner | yes | PASS | 1/${MAX_CLEANER_ROUNDS} | 2000ms | ` +
+        `750ms | clean:format, scope | scope | evaluate |`,
+    );
+  });
+
+  it("[behavior:#97:B-10] renders the header lines and no table for a stream with no attempt", () => {
+    // Every #274-era summary stays byte-identical (P-06/P-07).
+    const md = summaryWith("rows-absent", [POLICY]);
+    expect(md).toContain("`cleaner`: enabled");
+    expect(md).not.toContain("| Slice | Stage |");
   });
 });

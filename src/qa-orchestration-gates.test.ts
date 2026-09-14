@@ -37,14 +37,18 @@ import {
   finalEvaluationFor,
   invalidateFinalEvaluationBaseline,
   loadRunState,
+  qualityStagesFor,
   recordFinalEvaluation,
   updateRunState,
 } from "./run-state.js";
 import {
+  CLEANER_STAGE_ID,
   POST_APPROVAL_WRITING_STAGE_ID,
   decideFinalReuse,
+  routeFinalReviewFinding,
 } from "./final-evaluation.js";
-import { MAX_FINAL_EVALUATION_ATTEMPTS } from "./bounds.js";
+import { MAX_CLEANER_ROUNDS, MAX_FINAL_EVALUATION_ATTEMPTS } from "./bounds.js";
+import { readQualityStageOutcomes } from "./logger.js";
 import { fileURLToPath } from "node:url";
 import { resolveCandidateTreeId } from "./gate-runner.js";
 import type { AgentProvider, InvokeOptions, InvokeResult } from "./agent-provider.js";
@@ -56,6 +60,7 @@ import {
   GENERATOR_FIXTURE_CONTRACT,
   GENERATOR_FIXTURE_SCOPE,
   git,
+  makeCleanPolicyWorktree,
   makeContext,
   makeRepo,
   spawnFixtureChild,
@@ -863,7 +868,7 @@ describe("final evaluation and reuse", () => {
     expect(logger.writeSummary()).not.toContain("Final Evaluation Reuse");
   });
 
-  it("[behavior:B-09] appends the rejected tree, drops the baseline citation, and refuses reuse", () => {
+  it("[behavior:B-09] [behavior:#97:P-03] appends the rejected tree, drops the baseline citation, and preserves the one-round, zero-attempt return route", () => {
     const repo = makeRepo();
     const candidateTreeId = "a".repeat(40);
     const artifactPath =
@@ -946,6 +951,28 @@ describe("final evaluation and reuse", () => {
         attempts: [{ outcome: "RETURNED_TO_GENERATOR" }],
       }),
     ).toBe(0);
+    expect(
+      routeFinalReviewFinding(
+        {
+          id: "FE-RETURN",
+          class: "BASELINE_IS_WRONG",
+          summary: "the approved candidate itself must change",
+          evidence: "the final evaluator found a baseline defect",
+          expected: "the generator repairs the approved candidate",
+          observed: "the approved candidate still carries the defect",
+          repair: "RETURN_TO_GENERATOR",
+        },
+        {
+          candidateTreeId,
+          writingStageIds: [CLEANER_STAGE_ID],
+        },
+      ),
+    ).toEqual({
+      target: "generator-loop",
+      invalidateCandidateTreeId: candidateTreeId,
+      generatorRoundsConsumed: 1,
+      finalEvaluationAttemptsConsumed: 0,
+    });
     // Even on exact equality, the approval this tree earned is the approval the
     // finding disputed.
     expect(
@@ -1013,7 +1040,7 @@ describe("final evaluation and reuse", () => {
       invalidatedCandidateTreeIds: [],
     });
     const bumped = loadRunState(repo, "prd-070-stub");
-    expect(bumped.version).toBe(5);
+    expect(bumped.version).toBe(6);
     expect(bumped.approvedBaselines?.["70"]?.commit).toBe("c".repeat(40));
     expect(bumped.appliedWaivers?.["70"]).toEqual([
       {
@@ -1045,7 +1072,7 @@ describe("final evaluation and reuse", () => {
    * observes. It is a source-text check on purpose: the absence of a second
    * lock primitive is a property of the diff, not of any run.
    */
-  it("[behavior:P-01] introduces no second lock primitive anywhere in this slice's modules", () => {
+  it("[behavior:P-01] [behavior:#97:P-08] introduces no second lock primitive anywhere in this slice's modules", () => {
     const repoRoot = fileURLToPath(new URL("..", import.meta.url));
     // The one mutex still exists where it always did, and this slice is not a
     // caller of it and declares no lock of its own.
@@ -1063,6 +1090,10 @@ describe("final evaluation and reuse", () => {
       "src/artifacts.ts",
       "src/logger.ts",
       "src/qa-review.ts",
+      // #97's two additions to the set: the stage that now takes a restore, and
+      // the ship gate that now renders what the stages cost.
+      "src/cleaner-stage.ts",
+      "src/ship-gate.ts",
     ]) {
       // The identifiers that *are* a lock primitive in this codebase. Prose may
       // name the mutex and does — `src/run-events.ts` and `src/logger.ts` both
@@ -1075,10 +1106,47 @@ describe("final evaluation and reuse", () => {
   });
 
   /**
-   * The three spawned scenarios below share this fixture: a repo with the gate
+   * A clean gate that is red until `README.md` carries {@link CLEAN_MARKER}.
+   *
+   * Content in an already-declared path rather than a new file, for the reason
+   * `src/qa-orchestration.test.ts`'s cleaner fixture gives: `additionalWriteScope`
+   * widens the *round's* scope gate, but the final candidate is still gated
+   * against the manifest alone, so a marker file would fail the final `scope`
+   * gate instead of reaching the exit under test.
+   */
+  const CLEAN_MARKER = "formatted";
+  const cleanPolicyMember = {
+    gates: [
+      {
+        id: "format",
+        command: process.execPath,
+        args: [
+          "-e",
+          `if (!require('node:fs').readFileSync('README.md', 'utf-8')` +
+            `.includes('${CLEAN_MARKER}')) { ` +
+            `console.error('the formatter would rewrite README.md'); ` +
+            `process.exit(1); }`,
+        ],
+        required: true,
+        expectedCostMs: 200,
+      },
+    ],
+    additionalWriteScope: [],
+  };
+
+  /**
+   * The four spawned scenarios below share this fixture: a repo with the gate
    * scripts committed, a QA evaluator that passes, and an injected
    * post-approval writing stage whose stub write changes the tree — which is
    * what gives the final evaluator a subject at all.
+   *
+   * `clean` opts the run into a real `gatePolicy.clean`, which changes the
+   * fixture's shape in one way that matters: the cleaner's round 0 gates the
+   * accepted tree *in place* in `ctx.worktreeDir`, and `runGates` restores a
+   * gate checkout with `git clean -ffdx`, so a worktree that is the repository
+   * root has this run's `.afk/` — journal, evidence, run state, archives —
+   * swept out from under the assertions. A real slice worktree cut outside the
+   * repository is production's shape, and the only one those reads survive.
    */
   function finalEvaluationFixture(options: {
     /** Answers one `evaluator-final` dispatch; returns the review to write. */
@@ -1091,11 +1159,28 @@ describe("final evaluation and reuse", () => {
      * Defaults to `true`, the stub write that gives an evaluator a subject.
      */
     stageWrites?: boolean;
+    /** `gatePolicy.clean` for this run, snapshotted as the run's policy. */
+    clean?: unknown;
+    /** Answers one `cleaner` dispatch, standing in the slice worktree. */
+    onCleaner?: (call: {
+      call: number;
+      worktreeDir: string;
+      sliceDir: string;
+      prompt: string;
+    }) => void;
+    /**
+     * Cleaner rounds a killed run already spent, seeded as a non-terminal
+     * `qualityStages` entry so `resumableCleanerStage` resolves.
+     */
+    seedCleanerRoundsSpent?: number;
   }): {
     repo: string;
+    /** Where the slice runs: a cut worktree with `clean`, the repo without. */
+    worktree: string;
     ctx: SliceContext;
     finalCalls: { cwd: string; finalTreeId: string }[];
     stageCalls: { worktreeDir: string; stageId: string; repair?: string }[];
+    cleanerPrompts: string[];
   } {
     const repo = makeRepo();
     writeFileSync(
@@ -1111,6 +1196,8 @@ describe("final evaluation and reuse", () => {
 
     let artifactDir = "";
     let relSliceDir = "";
+    let sliceWorktree = repo;
+    const cleanerPrompts: string[] = [];
     const finalCalls: { cwd: string; finalTreeId: string }[] = [];
     const treeIdFrom = (prompt: string, label: string): string => {
       const match = new RegExp(`${label} tree ID: \`([^\`]+)\``).exec(prompt);
@@ -1129,6 +1216,15 @@ describe("final evaluation and reuse", () => {
             "utf-8",
           );
           writeQAReview(artifactDir, "deterministic");
+        }
+        if (invokeOptions.role === "cleaner") {
+          cleanerPrompts.push(invokeOptions.prompt ?? "");
+          options.onCleaner?.({
+            call: cleanerPrompts.length,
+            worktreeDir: sliceWorktree,
+            sliceDir: artifactDir,
+            prompt: invokeOptions.prompt ?? "",
+          });
         }
         if (invokeOptions.role === "evaluator-final") {
           const prompt = invokeOptions.prompt ?? "";
@@ -1178,9 +1274,44 @@ describe("final evaluation and reuse", () => {
         );
       },
     });
+    if (options.clean !== undefined) {
+      sliceWorktree = makeCleanPolicyWorktree(repo, ctx, options.clean);
+    }
+    if (options.seedCleanerRoundsSpent !== undefined) {
+      // A killed stage's entry, left non-terminal so `resumableCleanerStage`
+      // resolves and this run continues its budget rather than restarting it.
+      updateRunState(repo, "prd-070-stub", (state) => {
+        state.qualityStages = {
+          "70": [
+            {
+              stage: "cleaner",
+              enabled: true,
+              rounds: Array.from(
+                { length: options.seedCleanerRoundsSpent! },
+                (_unused, index) => ({
+                  round: index + 1,
+                  attempt: 1,
+                  inputTreeId: "0".repeat(40),
+                  gateIds: ["format"],
+                  outcome: "REVERTED" as const,
+                }),
+              ),
+              outcome: "EXHAUSTED",
+            },
+          ],
+        };
+      });
+    }
     artifactDir = ctx.absSliceDir;
     relSliceDir = ctx.relSliceDir;
-    return { repo, ctx, finalCalls, stageCalls };
+    return {
+      repo,
+      worktree: ctx.worktreeDir,
+      ctx,
+      finalCalls,
+      stageCalls,
+      cleanerPrompts,
+    };
   }
 
   /** A PASS review keyed to the exact trees the prompt named. */
@@ -1195,7 +1326,7 @@ describe("final evaluation and reuse", () => {
     findings: [],
   });
 
-  it("[behavior:B-02] records a reuse in all three stores and dispatches no evaluator when the writing stage writes nothing", async () => {
+  it("[behavior:B-02] [behavior:#97:P-01] [behavior:#97:P-06] records a reuse in all three stores, dispatches no evaluator, and renders no quality-stage row", async () => {
     // The reuse path as production runs it: the stage is a no-op, so every
     // value below is read back out of the run the orchestrator performed. A
     // hand-written record and a hand-emitted event would pass with the
@@ -1243,6 +1374,20 @@ describe("final evaluation and reuse", () => {
     expect(section).toBeGreaterThan(-1);
     expect(md.slice(section)).toContain(view!.finalTreeId);
     expect(md.slice(section)).toMatch(/\|\s*0\s*\|/);
+    // #97 P-01/P-06: this same run already has exact tree equality and no
+    // cleaner policy. Reuse its spawned result instead of repeating the whole
+    // pipeline solely to inspect the quality-stage projection.
+    expect(readQualityStageOutcomes(ctx.logger.runDir)).toEqual([]);
+    ctx.logger.recordQualityStagePolicy(ctx.runGatePolicy);
+    const qualityMd = ctx.logger.writeSummary();
+    const qualitySection = qualityMd.indexOf("## Quality Stages");
+    expect(qualitySection).toBeGreaterThan(-1);
+    expect(qualityMd.slice(qualitySection)).toContain(
+      `\`${CLEANER_STAGE_ID}\`: disabled`,
+    );
+    expect(qualityMd.slice(qualitySection)).not.toContain(
+      "| Slice | Stage | Enabled |",
+    );
   });
 
   it("[behavior:B-03] runs an injected post-approval writing stage and evaluates the tree it dirtied exactly once", async () => {
@@ -1292,65 +1437,6 @@ describe("final evaluation and reuse", () => {
     ).toBe(true);
   });
 
-  it("[behavior:B-09] returns a baseline-is-wrong finding to the generator loop for exactly one round and no evaluator attempt", async () => {
-    const progress: { genRounds: number; spent: number }[] = [];
-    let repoRef = "";
-    const fixture = finalEvaluationFixture({
-      review: (call) =>
-        call.attempt === 1
-          ? {
-              version: 1,
-              verdict: "FAIL",
-              baselineTreeId: call.baselineTreeId,
-              finalTreeId: call.finalTreeId,
-              findings: [
-                {
-                  id: "FE-01",
-                  class: "BASELINE_IS_WRONG",
-                  summary: "The approved candidate itself must not merge",
-                  evidence: "The fixture evaluator read the final tree",
-                  expected: "The generator revisits the approved candidate",
-                  observed: "The approved candidate ships a defect",
-                  repair: "RETURN_TO_GENERATOR",
-                },
-              ],
-            }
-          : passingReview(call),
-      onFinalCall: () => {
-        // Read at the dispatch itself, so the counters are the ones the return
-        // moved rather than whatever the run ended on.
-        progress.push({
-          genRounds:
-            fixture.ctx.logger.getSliceProgress("70")?.genRounds ?? -1,
-          spent: finalEvaluationAttemptsSpent(
-            finalEvaluationFor(loadRunState(repoRef, "prd-070-stub"), "70"),
-          ),
-        });
-      },
-    });
-    repoRef = fixture.repo;
-
-    const result = await runSliceExecute(fixture.ctx);
-
-    expect(result.phase).toBe("PASS");
-    // Exactly one generator round across the return (D19), and no evaluator
-    // attempt spent by it.
-    expect(progress).toEqual([
-      { genRounds: 1, spent: 0 },
-      { genRounds: 2, spent: 0 },
-    ]);
-    const view = finalEvaluationFor(
-      loadRunState(fixture.repo, "prd-070-stub"),
-      "70",
-    );
-    expect(view?.attempts.map((entry) => entry.outcome)).toEqual([
-      "RETURNED_TO_GENERATOR",
-      "GRADED",
-    ]);
-    // The rejected tree is invalidated, and its own attempt entry says so.
-    expect(view?.attempts[0]?.invalidated).toBe(true);
-  });
-
   it("[behavior:B-10] refuses a fourth final-evaluation attempt against the three-attempt bound", async () => {
     const fixture = finalEvaluationFixture({ review: passingReview });
     // Three graded attempts already on the record, so this run's dispatch is
@@ -1380,4 +1466,320 @@ describe("final evaluation and reuse", () => {
     // Refused before any dispatch: the bound costs no evaluator read.
     expect(fixture.finalCalls).toHaveLength(0);
   });
+
+  /** Every `quality-stage-attempt` line the run journaled, in stream order. */
+  function attemptEvents(runDir: string): Record<string, unknown>[] {
+    return readFileSync(join(runDir, "events.jsonl"), "utf-8")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((event) => event.type === "quality-stage-attempt");
+  }
+
+  /**
+   * Every file under `root`, repo-relative-ish: the pair of its containing
+   * directory and its name. Used to *discover* an archive directory rather than
+   * pin it — the segment beneath `.afk/artifacts/<run-slug>/slice-<n>/` is
+   * composed by the out-of-scope `src/artifacts.ts`, so #97 B-13 pins the file
+   * stem and resolves the directory from the run's own tree.
+   */
+  function filesUnder(root: string): { dir: string; name: string }[] {
+    if (!existsSync(root)) return [];
+    const out: { dir: string; name: string }[] = [];
+    for (const entry of readdirSync(root, { withFileTypes: true })) {
+      const path = join(root, entry.name);
+      if (entry.isDirectory()) out.push(...filesUnder(path));
+      else out.push({ dir: root, name: entry.name });
+    }
+    return out;
+  }
+
+  it("[behavior:#97:B-04] [behavior:#97:B-13] refuses a restore for want of a cleaner round, reverts the cleaner's range, and reuses the accepted tree", async () => {
+    // S3. Two rounds are already spent when this run starts, so the committing
+    // round is the third of three: the restore the final evaluator then asks for
+    // has no round to spend, and the whole cleaner range goes back instead.
+    expect(MAX_CLEANER_ROUNDS).toBe(3);
+    const fixture = finalEvaluationFixture({
+      clean: cleanPolicyMember,
+      seedCleanerRoundsSpent: 2,
+      stageWrites: false,
+      onCleaner: (call) => {
+        writeFileSync(
+          join(call.worktreeDir, "README.md"),
+          `fixture, ${CLEAN_MARKER}\n`,
+          "utf-8",
+        );
+      },
+      review: (call) =>
+        call.attempt === 1
+          ? {
+              version: 1,
+              verdict: "FAIL",
+              baselineTreeId: call.baselineTreeId,
+              finalTreeId: call.finalTreeId,
+              findings: [
+                {
+                  id: "FE-02",
+                  class: "PRESERVATION",
+                  summary: "the cleaner dropped behavior the approval had",
+                  evidence: "README.md lost a line the baseline carried",
+                  expected: "the approved README.md content survives",
+                  observed: "the cleaner's round rewrote it away",
+                  repair: "RESTORE",
+                },
+              ],
+            }
+          : passingReview(call),
+    });
+
+    const result = await runSliceExecute(fixture.ctx);
+
+    expect(result.phase).toBe("PASS");
+    // The round that committed was round 3 of 3, so nothing was left to spend.
+    expect(fixture.cleanerPrompts).toHaveLength(1);
+    // The restore went to the cleaner branch, not to the injected stub: the stub
+    // is called exactly once, for the stage itself, and never with a repair.
+    expect(fixture.stageCalls).toEqual([
+      {
+        worktreeDir: fixture.worktree,
+        stageId: POST_APPROVAL_WRITING_STAGE_ID,
+      },
+    ]);
+    // The stage's own outcome, re-stamped by the revert.
+    expect(
+      qualityStagesFor(
+        loadRunState(fixture.repo, "prd-070-stub"),
+        "70",
+      ).at(-1)?.outcome,
+    ).toBe("EXHAUSTED");
+    // The whole cleaner range is gone: the surviving tree is the tree the accept
+    // seam handed the stage, which the run itself names as the round's
+    // `inputTreeId` — read off the stream rather than recomputed here.
+    const cleanerAttempt = attemptEvents(fixture.ctx.logger.runDir).find(
+      (event) => event.stage === CLEANER_STAGE_ID,
+    );
+    expect(cleanerAttempt?.stageRound).toBe(3);
+    expect(
+      execFileSync("git", ["rev-parse", "HEAD^{tree}"], {
+        cwd: fixture.worktree,
+        encoding: "utf-8",
+      }).trim(),
+    ).toBe(cleanerAttempt?.inputTreeId);
+    // And that tree is the one the baseline authorizes, so the next iteration
+    // reuses instead of spending a second evaluator attempt on it.
+    const view = finalEvaluationFor(
+      loadRunState(fixture.repo, "prd-070-stub"),
+      "70",
+    );
+    expect(view?.decision).toBe("reuse");
+    expect(fixture.finalCalls).toHaveLength(1);
+
+    // B-13: the stem is pinned — `r1` is the first generator round, `a3` the
+    // third cleaner round — and its directory is discovered from the run's own
+    // artifact tree rather than written into the assertion.
+    const archived = filesUnder(
+      join(fixture.repo, ".afk", "artifacts", "prd-070-stub", "slice-01"),
+    ).filter((file) => file.name === "cleaner-log-r1-a3.log");
+    expect(
+      archived.map((file) => file.name),
+      "the archived round log, found anywhere under the run's slice artifacts",
+    ).toEqual(["cleaner-log-r1-a3.log"]);
+  });
+
+  it("[behavior:#97:B-02] [behavior:#97:B-03] [behavior:#97:B-07] [behavior:#97:B-08] [behavior:#97:B-12] routes every restore to the cleaner, journals each attempt, and attributes every cleaner span", async () => {
+    // The one spawned restore-chain scenario also carries the assertions that
+    // used to repeat its round-1 prefix in a separate pipeline run.
+    //
+    // The first restore is the case S3 covers from the refusal side; this one
+    // covers the case that comes *after* a re-dispatch actually ran, which is
+    // where the stage's standing result stops being the one the first dispatch
+    // returned. Two consecutive `RESTORE` verdicts with the cleaner as the only
+    // stage that writes: both must reach the cleaner, and neither may reach the
+    // no-op stub, whose whole defect #97 exists to remove.
+    let repoDir = "";
+    /** The change summary as it stood for each attempt, read before its dispatch. */
+    const summaries: {
+      attempt: number;
+      stageOrder: string[];
+      byStage: Record<string, string[]>;
+    }[] = [];
+    const fixture = finalEvaluationFixture({
+      clean: cleanPolicyMember,
+      stageWrites: false,
+      onCleaner: (call) => {
+        // Distinct content per round, so every round genuinely moves the tree
+        // and the chain the assertions walk has three real links. The marker
+        // stays, so the clean gate is green and the round passes.
+        writeFileSync(
+          join(call.worktreeDir, "README.md"),
+          `fixture, ${CLEAN_MARKER}, restore ${call.call}\n`,
+          "utf-8",
+        );
+      },
+      onFinalCall: ({ attempt }) => {
+        const path = join(
+          repoDir,
+          ".afk",
+          "artifacts",
+          "prd-070-stub",
+          "slice-01",
+          "final-change-summary.json",
+        );
+        if (!existsSync(path)) return;
+        const parsed = JSON.parse(readFileSync(path, "utf-8")) as {
+          stageOrder: string[];
+          byStage: Record<string, { files: { path: string }[] }>;
+        };
+        summaries.push({
+          attempt,
+          stageOrder: parsed.stageOrder,
+          byStage: Object.fromEntries(
+            Object.entries(parsed.byStage).map(([stageId, span]) => [
+              stageId,
+              span.files.map((file) => file.path),
+            ]),
+          ),
+        });
+      },
+      review: (call) =>
+        call.attempt <= 2
+          ? {
+              version: 1,
+              verdict: "FAIL",
+              baselineTreeId: call.baselineTreeId,
+              finalTreeId: call.finalTreeId,
+              findings: [
+                {
+                  id: `FE-0${call.attempt}`,
+                  class: "PRESERVATION",
+                  summary: "the cleaner dropped behavior the approval had",
+                  evidence: "README.md lost a line the baseline carried",
+                  expected: "the approved README.md content survives",
+                  observed: "the cleaner's round rewrote it away",
+                  repair: "RESTORE",
+                },
+              ],
+            }
+          : passingReview(call),
+    });
+    repoDir = fixture.repo;
+
+    const result = await runSliceExecute(fixture.ctx);
+
+    expect(result.phase).toBe("PASS");
+    // B-03: three cleaner rounds for one round-1 dispatch plus two restores,
+    // all inside the one budget of three.
+    expect(MAX_CLEANER_ROUNDS).toBe(3);
+    expect(fixture.cleanerPrompts).toHaveLength(3);
+    expect(fixture.finalCalls).toHaveLength(3);
+    // B-02: the stub is called exactly once — for the stage itself — and never
+    // with a repair. A `repair: "RESTORE"` here would be the second restore
+    // handed to a stage that writes nothing.
+    expect(fixture.stageCalls).toEqual([
+      {
+        worktreeDir: fixture.worktree,
+        stageId: POST_APPROVAL_WRITING_STAGE_ID,
+      },
+    ]);
+    // B-05: both restores were rendered as restore rounds, naming their finding.
+    expect(fixture.cleanerPrompts[1]).toContain("FE-01");
+    expect(fixture.cleanerPrompts[2]).toContain("FE-02");
+
+    const attempts = attemptEvents(fixture.ctx.logger.runDir);
+    const cleanerAttempts = attempts.filter(
+      (event) => event.stage === CLEANER_STAGE_ID,
+    );
+    expect(
+      cleanerAttempts.map((event) => [event.stageRound, event.outcome]),
+    ).toEqual([
+      [1, "PASS"],
+      [2, "PASS"],
+      [3, "PASS"],
+    ]);
+    // B-07: each restore round names the tree it actually started from — the
+    // previous round's output — so the per-round tree chain can be walked. A
+    // round that re-reported the pre-cleaner accepted tree would claim to have
+    // read a tree no round of it ever saw.
+    expect(cleanerAttempts[1]!.inputTreeId).toBe(
+      cleanerAttempts[0]!.outputTreeId,
+    );
+    expect(cleanerAttempts[2]!.inputTreeId).toBe(
+      cleanerAttempts[1]!.outputTreeId,
+    );
+    // Each round is measured as a tree change, which is what makes the chain
+    // above three links rather than one repeated id.
+    for (const attempt of cleanerAttempts) {
+      expect(attempt.outputTreeId).not.toBe(attempt.inputTreeId);
+    }
+    // Every final-evaluation attempt grades the tree the newest cleaner round
+    // left, and cites the one baseline throughout.
+    const finalAttempts = attempts.filter(
+      (event) => event.stage === "final-evaluation",
+    );
+    expect(finalAttempts).toHaveLength(3);
+    expect(finalAttempts.map((event) => event.outputTreeId)).toEqual(
+      cleanerAttempts.map((event) => event.outputTreeId),
+    );
+    const view = finalEvaluationFor(
+      loadRunState(fixture.repo, "prd-070-stub"),
+      "70",
+    );
+    expect(view?.decision).toBe("evaluate");
+    for (const [index, attempt] of finalAttempts.entries()) {
+      expect(attempt).toMatchObject({
+        stage: "final-evaluation",
+        stageRound: index + 1,
+        attempt: index + 1,
+        outcome: index === 2 ? "PASS" : "GRADED",
+        outputTreeId: fixture.finalCalls[index]!.finalTreeId,
+      });
+      expect(attempt.gateIds).toContain("scope");
+      expect(attempt.inputTreeId).toBe(view!.baselineTreeId);
+      expect(attempt.inputTreeId).not.toBe(attempt.outputTreeId);
+    }
+    expect(cleanerAttempts[0]).toMatchObject({
+      ghIssue: "70",
+      sliceNumber: "01",
+      stage: CLEANER_STAGE_ID,
+      stageRound: 1,
+      attempt: 1,
+      outcome: "PASS",
+    });
+    for (const attempt of cleanerAttempts) {
+      expect(attempt.gateIds).toContain("format");
+      expect(Array.isArray(attempt.cacheReusedGateIds)).toBe(true);
+      expect(attempt.durationMs as number).toBeGreaterThanOrEqual(0);
+    }
+
+    fixture.ctx.logger.recordQualityStagePolicy(fixture.ctx.runGatePolicy);
+    const md = fixture.ctx.logger.writeSummary();
+    const section = md.indexOf("## Quality Stages");
+    expect(section).toBeGreaterThan(-1);
+    expect(md.slice(section)).toContain("| Slice | Stage | Enabled |");
+    expect(md.slice(section)).toContain(`| #70 | ${CLEANER_STAGE_ID} | yes |`);
+    expect(
+      readQualityStageOutcomes(fixture.ctx.logger.runDir).map((outcome) => [
+        outcome.stage,
+        outcome.roundsUsed,
+        outcome.finalDecision,
+      ]),
+    ).toEqual([
+      [CLEANER_STAGE_ID, 3, "evaluate"],
+      ["final-evaluation", 3, "evaluate"],
+    ]);
+
+    // B-12: the change summary for the attempt *after* a restore round still
+    // attributes the cleaner's paths to the cleaner, with the no-op stub's span
+    // truthfully empty. Attributing them to the stub is the other half of the
+    // same stale-reading defect.
+    expect(summaries.map((entry) => entry.attempt)).toEqual([1, 2, 3]);
+    for (const entry of summaries) {
+      expect(entry.stageOrder).toEqual([
+        CLEANER_STAGE_ID,
+        POST_APPROVAL_WRITING_STAGE_ID,
+      ]);
+      expect(entry.byStage[CLEANER_STAGE_ID]).toContain("README.md");
+      expect(entry.byStage[POST_APPROVAL_WRITING_STAGE_ID]).toEqual([]);
+    }
+  }, 120_000);
 });

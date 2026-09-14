@@ -12,6 +12,7 @@ import { join } from "node:path";
 import {
   archiveContractReviewRecord,
   archiveArtifactsBeforeRestart,
+  archiveCleanerLog,
   archiveQAReviewAttempt,
   archiveQAReviewRecord,
   archiveQAReviewValidation,
@@ -27,6 +28,7 @@ import {
   readContractLockProvenance,
   readContractStatus,
   preserveNegotiationFailure,
+  qaArchivePrefix,
   parseGuardianReview,
   readReviewVerdict,
   renderStuckDiagnosis,
@@ -36,7 +38,11 @@ import type {
   ContractReviewAttemptRecord,
 } from "./contract-review.js";
 import type { QAReviewAttemptRecord } from "./qa-review.js";
-import { spentImplementationRounds } from "./qa-review.js";
+import {
+  QA_REVIEW_STAGES,
+  qaReviewFilename,
+  spentImplementationRounds,
+} from "./qa-review.js";
 import { PLANNER_ESCALATION_FILENAME } from "./planner-escalation.js";
 import {
   EXPECTED_STUCK_DIAGNOSIS,
@@ -45,6 +51,7 @@ import {
   STUCK_DIAGNOSIS_REASON,
   STUCK_DIAGNOSIS_COMMIT_LOG,
 } from "./stuck-diagnosis.fixtures.js";
+import { CLEANER_ESCALATION_ARTIFACT_NAME } from "./escalation.js";
 
 describe("renderStuckDiagnosis", () => {
   function renderWithDiscoveryOrder(order: "forward" | "reverse"): string {
@@ -1731,5 +1738,173 @@ describe("review outcome predicates", () => {
     expect(isReviewInfrastructureFailure("UNPARSEABLE")).toBe(false);
     expect(isReviewInfrastructureFailure("FIX-BEFORE-SHIP")).toBe(false);
     expect(isReviewInfrastructureFailure("SHIP")).toBe(false);
+  });
+});
+
+describe("[behavior:#87:B-09] archiving a cleaner round", () => {
+  const roots: string[] = [];
+
+  afterEach(() => {
+    while (roots.length > 0) {
+      rmSync(roots.pop()!, { recursive: true, force: true });
+    }
+  });
+
+  function makeArchive(): { sliceDir: string; archiveDir: string } {
+    const root = mkdtempSync(join(tmpdir(), "afk-cleaner-archive-"));
+    roots.push(root);
+    const sliceDir = join(root, "slice");
+    mkdirSync(sliceDir, { recursive: true });
+    return { sliceDir, archiveDir: join(root, "archive") };
+  }
+
+  it("[behavior:#87:B-09] maps the cleaner to its own prefix and filename, leaving the other three alone", () => {
+    // A fourth branch rather than the `else -> \"final\"` fallback: under the
+    // fallback a cleaner escalation and a final review would both be filed
+    // `final-review-r<n>-a<n>.json` in one archive directory, and nothing
+    // downstream could tell which stage wrote which.
+    expect(qaArchivePrefix("cleaner")).toBe("cleaner");
+    expect(qaReviewFilename("cleaner")).toBe(CLEANER_ESCALATION_ARTIFACT_NAME);
+    expect(CLEANER_ESCALATION_ARTIFACT_NAME).toBe("cleaner-escalation.json");
+
+    expect(qaArchivePrefix("deterministic")).toBe("qa");
+    expect(qaArchivePrefix("shared-preview")).toBe("uat");
+    expect(qaArchivePrefix("final-evaluation")).toBe("final");
+    expect(qaReviewFilename("deterministic")).toBe("qa-review.json");
+    expect(qaReviewFilename("shared-preview")).toBe("uat-review.json");
+    expect(qaReviewFilename("final-evaluation")).toBe("final-review.json");
+  });
+
+  it("[behavior:#87:B-09] stamps one escalation and one log per round with round and attempt", () => {
+    const { sliceDir, archiveDir } = makeArchive();
+
+    const names: (string | null)[] = [];
+    for (const round of [1, 2, 3]) {
+      writeFileSync(
+        join(sliceDir, CLEANER_ESCALATION_ARTIFACT_NAME),
+        `{"round":${round}}\n`,
+      );
+      writeFileSync(join(sliceDir, "cleaner.log"), `round ${round}\n`);
+      names.push(
+        archiveQAReviewAttempt({
+          sliceDir,
+          archiveDir,
+          stage: "cleaner",
+          round,
+          attempt: 2,
+        }),
+      );
+      names.push(
+        archiveCleanerLog({
+          source: join(sliceDir, "cleaner.log"),
+          archiveDir,
+          round,
+          attempt: 2,
+          runId: "run-1",
+        }),
+      );
+    }
+
+    expect(names).toEqual([
+      "cleaner-review-r1-a2.json",
+      "cleaner-log-r1-a2.log",
+      "cleaner-review-r2-a2.json",
+      "cleaner-log-r2-a2.log",
+      "cleaner-review-r3-a2.json",
+      "cleaner-log-r3-a2.log",
+    ]);
+    // Every round's own bytes, not the last round's three times over: the log
+    // is the only account of a round's reasoning that survives a reset.
+    for (const round of [1, 2, 3]) {
+      expect(
+        readFileSync(join(archiveDir, `cleaner-review-r${round}-a2.json`), "utf-8"),
+      ).toBe(`{"round":${round}}\n`);
+      expect(
+        readFileSync(join(archiveDir, `cleaner-log-r${round}-a2.log`), "utf-8"),
+      ).toBe(`round ${round}\n`);
+    }
+  });
+
+  it("[behavior:#87:B-09] archives no escalation for a round that wrote none", () => {
+    const { sliceDir, archiveDir } = makeArchive();
+    // The stage's usual output is a commit; the escalation is the exception.
+    expect(
+      archiveQAReviewAttempt({
+        sliceDir,
+        archiveDir,
+        stage: "cleaner",
+        round: 1,
+        attempt: 1,
+      }),
+    ).toBeNull();
+    expect(
+      archiveCleanerLog({
+        source: join(sliceDir, "missing.log"),
+        archiveDir,
+        round: 1,
+        attempt: 1,
+        runId: "run-1",
+      }),
+    ).toBeNull();
+  });
+
+  it("[behavior:#87:B-09] never overwrites a name a first writer took", () => {
+    const { sliceDir, archiveDir } = makeArchive();
+    writeFileSync(
+      join(sliceDir, CLEANER_ESCALATION_ARTIFACT_NAME),
+      `{"first":true}\n`,
+    );
+    writeFileSync(join(sliceDir, "cleaner.log"), "first\n");
+    const attempt = { sliceDir, archiveDir, stage: "cleaner" as const, round: 1, attempt: 1 };
+    archiveQAReviewAttempt(attempt);
+    archiveCleanerLog({
+      source: join(sliceDir, "cleaner.log"),
+      archiveDir,
+      round: 1,
+      attempt: 1,
+      runId: "run-1",
+    });
+
+    writeFileSync(
+      join(sliceDir, CLEANER_ESCALATION_ARTIFACT_NAME),
+      `{"second":true}\n`,
+    );
+    writeFileSync(join(sliceDir, "cleaner.log"), "second\n");
+
+    // The escalation refuses outright; the log spills into the writing run's
+    // own subdirectory, which is `archiveEvidenceCopy`'s rule. Both keep the
+    // first writer's bytes, which is the invariant that matters.
+    expect(() => archiveQAReviewAttempt(attempt)).toThrow();
+    expect(
+      archiveCleanerLog({
+        source: join(sliceDir, "cleaner.log"),
+        archiveDir,
+        round: 1,
+        attempt: 1,
+        runId: "run-2",
+      }),
+    ).toBe(join("run-2", "cleaner-log-r1-a1.log"));
+    expect(
+      readFileSync(join(archiveDir, "cleaner-review-r1-a1.json"), "utf-8"),
+    ).toBe(`{"first":true}\n`);
+    expect(
+      readFileSync(join(archiveDir, "cleaner-log-r1-a1.log"), "utf-8"),
+    ).toBe("first\n");
+  });
+
+  it("[behavior:#87:P-09] keeps the cleaner out of QA_REVIEW_STAGES and the replayed prefixes", () => {
+    // One array, three consumers: the attempt-record stage validator's accepted
+    // language, the resume replay and the resume-precedence sweep all derive
+    // from it. Adding "cleaner" would make a resumed run look for a cleaner
+    // attempt record that no cleaner round ever writes.
+    expect(QA_REVIEW_STAGES).toEqual([
+      "deterministic",
+      "shared-preview",
+      "final-evaluation",
+    ]);
+    expect(QA_REVIEW_STAGES).not.toContain("cleaner");
+    // And its prefix is outside the set the resume scan replays, which is the
+    // whole observable for the module-private record-filename clause.
+    expect(["qa", "uat", "final"]).not.toContain(qaArchivePrefix("cleaner"));
   });
 });

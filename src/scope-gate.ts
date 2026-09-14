@@ -16,8 +16,15 @@
  * the final candidate, and catches the tree that never escalated at all
  * (ADR 0048: "Do not 'reconcile' them").
  */
-import { loadAcceptanceManifest } from "./acceptance-manifest.js";
-import { outOfScopeChangedPaths } from "./escalation.js";
+import {
+  loadAcceptanceManifest,
+  normalizeAcceptanceManifestPath,
+} from "./acceptance-manifest.js";
+import {
+  ORCHESTRATOR_OWNED_SLICE_FILENAMES,
+  outOfScopeChangedPaths,
+} from "./escalation.js";
+import { matchesGlob } from "./gate-policy.js";
 import type { GateDeclaration, GateRunOutcome } from "./gate-runner.js";
 import { diffTreePaths, listChangedFiles } from "./git.js";
 import type { LaneResourceOptions } from "./lanes.js";
@@ -80,6 +87,22 @@ export interface ScopeGateInput {
    * fails closed rather than exempting a lock the generator may have widened.
    */
   acceptedPairIntact: boolean;
+  /**
+   * Passed through to `outOfScopeChangedPaths` unchanged (#87 B-11). Absent —
+   * every caller before the cleaner stage — is `"exempt-prefix"`, today's
+   * behavior; the cleaner's declaration passes `"declared-only"` so a
+   * post-approval round cannot rewrite a finished slice artifact.
+   */
+  artifactDirPolicy?: "exempt-prefix" | "declared-only";
+  /**
+   * Globs the caller's own policy adds to the accepted `fileScope`
+   * (`gatePolicy.clean.additionalWriteScope`, #87 B-11). A widening and
+   * nothing else: a matching path is dropped from the changed set before
+   * classification, except the unwaivable orchestrator-owned accepted pair.
+   * The manifest stays the only thing that can *narrow* the scope and no
+   * heuristic here derives one path from another.
+   */
+  additionalWriteScope?: readonly string[];
   options?: LaneResourceOptions;
 }
 
@@ -127,11 +150,46 @@ export function runScopeGate(input: ScopeGateInput): GateRunOutcome {
   }
 
   const manifest = loadAcceptanceManifest(input.absSliceDir);
+  // The widening runs here, before classification, because that is all
+  // `additionalWriteScope` is: a policy-declared addition to the accepted
+  // scope. Filtering afterwards would have to un-report an offender, and a
+  // pre-filter cannot turn an internally exempted path into one (#87 B-11).
+  // The accepted pair is the one carve-out: widening policy cannot waive the
+  // orchestrator's authority when the caller cannot prove those bytes intact
+  // (P-10).
+  const additional = input.additionalWriteScope ?? [];
+  const artifactDir = input.sliceArtifactDir.replace(/[\\/]+$/, "");
+  const unwaivablePaths = new Set(
+    input.acceptedPairIntact || artifactDir.trim() === ""
+      ? []
+      : ORCHESTRATOR_OWNED_SLICE_FILENAMES.map((name) =>
+          normalizeAcceptanceManifestPath(`${artifactDir}/${name}`),
+        ),
+  );
+  const isUnwaivablePath = (path: string): boolean => {
+    try {
+      return unwaivablePaths.has(normalizeAcceptanceManifestPath(path));
+    } catch {
+      // Leave an unclassifiable path for outOfScopeChangedPaths to refuse.
+      return false;
+    }
+  };
+  const changedPaths =
+    additional.length === 0
+      ? changed.paths
+      : changed.paths.filter(
+          (path) =>
+            isUnwaivablePath(path) ||
+            !additional.some((glob) => matchesGlob(glob, path)),
+        );
   const offenders = outOfScopeChangedPaths({
-    changedFiles: changed.paths,
+    changedFiles: changedPaths,
     manifest,
     sliceArtifactDir: input.sliceArtifactDir,
     acceptedPairIntact: input.acceptedPairIntact,
+    ...(input.artifactDirPolicy
+      ? { artifactDirPolicy: input.artifactDirPolicy }
+      : {}),
     ...(input.options ? { options: input.options } : {}),
   });
   if (offenders.length === 0) {

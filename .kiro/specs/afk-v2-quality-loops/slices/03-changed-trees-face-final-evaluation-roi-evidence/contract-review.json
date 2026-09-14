@@ -1,0 +1,50 @@
+{
+  "version": 2,
+  "verdict": "ACCEPT",
+  "findings": [
+    {
+      "id": "F-08",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-01", "B-02", "B-03"],
+      "evidence": "\"a `RESTORE` route returns `stageId` = the **last** id in `writingStageIds` — the stage that wrote most recently\" together with \"passes `writingStageIds` built from what this round actually ran: `[CLEANER_STAGE_ID, POST_APPROVAL_WRITING_STAGE_ID]` when `cleaner.ran && cleaner.outputTreeId !== cleaner.inputTreeId` (the cleaner committed)\"",
+      "expected": "The route rule and the list the one call site passes must compose so that a RESTORE reaches the cleaner exactly when the cleaner committed — the state B-03, B-04 and S3 all assert on.",
+      "observed": "The revision names one composition and the three dependent places now agree with it. B-01 states the list contract on the parameter — writingStageIds holds only the stages that actually changed the tree, in the order they ran, so a stage that ran and left the tree byte-identical contributes no id, which is why production's noopPostApprovalWritingStage (src/final-evaluation.ts:67) never appears even though the cleaner runs first (:42-48). B-02 builds to match: CLEANER_STAGE_ID when cleaner.ran && cleaner.outputTreeId !== cleaner.inputTreeId, then POST_APPROVAL_WRITING_STAGE_ID only when currentFinalTreeId !== stageInputTreeId, so the committed-cleaner case under the production no-op stage is exactly [CLEANER_STAGE_ID] and the last-id rule names the cleaner. The test-plan bullet now asserts stageId \"cleaner\" for [CLEANER_STAGE_ID] and \"post-approval-writing\" for the two-id list (correct, since the injected stub wrote last); the manifest's B-01 then/observableResult assert the same three values; S3's \"the restore route names \\\"cleaner\\\"\" is reachable, since at that route point currentFinalTreeId equals the cleaner's outputTreeId. The unfalsifiable DoD wording is replaced by \"passes only the stages that changed the tree they were handed, in run order, so [CLEANER_STAGE_ID] is the committed-cleaner list… and a RESTORE then names cleaner\", and a new unit bullet pins the list builder's three outputs directly. B-03's re-dispatch, B-04's revert and EXHAUSTED record are therefore reachable on a faithful implementation.",
+      "clearCondition": "B-01 and B-02 name one composition under which a committed cleaner's RESTORE resolves to CLEANER_STAGE_ID — e.g. the list carries only stages that actually wrote in the ordering the selection rule reads (the no-op production stub contributing no id), or the selection rule is stated as something other than \"last id\" — and the test-plan bullet, the manifest B-01 observableResult and the S3 expectation agree on the same stageId for the committed-cleaner case.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-09",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-09", "B-10"],
+      "evidence": "\"it reads `events.jsonl` alone and returns one `QualityStageOutcome` per `(ghIssue, stage)` — ... elapsed ms (sum of the stage's `quality-stage-attempt` `durationMs`), model ms (sum of the matching `stage-duration` events)\"",
+      "expected": "Every field B-09 returns and B-10 renders as a column must have a source the evidence shows exists in events.jsonl, so the seeded-stream unit test can be written and the column locked.",
+      "observed": "The planner's contested evidence is correct and I withdraw the finding. The `stage-duration` event is a real RunEventPayload member at src/run-events.ts:347-371 (type: \"stage-duration\", ghIssue, sliceNumber?, agent, round?, durationMs, history, ratioToMedian?), and RunJournal.observeStageDuration (src/run-journal.ts:133-169) appends it to the stream after pairing each phase-ended with the newest unmatched phase-started; the agent literals this slice needs are already emitted — agent: \"cleaner\" at src/orchestrator.ts:6861 and :6927, agent: \"evaluator-final\" at :7558. The prior finding rested on the explorer's field-name grep, which could not see a member spelled by its literal type string. The record exists, so no event kind is invented and the column is not locked to an unwritten record. B-09 now cites both source lines and states the matching key (ghIssue plus agent, with the two literal roles) and the missing-phase-ended case (model ms 0); B-10 names B-09's sum as the column's source; the test-plan bullet seeds stage-duration lines for both agents and asserts the summed value and the 0 case; and the stage-durations non-goal is restated as \"the file is not edited\" while its events are read, which is the posture every other src/logger.ts reader takes toward the stream.",
+      "clearCondition": "B-09 and B-10 name the actual source of the model-time value — the `phase-started`/`phase-ended` pairing the run stream already carries, with the pairing key stated — or drop the model-ms field and its column from B-09, B-10, the test plan and the manifest so no column is locked to an unwritten record.",
+      "state": "WITHDRAWN",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-10",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-13"],
+      "evidence": "\"the surviving archived round log is `.afk/artifacts/prd-070-stub/slice-01/reviews/cleaner-log-r1-a3.log`\"",
+      "expected": "A definition-of-done line that pins a literal artifact path should pin only the parts the declared evidence establishes, so a directory detail cannot make a correct implementation fail the DoD.",
+      "observed": "The unbacked directory segment is no longer pinned. B-13 now states the archived file as the name cleaner-log-r<generator-round>-a<cleaner-round>.log (src/artifacts.ts:772) inside whatever directory the caller passes as archiveCleanerLog's archiveDir — the reviewArchiveDir value src/orchestrator.ts:6968 already holds, under .afk/artifacts/<run-slug>/slice-<n>/ — and says explicitly that the segment beneath that prefix is not pinned because the builder composing it lives in the out-of-scope src/artifacts.ts. The S3 bullet and the DoD line follow the same split: both pin the stem cleaner-log-r1-a3.log with r1 = first generator round and a3 = third cleaner round, and both resolve the directory from the run's artifact tree rather than hard-coding a segment. The manifest's B-13 then/observableResult carry the same wording, so the DoD is now meetable on the declared evidence.",
+      "clearCondition": "B-13, the S3 bullet and the DoD line either cite the archive-directory builder that produces the `reviews/` segment, or state the path as the archive directory `archiveCleanerLog` writes into plus the pinned `cleaner-log-r1-a3.log` stem, so the directory segment is discovered rather than pinned.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-11",
+      "severity": "ADVISORY",
+      "behaviorIds": [],
+      "evidence": "\"src/final-evaluation.ts, src/final-evaluation.test.ts, src/cleaner-stage.ts, src/cleaner-stage.test.ts, src/run-events.ts, src/orchestrator.ts, src/logger.ts, src/logger.test.ts, src/ship-gate.ts, src/ship-gate.test.ts, src/qa-orchestration-gates.test.ts, prompts/cleaner.md, ARCHITECTURE.md\"",
+      "expected": "One generator session should be able to deliver the whole contract, including its spawned scenarios.",
+      "observed": "The Scope lock now carries the ordering note as a recorded decision: the restore re-dispatch and revert path (B-01–B-05, B-12) lands first because it is what #97 AC1 asks for and what the merge behavior depends on, then the ROI evidence family (B-06–B-11, B-13). It states that the halves share exactly one seam — the cleaner round's own evidence, from which B-07's emission is derived — that each half is green on its own tree so the ROI half is independently shippable and is the separable one if the session runs short, and why the split is not taken here (S1 and S3 both extend the one finalEvaluationFixture, so splitting would double the fixture cost in the heaviest suite). File scope, behavior ids and gate bindings are unchanged by the response, so nothing else moved.",
+      "clearCondition": "Either an ordering note stating which half lands first and that the ROI half is independently shippable, or confirmation that the pair is intended as one session's work despite the two-feature shape.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    }
+  ]
+}

@@ -743,6 +743,87 @@ export const FINAL_EVALUATOR_CONTEXT_MANIFEST = {
   ],
 } as const satisfies ContextEnvelopeManifest;
 
+/**
+ * Cleaner role contract (#87 B-12, PRD D7).
+ *
+ * The first *writing* role that runs after an approval, and the only one whose
+ * subject is a gate verdict rather than a behavior: the candidate is already
+ * approved, so every question about what it should do is settled and the
+ * cleaner's whole licence is "make the declared clean gates green without
+ * changing what the tree does".
+ *
+ * `quality-failures` leads `inputOrder` because it is the assignment — the
+ * failing clean gates with their `detail` and their log artifact path. The
+ * locked contract comes *last* on purpose: it is the boundary the round is
+ * checked against, not a brief to reinterpret, and reading it first invites a
+ * round that re-litigates the slice instead of cleaning it.
+ *
+ * `allowedWriteScope` names scopes rather than paths because the concrete list
+ * is per-slice: the locked `fileScope`, widened by
+ * `gatePolicy.clean.additionalWriteScope`, plus the one escalation file. The
+ * enforcement surface is the `scope` gate over the round's two checkpoints with
+ * `artifactDirPolicy: "declared-only"` (B-11), not this string.
+ *
+ * Manifest-only, like both evaluators: `prompts/cleaner.md` is rendered
+ * directly by the orchestrator, and the completeness checks validate this all
+ * the same.
+ */
+export const CLEANER_CONTEXT_MANIFEST = {
+  version: 1,
+  role: "cleaner",
+  objective:
+    "Make the declared clean gates pass on the approved tree without changing the behavior the candidate was approved for.",
+  nonGoals: [
+    "Changing, weakening or deleting a test, an assertion or an expectation",
+    "Suppressing a gate with a pragma, a skip marker or a configuration exclusion",
+    "Redefining the slice's behavior, its acceptance manifest or its locked contract",
+    "Widening the declared file scope, or writing any slice artifact other than the escalation file",
+  ],
+  allowedWriteScope: [
+    "the locked acceptance manifest's fileScope",
+    "gatePolicy.clean.additionalWriteScope",
+    "slice/cleaner-escalation.json",
+  ],
+  stopConditions: [
+    "Every failing clean gate named in the quality failures is addressed and the work is committed with its rationale",
+    "The round's write scope is exhausted, so the remaining failures are reported rather than forced",
+  ],
+  escalationConditions: [
+    "The approved baseline itself is what the clean gate is right about; it is reported as a BASELINE_IS_WRONG escalation that returns the slice to the generator",
+    "A clean gate can only be satisfied by changing behavior the candidate was approved for",
+  ],
+  acceptedInputArtifactClasses: [
+    "quality-failures",
+    "change-summary",
+    "approved-baseline",
+    "acceptance-manifest",
+    "locked-contract",
+  ],
+  outputArtifact: "cleaner-checkpoint",
+  inputOrder: [
+    "quality-failures",
+    "change-summary",
+    "approved-baseline",
+    "acceptance-manifest",
+    "locked-contract",
+  ],
+  inlineSizeBudgetBytes: 65_536,
+  omittedArtifactClasses: [
+    ...ROLE_ENVELOPE_OMISSIONS,
+    // The review artifacts and the handoff are withheld for one reason: they
+    // are other roles' accounts of this slice, and a cleaner that reads them
+    // is reading an argument about the tree instead of the gate output it was
+    // given.
+    "qa-review-artifacts",
+    "final-review-pair",
+    "candidate-handoff",
+    "dependency-sibling-handoffs",
+    "planner-conversation",
+    "generator-conversation",
+    "other-qa-stage-findings",
+  ],
+} as const satisfies ContextEnvelopeManifest;
+
 export type PromptAssemblyRole =
   | "explorer"
   | "planner"
@@ -751,15 +832,16 @@ export type PromptAssemblyRole =
 
 /**
  * Roles that carry a versioned context-envelope manifest. A superset of
- * PromptAssemblyRole: "evaluator-qa" (candidate evaluator) and
- * "evaluator-final" (#96) have manifest-only role contracts today — their
+ * PromptAssemblyRole: "evaluator-qa" (candidate evaluator), "evaluator-final"
+ * (#96) and "cleaner" (#87) have manifest-only role contracts today — their
  * prompts are still rendered directly by the orchestrator, so no assembly path
  * consumes them yet.
  */
 export type ContextEnvelopeRole =
   | PromptAssemblyRole
   | "evaluator-qa"
-  | "evaluator-final";
+  | "evaluator-final"
+  | "cleaner";
 
 export interface RoleEnvelopeEvidence {
   role: PromptAssemblyRole;

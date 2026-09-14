@@ -37,7 +37,14 @@ import {
 } from "./orchestrator.js";
 import * as gitModule from "./git.js";
 import * as migrationGate from "./migration-gate.js";
-import { loadRunState, saveRunState } from "./run-state.js";
+import {
+  finalEvaluationFor,
+  loadRunState,
+  qualityStagesFor,
+  recordQualityStageRound,
+  saveRunState,
+} from "./run-state.js";
+import { CLEANER_ESCALATION_FILENAME } from "./cleaner-stage.js";
 import { resolveCandidateTreeId } from "./gate-runner.js";
 import { recordExactStageCheckpoint } from "./exact-stage-resume.js";
 import { saveQAConvergenceState } from "./qa-convergence.js";
@@ -56,6 +63,7 @@ import {
   expectDeclaresInOrder,
   expectSomeAttemptDeclaresInOrder,
   git,
+  makeCleanPolicyWorktree,
   makeContext,
   makeRepo,
   terminateFixtureChildren,
@@ -1014,9 +1022,10 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     }
     // Run state is a locator; the artifact is canonical.
     const state = loadRunState(repo, "prd-070");
-    // #96 P-06: the additive finalEvaluations record bumps the version; the
-    // #91 baseline locator below still loads unchanged.
-    expect(state.version).toBe(5);
+    // #96 P-06: the additive finalEvaluations record bumps the version, and
+    // #87's additive qualityStages record bumps it again; the #91 baseline
+    // locator below still loads unchanged.
+    expect(state.version).toBe(6);
     expect(state.approvedBaselines?.["70"]).toEqual({
       treeId: baseline.treeId,
       commit: baseline.commit,
@@ -2330,5 +2339,640 @@ describe("dependency-relevant sibling handoffs", () => {
     );
     expect(ctx.siblingHandoffsBlock).toContain("01-dependency/handoff.md");
     expect(ctx.siblingHandoffsBlock).not.toContain("02-unrelated");
+  });
+});
+
+/**
+ * The cleaner stage at the post-approval transition (#87), with a real
+ * `gatePolicy.clean`.
+ *
+ * A marker word inside the declared file is the whole clean gate: it is red
+ * until a cleaner round rewrites `change.txt` to carry {@link CLEAN_MARKER},
+ * which is what lets a fixture drive the stage through its exits without a
+ * formatter.
+ *
+ * The marker is content rather than a new file on purpose. A clean round may
+ * write outside the manifest's scope — that is what `additionalWriteScope`
+ * buys — but the widening is round-scoped: the *final* candidate is still
+ * gated against the manifest alone, so a marker file would leave the run
+ * with an undeclared path and fail final evaluation on `scope` instead of
+ * reaching the exits these scenarios are about.
+ */
+const CLEAN_MARKER = "formatted";
+
+/** The required clean gate every scenario below declares. */
+const FORMAT_GATE = {
+  id: "format",
+  command: process.execPath,
+  args: [
+    "-e",
+    `if (!require('node:fs').readFileSync('change.txt', 'utf-8')` +
+      `.includes('${CLEAN_MARKER}')) { ` +
+      `console.error('the formatter would rewrite change.txt'); ` +
+      `process.exit(1); }`,
+  ],
+  required: true,
+  expectedCostMs: 200,
+};
+
+/**
+ * A path the clean set widens the round's scope gate to. Nothing below writes
+ * it: it is here so the undeclared path scenario two *does* write is undeclared
+ * against a policy that could have declared it.
+ */
+const CLEAN_SET_PATH = "cleanup-notes.txt";
+
+/**
+ * A repository the base gates can run in: `typecheck` and `test` scripts that
+ * exit 0, so the regression bundle a cleaner round has to keep green is a real
+ * bundle of real commands rather than a set of absent-script skips.
+ */
+function makeCleanerRepo(): string {
+  const repo = makeRepo();
+  writeFileSync(
+    join(repo, "package.json"),
+    JSON.stringify({
+      name: "cleaner-fixture",
+      private: true,
+      scripts: { typecheck: 'node -e "0"', test: 'node -e "0"' },
+    }),
+    "utf-8",
+  );
+  git(repo, ["add", "package.json"]);
+  git(repo, ["commit", "-m", "add gate scripts"]);
+  return repo;
+}
+
+/**
+ * The shared context, plus the one thing the other scenarios in this file do
+ * without: a **real slice worktree**, cut outside the repository.
+ *
+ * Every other fixture here runs the slice in the repository root, which is
+ * cheaper and harmless while every gate runs against a materialized checkpoint.
+ * The cleaner's round 0 does not: it gates the accepted tree *in place*, in
+ * `ctx.worktreeDir`, and `runGates` restores a gate checkout with
+ * `git clean -ffdx`. With `worktreeDir === repoRoot` that sweep deletes the
+ * repository's ignored `.afk/` — this run's journal, its gate evidence, its run
+ * state and its cleaner archives — which production can never see, because a
+ * slice worktree is never the repository root. So the fixture takes the
+ * production shape rather than narrowing what the assertions may read.
+ */
+function makeCleanerContext(
+  provider: AgentProvider,
+  clean: unknown,
+  configOverrides: Parameters<typeof makeContext>[2] = {},
+): { repo: string; worktree: string; ctx: ReturnType<typeof makeContext> } {
+  const repo = makeCleanerRepo();
+  const ctx = makeContext(repo, provider, {
+    commandTimeoutMs: 30_000,
+    heartbeatIntervalMs: 20,
+    infrastructureRetries: 0,
+    ...configOverrides,
+  });
+  const worktree = makeCleanPolicyWorktree(repo, ctx, clean);
+  return { repo, worktree, ctx };
+}
+
+function treeOf(repo: string, revision = "HEAD"): string {
+  return execFileSync("git", ["rev-parse", `${revision}^{tree}`], {
+    cwd: repo,
+    encoding: "utf-8",
+  }).trim();
+}
+
+function subjects(repo: string, grep: string): string[] {
+  return execFileSync(
+    "git",
+    ["log", "--format=%s", `--grep=${grep}`, "--fixed-strings"],
+    { cwd: repo, encoding: "utf-8" },
+  )
+    .split(/\r?\n/)
+    .filter((line) => line.trim() !== "");
+}
+
+/** One gate attempt's evidence, as the assertions below read it. */
+interface GateAttemptEvidence {
+  results: Array<{
+    gateId: string;
+    status: string;
+    failureKind: string | null;
+    detail?: string;
+  }>;
+}
+
+function evidenceAttempts(evidenceDir: string): GateAttemptEvidence[] {
+  return readdirSync(evidenceDir)
+    .filter((name) => name.endsWith(".json"))
+    .sort()
+    .map(
+      (name) =>
+        JSON.parse(
+          readFileSync(join(evidenceDir, name), "utf-8"),
+        ) as GateAttemptEvidence,
+    );
+}
+
+/**
+ * A run whose cleaner escalates the approved baseline and then cleans the
+ * candidate the generator re-approved (#87 B-03, B-06, B-09, B-13, B-14).
+ *
+ * A new spawned scenario, and the last resort it is supposed to be
+ * (`CLAUDE.md`, "Where a new assertion goes"). The orchestrator-side state no
+ * cheaper assertion reaches: the *position* of the stage between the approval
+ * commit and the post-approval writing stage, the round-gate bundle assembled
+ * from this round's own pre-QA and full-suite declarations, the archive names
+ * stamped with the generator round the approval happened in, and the second
+ * `PersistedQualityStage` entry a re-approval opens — every one of which is a
+ * value only `runSliceExecute` can produce. `src/cleaner-stage.test.ts` owns
+ * the round loop itself, against the same seams this run wires up.
+ *
+ * One run, several assertions, and every fact captured *inside* the hook: the
+ * shared `afterEach` removes the fixture repository.
+ */
+describe("a clean policy escalates, then repairs the re-approved tree", () => {
+  let phase: unknown;
+  let generatorRounds = 0;
+  let cleanerCalls = 0;
+  /** Every role dispatch and the writing stage, in the order they happened. */
+  let order: string[] = [];
+  let generatorPrompts: string[] = [];
+  let cleanerPrompts: string[] = [];
+  /** The tree, and the count of accepted commits, at each cleaner dispatch. */
+  let treesAtCleaner: string[] = [];
+  let acceptedAtCleaner: number[] = [];
+  let sweepCommits: string[] = [];
+  let archivedNames: string[] = [];
+  let attemptsWithFormat: GateAttemptEvidence[] = [];
+  let stages: unknown;
+  let finalView: ReturnType<typeof finalEvaluationFor>;
+
+  beforeAll(async () => {
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    generatorRounds = 0;
+    cleanerCalls = 0;
+    order = [];
+    generatorPrompts = [];
+    cleanerPrompts = [];
+    treesAtCleaner = [];
+    acceptedAtCleaner = [];
+    let artifactDir = "";
+    let relSliceDir = "";
+    let tree = "";
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(options: InvokeOptions): Promise<InvokeResult> {
+        if (options.role === "generator") {
+          generatorRounds++;
+          generatorPrompts.push(options.prompt ?? "");
+          order.push(`generator-${generatorRounds}`);
+          writeFileSync(
+            join(tree, "change.txt"),
+            `round ${generatorRounds}\n`,
+            "utf-8",
+          );
+        } else if (options.role === "evaluator-qa") {
+          order.push("evaluator-qa");
+          writeFileSync(
+            join(artifactDir, "qa-report.md"),
+            "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
+            "utf-8",
+          );
+          writeQAReview(artifactDir, "deterministic");
+        } else if (options.role === "cleaner") {
+          cleanerCalls++;
+          cleanerPrompts.push(options.prompt ?? "");
+          order.push(`cleaner-${cleanerCalls}`);
+          treesAtCleaner.push(treeOf(tree));
+          acceptedAtCleaner.push(subjects(tree, "feat(#70)").length);
+          if (cleanerCalls === 1) {
+            // The first approval is refused rather than cleaned: the clean gate
+            // cannot be cleared without changing what the tree does.
+            writeFileSync(
+              join(artifactDir, CLEANER_ESCALATION_FILENAME),
+              JSON.stringify({
+                version: 1,
+                class: "BASELINE_IS_WRONG",
+                id: "CL-01",
+                summary: "the approved tree cannot be formatted",
+                evidence: "format exits 1 on change.txt",
+                expected: "change.txt is written in the project's format",
+                observed: "change.txt is written in another format",
+              }),
+              "utf-8",
+            );
+          } else {
+            // The clean-up itself: the declared file, rewritten so the clean
+            // gate is green.
+            writeFileSync(
+              join(tree, "change.txt"),
+              `round ${generatorRounds}, ${CLEAN_MARKER}\n`,
+              "utf-8",
+            );
+          }
+        } else if (options.role === "evaluator-final") {
+          order.push("evaluator-final");
+          const prompt = options.prompt ?? "";
+          const treeIdFrom = (label: string): string => {
+            const match = new RegExp(`${label} tree ID: \`([^\`]+)\``).exec(
+              prompt,
+            );
+            expect(match, `${label} tree ID in the prompt`).not.toBe(null);
+            return match![1]!;
+          };
+          const reviewDir = join(options.cwd ?? tree, relSliceDir);
+          mkdirSync(reviewDir, { recursive: true });
+          writeFileSync(
+            join(reviewDir, "final-review.json"),
+            JSON.stringify({
+              version: 1,
+              verdict: "PASS",
+              baselineTreeId: treeIdFrom("Approved baseline"),
+              finalTreeId: treeIdFrom("Final checkpoint"),
+              findings: [],
+            }),
+            "utf-8",
+          );
+          writeFileSync(
+            join(reviewDir, "final-report.md"),
+            "# Final Report\n\n**Verdict:** PASS\n",
+            "utf-8",
+          );
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const { repo, worktree, ctx } = makeCleanerContext(
+      provider,
+      { gates: [FORMAT_GATE], additionalWriteScope: [CLEAN_SET_PATH] },
+      {
+        postApprovalWritingStage: () => {
+          order.push("writing-stage");
+        },
+      },
+    );
+    artifactDir = ctx.absSliceDir;
+    relSliceDir = ctx.relSliceDir;
+    tree = worktree;
+
+    phase = await runSliceExecute(ctx);
+
+    sweepCommits = subjects(worktree, "chore(#70): cleaner round");
+    archivedNames = readdirSync(
+      join(repo, ".afk", "artifacts", "prd-070-stub", "slice-01", "reviews"),
+    );
+    attemptsWithFormat = evidenceAttempts(
+      join(ctx.logger.runDir, "gates", "s01"),
+    ).filter((attempt) =>
+      attempt.results.some((gate) => gate.gateId === "format"),
+    );
+    stages = JSON.parse(
+      JSON.stringify(qualityStagesFor(loadRunState(repo, "prd-070-stub"), "70")),
+    );
+    finalView = finalEvaluationFor(loadRunState(repo, "prd-070-stub"), "70");
+  }, 300_000);
+
+  it("[behavior:#87:B-03] runs after the approval commit and before the post-approval writing stage", () => {
+    expect(phase).toEqual({ phase: "PASS" });
+    // The stage's position, which is the whole of B-03: every cleaner dispatch
+    // sits after that round's QA verdict and its approval commit, and the
+    // writing stage runs once, after the cleaner released a tree.
+    expect(order).toEqual([
+      "generator-1",
+      "evaluator-qa",
+      "cleaner-1",
+      "generator-2",
+      "evaluator-qa",
+      "cleaner-2",
+      "writing-stage",
+      "evaluator-final",
+    ]);
+    // The tree it cleans is the one the gates authorized and the QA verdict is
+    // tied to: the approval commit already exists at every dispatch.
+    expect(acceptedAtCleaner).toEqual([1, 2]);
+  });
+
+  it("[behavior:#87:B-06] gates the round's checkpoint against the bundle the approval rested on", () => {
+    // Round 0 gates the accepted tree with the clean gates and nothing else,
+    // once per approval, and both times red — which is what buys a round.
+    const roundZero = attemptsWithFormat.filter(
+      (attempt) => attempt.results.length === 1,
+    );
+    expect(roundZero).toHaveLength(2);
+    for (const attempt of roundZero) {
+      expect(attempt.results[0]).toMatchObject({
+        gateId: "format",
+        status: "FAIL",
+      });
+    }
+    // The round's own gate run: the clean gate first, then the scope,
+    // feedback-integrity, skip and suppression gates, then the regression
+    // bundle this round already resolved. Containment and relative order, per
+    // `expectDeclaresInOrder`'s contract.
+    const roundOne = attemptsWithFormat.filter(
+      (attempt) => attempt.results.length > 1,
+    );
+    expect(roundOne).toHaveLength(1);
+    expectDeclaresInOrder(
+      roundOne[0]!.results.map((gate) => gate.gateId),
+      [
+        "format",
+        "scope",
+        "feedback-integrity",
+        "tests:skipped",
+        "suppressions",
+        "tests",
+      ],
+    );
+    expect(
+      roundOne[0]!.results.every(
+        (gate) => gate.status === "PASS" || gate.status === "SKIPPED",
+      ),
+    ).toBe(true);
+    // The sweep commit the round's checkpoint is taken from — one per round
+    // that wrote, and the escalating round wrote none.
+    expect(sweepCommits).toEqual(["chore(#70): cleaner round 1"]);
+  });
+
+  it("[behavior:#87:B-09] archives each round under the cleaner prefix, stamped with the generator round", () => {
+    // The escalation is archived before the reset that discards it, and every
+    // round's agent log with it — the one account of the round's reasoning that
+    // survives a `git reset --hard`. `r1` and `r2` are the generator rounds the
+    // two approvals happened in; `a1` is each stage's own first round.
+    expect(archivedNames).toContain("cleaner-review-r1-a1.json");
+    expect(archivedNames).toContain("cleaner-log-r1-a1.log");
+    expect(archivedNames).toContain("cleaner-log-r2-a1.log");
+    // Its own prefix, not the final evaluator's: both stages archive into this
+    // one directory, so the prefix is the only thing that keeps a cleaner
+    // round's review and a final grading apart.
+    expect(archivedNames).toContain("final-review-r2-a1.json");
+    expect(
+      archivedNames.filter((name) => name.startsWith("cleaner-")).sort(),
+    ).toEqual([
+      "cleaner-log-r1-a1.log",
+      "cleaner-log-r2-a1.log",
+      "cleaner-review-r1-a1.json",
+    ]);
+  });
+
+  it("[behavior:#87:B-13] returns the slice to the generator with the baseline citation invalidated", () => {
+    // One generator round bought by the escalation, and the failure set it was
+    // handed cites the escalation's id and the archived artifact — not the live
+    // file, which the reset removed.
+    expect(generatorRounds).toBe(2);
+    expect(generatorPrompts[1]).toContain("CL-01");
+    expect(generatorPrompts[1]).toContain("cleaner-review-r1-a1.json");
+    expect(generatorPrompts[1]).toContain(
+      "change.txt is written in the project's format",
+    );
+    // The accepted tree the escalation refused is invalidated, so the
+    // re-approved candidate cannot stand on it — and the escalation itself
+    // consumed no final-evaluation attempt.
+    expect(finalView?.invalidatedCandidateTreeIds).toEqual([treesAtCleaner[0]]);
+    expect(finalView?.attempts).toHaveLength(1);
+    expect(finalView?.attempts[0]).toMatchObject({
+      attempt: 1,
+      verdict: "PASS",
+      outcome: "GRADED",
+      invalidated: false,
+    });
+  });
+
+  it("[behavior:#87:B-14] persists one stage entry per approval, each with its own round budget", () => {
+    // A list per issue, not one record: the re-approval opens a fresh entry, so
+    // the escalating round is never charged to the re-approved candidate's
+    // budget — even when the two trees are identical.
+    expect(stages).toEqual([
+      {
+        stage: "cleaner",
+        enabled: true,
+        outcome: "ESCALATED",
+        rounds: [
+          {
+            round: 1,
+            attempt: 1,
+            inputTreeId: treesAtCleaner[0],
+            gateIds: [],
+            outcome: "ESCALATED",
+          },
+        ],
+      },
+      {
+        stage: "cleaner",
+        enabled: true,
+        outcome: "PASS",
+        rounds: [
+          expect.objectContaining({
+            round: 1,
+            attempt: 2,
+            inputTreeId: treesAtCleaner[1],
+            outcome: "PASS",
+          }),
+        ],
+      },
+    ]);
+    // And the round the second entry recorded is the one whose gate ids the
+    // evidence above shows, so the persisted record and the evidence agree.
+    expect(
+      (stages as Array<{ rounds: Array<{ gateIds: string[] }> }>)[1]!.rounds[0]!
+        .gateIds,
+    ).toContain("format");
+  });
+});
+
+/**
+ * A resumed run whose cleaner has two persisted rounds and spends its last one
+ * (#87 B-06, B-08).
+ *
+ * The second and last new spawn. What no cheaper assertion reaches is the
+ * `finishStuck` route out of an exhausted stage: the code-assembled `stuck.md`
+ * listing every remaining red gate with its log artifact, and the preserved
+ * last checkpoint the reason promises an operator. The focused cleaner-stage
+ * tests already own the default three-round bound, the reverted regression,
+ * and the regression note handed to the next round. Seed those two spent
+ * rounds through the production run-state writer instead of replaying their
+ * git-heavy gate phases in a second pipeline.
+ */
+describe("a clean policy resumes at its final round and exhausts", () => {
+  let phase: { phase: string; error?: string } | undefined;
+  let cleanerCalls = 0;
+  let stuckDiagnosis = "";
+  let headTree = "";
+  let stages: unknown;
+  let roundAttempts: GateAttemptEvidence[] = [];
+  let cleanerJournalEvents: Array<{
+    type: string;
+    agent?: string;
+    round?: number;
+  }> = [];
+
+  beforeAll(async () => {
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    cleanerCalls = 0;
+    let artifactDir = "";
+    let repo = "";
+    let tree = "";
+    let seededRounds = false;
+    const provider: AgentProvider = {
+      name: "stub",
+      async invoke(options: InvokeOptions): Promise<InvokeResult> {
+        if (options.role === "generator") {
+          writeFileSync(join(tree, "change.txt"), "round 1\n", "utf-8");
+        } else if (options.role === "evaluator-qa") {
+          writeFileSync(
+            join(artifactDir, "qa-report.md"),
+            "# QA Report\n\n**Verdict:** PASS\n**Failure class:** NONE\n",
+            "utf-8",
+          );
+          writeQAReview(artifactDir, "deterministic");
+          if (!seededRounds) {
+            seededRounds = true;
+            const inputTreeId = treeOf(tree);
+            recordQualityStageRound(
+              repo,
+              "prd-070-stub",
+              "70",
+              {
+                round: 1,
+                attempt: 1,
+                inputTreeId,
+                outputTreeId: inputTreeId,
+                gateIds: ["format"],
+                outcome: "FAIL",
+              },
+              { startNewEntry: true },
+            );
+            recordQualityStageRound(repo, "prd-070-stub", "70", {
+              round: 2,
+              attempt: 1,
+              inputTreeId,
+              outputTreeId: inputTreeId,
+              gateIds: ["format"],
+              outcome: "FAIL",
+            });
+          }
+        } else if (options.role === "cleaner") {
+          cleanerCalls++;
+          // Declared, so no regression — and still not the marker, so the
+          // required clean gate stays red and the persisted bound ends it.
+          writeFileSync(
+            join(tree, "change.txt"),
+            `round 1, tidied ${cleanerCalls}\n`,
+            "utf-8",
+          );
+        }
+        return { exitCode: 0, stdout: "", stats: {} };
+      },
+    };
+    const fixture = makeCleanerContext(provider, {
+      gates: [
+        FORMAT_GATE,
+        // Advisory and permanently red: an optional clean gate is recorded and
+        // never blocks, so it must neither buy a round nor reach the diagnosis.
+        {
+          id: "style",
+          command: process.execPath,
+          args: ["-e", "console.error('style is advisory'); process.exit(1)"],
+          required: false,
+          expectedCostMs: 200,
+        },
+      ],
+      additionalWriteScope: [CLEAN_SET_PATH],
+    });
+    repo = fixture.repo;
+    const { worktree, ctx } = fixture;
+    artifactDir = ctx.absSliceDir;
+    tree = worktree;
+
+    phase = (await runSliceExecute(ctx)) as { phase: string; error?: string };
+
+    stuckDiagnosis = readFileSync(join(ctx.absSliceDir, "stuck.md"), "utf-8");
+    headTree = treeOf(worktree);
+    stages = JSON.parse(
+      JSON.stringify(qualityStagesFor(loadRunState(repo, "prd-070-stub"), "70")),
+    );
+    roundAttempts = evidenceAttempts(
+      join(ctx.logger.runDir, "gates", "s01"),
+    ).filter(
+      (attempt) =>
+        attempt.results.some((gate) => gate.gateId === "format") &&
+        attempt.results.length > 2,
+    );
+    cleanerJournalEvents = readFileSync(
+      join(ctx.logger.runDir, "events.jsonl"),
+      "utf-8",
+    )
+      .trim()
+      .split(/\r?\n/)
+      .map(
+        (line) =>
+          JSON.parse(line) as {
+            type: string;
+            agent?: string;
+            round?: number;
+          },
+      )
+      .filter((event) => event.agent === "cleaner");
+  }, 300_000);
+
+  it("[behavior:#87:B-06] journals the resumed final cleaner round as one completed stage", () => {
+    const roundsFor = (type: string) =>
+      cleanerJournalEvents
+        .filter((event) => event.type === type)
+        .map((event) => event.round);
+
+    expect(cleanerCalls).toBe(1);
+    expect(roundsFor("phase-started")).toEqual([3]);
+    expect(roundsFor("phase-ended")).toEqual([3]);
+    expect(roundsFor("stage-duration")).toEqual([3]);
+    expect(
+      cleanerJournalEvents.map((event) => `${event.type}:${event.round}`),
+    ).toEqual([
+      "phase-started:3",
+      "phase-ended:3",
+      "stage-duration:3",
+    ]);
+  });
+
+  it("[behavior:#87:B-08] finishes stuck with every remaining red gate and the preserved checkpoint", () => {
+    expect(phase?.phase).toBe("STUCK");
+    const reason = phase?.error ?? "";
+    expect(reason).toContain("spent all 3 round(s)");
+    expect(reason).toContain("format (FAIL)");
+    // A command gate's `detail` is not its output, so what stands in for the
+    // formatter's message is the log artifact the reason cites beside it.
+    expect(reason).toContain("(the gate recorded no detail)");
+    expect(reason).toMatch(/-format\.log/);
+    expect(reason).toContain("The last checkpoint is preserved.");
+    // The diagnosis an operator reads carries the same list and cites the log.
+    expect(stuckDiagnosis).toContain("format (FAIL)");
+    expect(stuckDiagnosis).toMatch(/-format\.log/);
+    // The optional gate was red on every round and is in none of it: it is
+    // recorded, and it blocks nothing.
+    expect(roundAttempts).toHaveLength(1);
+    for (const attempt of roundAttempts) {
+      expect(attempt.results.find((gate) => gate.gateId === "style")).
+        toMatchObject({ status: "FAIL" });
+    }
+    expect(reason).not.toContain("style");
+    // And the promise the reason makes holds: the tree the last round produced
+    // is still the worktree's HEAD, not the accepted tree it started from.
+    const rounds = (
+      stages as Array<{
+        rounds: Array<{
+          round: number;
+          inputTreeId: string;
+          outputTreeId?: string;
+          outcome: string;
+        }>;
+      }>
+    )[0]!.rounds;
+    expect(rounds.map((round) => round.round)).toEqual([1, 2, 3]);
+    expect(rounds.map((round) => round.outcome)).toEqual([
+      "FAIL",
+      "FAIL",
+      "EXHAUSTED",
+    ]);
+    expect(headTree).toBe(rounds[2]!.outputTreeId);
+    expect(headTree).not.toBe(rounds[0]!.inputTreeId);
   });
 });

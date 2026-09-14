@@ -625,8 +625,9 @@ describe("runGates", () => {
       onOutput: (gateId, text) => output.push(`${gateId}:${text}`),
     });
 
-    // B-04: a fresh document stamps the current version, now 3.
-    expect(result.evidence.version).toBe(3);
+    // B-04: a fresh document stamps the current version, now 4 (#87 B-10).
+    expect(result.evidence.version).toBe(GATE_EVIDENCE_VERSION);
+    expect(result.evidence.version).toBe(4);
     expect(result.evidence.results.map(({ gateId }) => gateId)).toEqual([
       "typecheck",
       "tests",
@@ -975,9 +976,19 @@ describe("runGates", () => {
       heartbeatIntervalMs: 20,
     });
 
-    expect(GATE_EVIDENCE_VERSION).toBe(3);
-    expect(result.evidence.version).toBe(3);
+    expect(GATE_EVIDENCE_VERSION).toBe(4);
+    expect(result.evidence.version).toBe(4);
     expect(readGateEvidence(result.evidencePath)).toEqual(result.evidence);
+
+    // A version-3 document — the shape every run between #86 and #87 wrote —
+    // still reads: version 4 only added one optional findings field.
+    const v3Path = join(evidenceDir, "version-3.json");
+    writeFileSync(
+      v3Path,
+      JSON.stringify({ ...result.evidence, version: 3 }),
+      "utf-8",
+    );
+    expect(readGateEvidence(v3Path).version).toBe(3);
 
     // A version-2 document — the shape every run between #195 and #86 wrote —
     // still reads: version 3 only added optional markers.
@@ -1015,15 +1026,190 @@ describe("runGates", () => {
       /version 1 cannot carry findings/i,
     );
 
-    const future = join(evidenceDir, "version-4.json");
+    const future = join(evidenceDir, "version-5.json");
     writeFileSync(
       future,
-      JSON.stringify({ ...result.evidence, version: 4 }),
+      JSON.stringify({ ...result.evidence, version: 5 }),
       "utf-8",
     );
     expect(() => readGateEvidence(future)).toThrow(
-      /unsupported gate evidence version: 4/i,
+      /unsupported gate evidence version: 5/i,
     );
+  });
+
+  it("[behavior:#87:B-10] stamps suppressions findings at version 4 and refuses them below it", async () => {
+    const { cwd, evidenceDir, treeId } = makeCheckpoint();
+    const suppressions = [
+      { path: "src/thing.ts", line: 3, detectorId: "ts-eslint" },
+    ];
+    const result = await runGates({
+      treeId,
+      cwd,
+      evidenceDir,
+      declarations: [
+        {
+          id: "suppressions",
+          stage: "deterministic",
+          required: true,
+          run: () => ({
+            status: "FAIL",
+            failureKind: "COMMAND",
+            detail: "one added suppression",
+            findings: { suppressions },
+          }),
+        },
+      ],
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
+      heartbeatIntervalMs: 20,
+    });
+
+    expect(result.evidence.version).toBe(4);
+    expect(result.evidence.results[0]?.findings?.suppressions).toEqual(
+      suppressions,
+    );
+    // The triple survives the round trip: an operator surface and the next
+    // round read the exact occurrence, not a count.
+    expect(
+      readGateEvidence(result.evidencePath).results[0]?.findings?.suppressions,
+    ).toEqual(suppressions);
+
+    // [behavior:P-06] Versions 1–3 still read, and none of them may carry the
+    // field version 4 introduced: a version-3 reader handed one would report a
+    // clean findings set for a gate that named offenders.
+    for (const version of [2, 3]) {
+      const path = join(evidenceDir, `suppressions-v${version}.json`);
+      writeFileSync(
+        path,
+        JSON.stringify({ ...result.evidence, version }),
+        "utf-8",
+      );
+      expect(() => readGateEvidence(path)).toThrow(
+        /below version 4 cannot carry suppressions/i,
+      );
+    }
+
+    // A malformed triple is refused rather than read past.
+    const malformed = join(evidenceDir, "suppressions-malformed.json");
+    writeFileSync(
+      malformed,
+      JSON.stringify({
+        ...result.evidence,
+        results: [
+          {
+            ...result.evidence.results[0]!,
+            findings: {
+              suppressions: [{ path: "src/thing.ts", line: 0, detectorId: "x" }],
+            },
+          },
+        ],
+      }),
+      "utf-8",
+    );
+    expect(() => readGateEvidence(malformed)).toThrow(/invalid gate evidence/i);
+  });
+
+  it("[behavior:#87:P-06] still reads versions 1-3 after the bump, and refuses a version-3 document naming suppressions", async () => {
+    const { cwd, evidenceDir, treeId } = makeCheckpoint();
+    const result = await runGates({
+      treeId,
+      cwd,
+      evidenceDir,
+      declarations: [
+        {
+          id: "typecheck",
+          stage: "deterministic",
+          required: true,
+          run: () => ({ status: "PASS", failureKind: null, detail: "clean" }),
+        },
+      ],
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
+      heartbeatIntervalMs: 20,
+    });
+
+    // An evidence bump that stranded the journals mid-run would make an
+    // in-flight resume unreadable, so the writer moves and the reader does not.
+    for (const version of [1, 2, 3]) {
+      const path = join(evidenceDir, `p06-v${version}.json`);
+      writeFileSync(
+        path,
+        JSON.stringify({ ...result.evidence, version }),
+        "utf-8",
+      );
+      expect(readGateEvidence(path).version).toBe(version);
+    }
+
+    // And no version-3 document carries the field version 4 introduced: a
+    // reader handed one would report a clean findings set for a gate that
+    // named offenders, which is the failure the version line exists to prevent.
+    const v3WithSuppressions = join(evidenceDir, "p06-v3-suppressions.json");
+    writeFileSync(
+      v3WithSuppressions,
+      JSON.stringify({
+        ...result.evidence,
+        version: 3,
+        results: [
+          {
+            ...result.evidence.results[0]!,
+            findings: {
+              suppressions: [
+                { path: "src/thing.ts", line: 3, detectorId: "ts-eslint" },
+              ],
+            },
+          },
+        ],
+      }),
+      "utf-8",
+    );
+    expect(() => readGateEvidence(v3WithSuppressions)).toThrow(
+      /below version 4 cannot carry suppressions/i,
+    );
+  });
+
+  it("[behavior:#87:P-07] never caches the in-process suppressions gate, and leaves the cache key alone", async () => {
+    const { root, cwd, evidenceDir, treeId } = makeCheckpoint();
+    const cachePath = join(root, "gate-cache.json");
+    let runs = 0;
+    const declarations: GateDeclaration[] = [
+      {
+        id: "suppressions",
+        stage: "deterministic",
+        required: true,
+        // Stands in for `suppressionGateDeclaration`, whose shape this is: no
+        // `command`, so the cache has nothing to key an entry on.
+        run: () => {
+          runs += 1;
+          return { status: "PASS", failureKind: null, detail: "no increase" };
+        },
+      },
+    ];
+    const common = {
+      treeId,
+      cwd,
+      inactivityTimeoutMs: ordinaryInactivityTimeoutMs,
+      wallClockTimeoutMs: ordinaryWallClockTimeoutMs,
+      heartbeatIntervalMs: 20,
+      cache: { path: cachePath, enabled: true },
+      declarations,
+    };
+
+    await runGates({ ...common, evidenceDir: join(evidenceDir, "first") });
+    const second = await runGates({
+      ...common,
+      evidenceDir: join(evidenceDir, "second"),
+    });
+
+    // Identical tree, cache enabled, and it still executes: a cached "no
+    // suppression increase" would be a verdict about a tree comparison, and the
+    // input tree is not part of the key.
+    expect(runs).toBe(2);
+    expect(second.evidence.results[0]!.cacheReused).toBeUndefined();
+    // No entry recorded either, so the key stays the command-derived one it was.
+    const cached = existsSync(cachePath)
+      ? readFileSync(cachePath, "utf-8")
+      : "";
+    expect(cached).not.toContain("suppressions");
   });
 
   it("[behavior:B-03] reuses a cached PASS for an identical tree and says so in the evidence and the log", async () => {
@@ -1728,11 +1914,11 @@ describe("runGates", () => {
     const unsupportedVersionPath = join(evidenceDir, "future-version.json");
     writeFileSync(
       unsupportedVersionPath,
-      JSON.stringify({ ...first.evidence, version: 4 }),
+      JSON.stringify({ ...first.evidence, version: 5 }),
       "utf-8",
     );
     expect(() => readGateEvidence(unsupportedVersionPath)).toThrow(
-      /unsupported gate evidence version: 4/i,
+      /unsupported gate evidence version: 5/i,
     );
   });
 

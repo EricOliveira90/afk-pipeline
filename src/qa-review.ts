@@ -4,6 +4,7 @@ import {
   requireNonBlankString,
   type ContractFindingSeverity,
 } from "./contract-review.js";
+import { CLEANER_ESCALATION_ARTIFACT_NAME } from "./escalation.js";
 import { FINAL_REVIEW_FILENAME } from "./final-evaluation.js";
 import type { BaseGateSkipCitation } from "./qa-gate-authorization.js";
 import { execFileSync } from "node:child_process";
@@ -72,11 +73,23 @@ export interface QAReview {
  * type so that one archive prefix map, one filename map and one resume replay
  * cover all three — a second dialect of the same three concepts is exactly how
  * a resumed run loses an attempt.
+ *
+ * `"cleaner"` is the one member that does **not** follow that rule, and it is a
+ * member anyway (#87 B-09). It takes the archive prefix map and the filename map
+ * — its escalation and its agent log are archived beside every other stage's
+ * artifacts, and without membership `qaArchivePrefix`'s `else → "final"`
+ * fallback would file them under the final evaluator's prefix. It deliberately
+ * does not take the third: the cleaner is not dispatched by the QA review
+ * machinery, writes no {@link QAReviewAttemptRecord}, and so has nothing to
+ * replay and no part in resume precedence. That is also why it is absent from
+ * {@link QA_REVIEW_STAGES}, which is the array every replay and every
+ * precedence sweep is derived from.
  */
 export type QAReviewStage =
   | "deterministic"
   | "shared-preview"
-  | "final-evaluation";
+  | "final-evaluation"
+  | "cleaner";
 
 /** Every stage, in dispatch order. Ties in resume precedence break this way. */
 export const QA_REVIEW_STAGES: readonly QAReviewStage[] = [
@@ -433,6 +446,10 @@ export function parseQAReview(
 export function qaReviewFilename(stage: QAReviewStage): string {
   if (stage === "deterministic") return QA_REVIEW_FILENAME;
   if (stage === "shared-preview") return UAT_REVIEW_FILENAME;
+  // The cleaner's canonical artifact is its escalation, and it is optional: the
+  // stage's usual output is a commit, so `archiveQAReviewAttempt` archives this
+  // name only on the rounds that wrote one (#87 B-09).
+  if (stage === "cleaner") return CLEANER_ESCALATION_ARTIFACT_NAME;
   return FINAL_REVIEW_FILENAME;
 }
 

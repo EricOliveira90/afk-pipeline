@@ -1,0 +1,75 @@
+{
+  "version": 1,
+  "cause": {
+    "kind": "QA_CONVERGENCE",
+    "interventionClass": "IMPLEMENTATION_INTERVENTION"
+  },
+  "interventionClass": "IMPLEMENTATION_INTERVENTION",
+  "phase": "deterministic-qa",
+  "reasonCodes": [
+    "SEMANTIC_CAP_EXHAUSTED"
+  ],
+  "blockerIds": [
+    "QA-01"
+  ],
+  "summary": "AFK exhausted the bounded deterministic-qa repair capacity with unresolved blocker(s) QA-01.",
+  "findingLineage": [
+    {
+      "stableId": "QA-01",
+      "currentId": "QA-01",
+      "state": "OPEN",
+      "disposition": "OPEN",
+      "occurrences": 1,
+      "summary": "The cleaner dispatch journals phase-started but never phase-ended, so no stage-duration sample is ever derived for agent \"cleaner\" and every round leaves a permanently open stage.",
+      "evidence": "src/orchestrator.ts:6836-6847 emits the only cleaner journal event: logger.phase(..., { type: \"phase-started\", ghIssue: slice.ghIssue, sliceNumber: slice.number, agent: \"cleaner\", round }). Searching the whole source tree for `agent: \"cleaner\"` returns exactly that one hit; every other role (planner, evaluator-contract, explorer, generator, evaluator-qa, evaluator-uat) emits a matching phase-ended. RunJournal.observeStageDuration (src/run-journal.ts:133-169) stores the start in `openStages` on phase-started and returns immediately for any payload whose type is not \"phase-ended\", so stage-duration is only appended when a phase-ended pairs with the open start under stageInvocationKey({ghIssue, agent, round}) (src/stage-durations.ts:1-90). A QA probe (temporary edit to this worktree only, discarded with it) read events.jsonl at the end of the spawned scenario \"a clean policy reverts a regression and exhausts its rounds\" in src/qa-orchestration.test.ts and printed every event whose agent === \"cleaner\": `PROBE cleaner events: [\"phase-started\",\"phase-started\",\"phase-started\"]` — three cleaner rounds, three starts, zero ends, therefore zero stage-duration events. Secondarily, the payload's `round` is the enclosing generator round rather than cleanerInput.round, so all three cleaner rounds collide on one stageInvocationKey and \"last start wins\" (src/run-journal.ts:137-138) discards the earlier two; even with a phase-ended added under that key at most one of the three rounds could ever produce a duration. No test observes this: src/cleaner-stage.test.ts stubs the dispatch seam and so cannot see journaling at all, and no phase-ended or stage-duration assertion anywhere in src/ mentions the cleaner.",
+      "clearCondition": "After a run in which the cleaner stage executes N rounds, the run journal contains, for agent \"cleaner\", N phase-started events and N matching phase-ended events that pair under distinct stageInvocationKeys (one per cleaner round, not per generator round), yielding N stage-duration events; RunJournal leaves no cleaner stage open at the end of the stage; and a test observing the journal of a spawned or dispatch-level cleaner run asserts those events and would fail if either the start, the end, or the per-round key distinction were removed.",
+      "artifactReferences": [
+        ".afk/artifacts/afk-v2-quality-loops-claude-code/slice-01/reviews/qa-review-r1-a1.json",
+        ".kiro/specs/afk-v2-quality-loops/slices/01-cleaner-loop/qa-report-r1-a1.md"
+      ]
+    }
+  ],
+  "attemptedRepairs": [
+    {
+      "phase": "deterministic-qa",
+      "revision": 1,
+      "candidateTreeId": "82359f25087f8976fdb9b0577fdca1d8ad31b373",
+      "activeBlockingIds": [
+        "QA-01"
+      ],
+      "findingLineage": [
+        {
+          "stableId": "QA-01",
+          "currentId": "QA-01",
+          "state": "OPEN",
+          "disposition": "OPEN",
+          "occurrences": 1,
+          "summary": "The cleaner dispatch journals phase-started but never phase-ended, so no stage-duration sample is ever derived for agent \"cleaner\" and every round leaves a permanently open stage.",
+          "evidence": "src/orchestrator.ts:6836-6847 emits the only cleaner journal event: logger.phase(..., { type: \"phase-started\", ghIssue: slice.ghIssue, sliceNumber: slice.number, agent: \"cleaner\", round }). Searching the whole source tree for `agent: \"cleaner\"` returns exactly that one hit; every other role (planner, evaluator-contract, explorer, generator, evaluator-qa, evaluator-uat) emits a matching phase-ended. RunJournal.observeStageDuration (src/run-journal.ts:133-169) stores the start in `openStages` on phase-started and returns immediately for any payload whose type is not \"phase-ended\", so stage-duration is only appended when a phase-ended pairs with the open start under stageInvocationKey({ghIssue, agent, round}) (src/stage-durations.ts:1-90). A QA probe (temporary edit to this worktree only, discarded with it) read events.jsonl at the end of the spawned scenario \"a clean policy reverts a regression and exhausts its rounds\" in src/qa-orchestration.test.ts and printed every event whose agent === \"cleaner\": `PROBE cleaner events: [\"phase-started\",\"phase-started\",\"phase-started\"]` — three cleaner rounds, three starts, zero ends, therefore zero stage-duration events. Secondarily, the payload's `round` is the enclosing generator round rather than cleanerInput.round, so all three cleaner rounds collide on one stageInvocationKey and \"last start wins\" (src/run-journal.ts:137-138) discards the earlier two; even with a phase-ended added under that key at most one of the three rounds could ever produce a duration. No test observes this: src/cleaner-stage.test.ts stubs the dispatch seam and so cannot see journaling at all, and no phase-ended or stage-duration assertion anywhere in src/ mentions the cleaner.",
+          "clearCondition": "After a run in which the cleaner stage executes N rounds, the run journal contains, for agent \"cleaner\", N phase-started events and N matching phase-ended events that pair under distinct stageInvocationKeys (one per cleaner round, not per generator round), yielding N stage-duration events; RunJournal leaves no cleaner stage open at the end of the stage; and a test observing the journal of a spawned or dispatch-level cleaner run asserts those events and would fail if either the start, the end, or the per-round key distinction were removed.",
+          "artifactReferences": [
+            ".afk/artifacts/afk-v2-quality-loops-claude-code/slice-01/reviews/qa-review-r1-a1.json",
+            ".kiro/specs/afk-v2-quality-loops/slices/01-cleaner-loop/qa-report-r1-a1.md"
+          ]
+        }
+      ],
+      "supportingEvidence": [
+        ".afk/artifacts/afk-v2-quality-loops-claude-code/slice-01/reviews/qa-review-r1-a1.json",
+        ".kiro/specs/afk-v2-quality-loops/slices/01-cleaner-loop/qa-report-r1-a1.md"
+      ]
+    }
+  ],
+  "preservedCandidate": {
+    "branch": "afk-claude-code/afk-v2-quality-loops-slice-01-cleaner-loop",
+    "treeId": "82359f25087f8976fdb9b0577fdca1d8ad31b373",
+    "phase": "deterministic-qa",
+    "revision": 1,
+    "recoveryRef": "refs/afk/recovery/afk-v2-quality-loops-claude-code/87/deterministic-qa-r1-82359f25087f8976fdb9b0577fdca1d8ad31b373",
+    "recoveryCommit": "f0829e2422376bc585977761cd40bc67e4d254b1"
+  },
+  "supportingEvidence": [
+    ".afk/artifacts/afk-v2-quality-loops-claude-code/slice-01/reviews/qa-review-r1-a1.json",
+    ".kiro/specs/afk-v2-quality-loops/slices/01-cleaner-loop/qa-report-r1-a1.md"
+  ],
+  "requiredOperatorAction": "Inspect QA-01 on preserved candidate tree 82359f25087f8976fdb9b0577fdca1d8ad31b373, make one targeted implementation repair that keeps resolved behavior intact, then resume the slice."
+}

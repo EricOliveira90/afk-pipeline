@@ -37,13 +37,21 @@ import type { GateRiskClass } from "./gate-policy.js";
  *   reuse or prerequisite-skip marker: a `PASS` that was reused and a `PASS`
  *   that was earned are different facts.
  *
+ * - **3 → 4** for {@link GateFindings}'s `suppressions` (#87 B-10). The
+ *   suppressions gate names an exact `{ path, line, detectorId }` triple per
+ *   occurrence, which is a finding field no earlier version declared, so only a
+ *   version-4 document may carry it: a version-3 reader handed one would report
+ *   a clean findings set for a gate that named offenders. Every other
+ *   version-3 rule is unchanged, and no version-3 document in any archive
+ *   carries the field.
+ *
  * Additive and backward-readable throughout: {@link readGateEvidence} accepts a
- * version-1, version-2 or version-3 document.
+ * version-1, version-2, version-3 or version-4 document.
  */
-export const GATE_EVIDENCE_VERSION = 3;
+export const GATE_EVIDENCE_VERSION = 4;
 
 /** Every evidence version a reader in this process accepts. */
-const SUPPORTED_GATE_EVIDENCE_VERSIONS = [1, 2, 3] as const;
+const SUPPORTED_GATE_EVIDENCE_VERSIONS = [1, 2, 3, 4] as const;
 
 export type GateEvidenceVersion =
   (typeof SUPPORTED_GATE_EVIDENCE_VERSIONS)[number];
@@ -103,6 +111,17 @@ export interface GateFindings {
     path: string;
     author: string;
     reason: string;
+  }[];
+  /**
+   * Suppressions the `suppressions` gate counted as newly added (#87 B-10),
+   * one exact `{ path, line, detectorId }` triple per occurrence — not a count
+   * and not a file list, because the remedy is to remove *that* pragma and a
+   * finding names its remedy (ADR 0048). Evidence version 4 only.
+   */
+  suppressions?: readonly {
+    path: string;
+    line: number;
+    detectorId: string;
   }[];
 }
 
@@ -1008,6 +1027,19 @@ export function readGateEvidence(path: string): GateEvidence {
       "Gate evidence version 1 cannot carry findings; findings require version 2",
     );
   }
+  // Only version 4 may carry `suppressions` (#87 B-10), on the same terms: a
+  // document stamped 2 or 3 that names suppressions was written by something
+  // that did not know what it was stamping.
+  if (
+    evidence.version !== 4 &&
+    evidence.results.some(
+      (result) => result.findings?.suppressions !== undefined,
+    )
+  ) {
+    throw new Error(
+      "Gate evidence below version 4 cannot carry suppressions findings; suppressions require version 4",
+    );
+  }
   return evidence;
 }
 
@@ -1178,7 +1210,21 @@ function isGateFindingsField(value: unknown): boolean {
     (Array.isArray(candidate) &&
       candidate.every((entry) => typeof entry === "string"));
   const waivers = value.appliedWaivers;
+  const suppressions = value.suppressions;
   return (
+    (suppressions === undefined ||
+      (Array.isArray(suppressions) &&
+        suppressions.every(
+          (entry) =>
+            isRecord(entry) &&
+            typeof entry.path === "string" &&
+            entry.path.trim() !== "" &&
+            typeof entry.line === "number" &&
+            Number.isSafeInteger(entry.line) &&
+            entry.line >= 1 &&
+            typeof entry.detectorId === "string" &&
+            entry.detectorId.trim() !== "",
+        ))) &&
     isStringList(value.outOfScopePaths) &&
     isStringList(value.deletedTests) &&
     isStringList(value.protectedChanges) &&

@@ -12,7 +12,9 @@ import * as git from "./git.js";
 import { parseDraftPrNumber } from "./handoff.js";
 import {
   readAdvisoryGateOutcomes,
+  readQualityStageOutcomes,
   type AdvisoryGateOutcome,
+  type QualityStageOutcome,
 } from "./logger.js";
 import {
   runPreShipSanity,
@@ -348,6 +350,21 @@ export function buildPrCreationPlan(args: {
    * body on a project that declares none is unchanged.
    */
   advisoryGates?: readonly AdvisoryGateOutcome[];
+  /**
+   * What this run's post-approval quality stages cost and bought (#97 B-11),
+   * read by the caller via `readQualityStageOutcomes`.
+   *
+   * Unlike `advisoryGates` above, an **empty** array still renders: a run that
+   * declared no `gatePolicy.clean` recorded no attempt, and a PR that says
+   * nothing about the cleaner cannot be read as evidence of either state (PRD
+   * D10 item 3) — "was the stage on?" is the first question asked of work that
+   * shipped unexpectedly clean or unexpectedly dirty. The field being *absent*
+   * is the different claim — this caller measures nothing — and adds no section,
+   * so a project that declares no policy keeps its PR body.
+   *
+   * Reported, never a gate (ADR 0063).
+   */
+  qualityStages?: readonly QualityStageOutcome[];
 }): PrCreationPlan {
   const architectOk = artifacts.isFavorableReviewOutcome(args.architect);
   const pmOk = artifacts.isFavorableReviewOutcome(args.pm);
@@ -439,6 +456,43 @@ export function buildPrCreationPlan(args: {
           (outcome) =>
             `| #${outcome.ghIssue} | ${outcome.round} | ${inlineMarkdown(outcome.gateId)} | ${outcome.status} | ${outcome.durationMs}ms |`,
         ),
+      ].join("\n"),
+    );
+  }
+  if (args.qualityStages !== undefined) {
+    sections.push(
+      [
+        "## Post-approval quality stages (reported, never blocking)",
+        "",
+        "What each stage cost after the candidate was approved, and what it " +
+          "bought. Numbers only: nothing here gated anything (ADR 0063).",
+        "",
+        ...(args.qualityStages.length === 0
+          ? [
+              "- `cleaner`: disabled (no `gatePolicy.clean`) — no round ran, " +
+                "so nothing was spent and nothing was cleaned.",
+            ]
+          : [
+              "| Slice | Stage | Enabled | Outcome | Rounds | Elapsed | Model time | Gates | Cache-reused gates | Final decision |",
+              "|-------|-------|---------|---------|--------|---------|------------|-------|--------------------|----------------|",
+              ...args.qualityStages.map(
+                (outcome) =>
+                  `| #${outcome.ghIssue} | ${inlineMarkdown(outcome.stage)} | ` +
+                  `${outcome.enabled ? "yes" : "no"} | ` +
+                  `${inlineMarkdown(outcome.outcome)} | ` +
+                  `${outcome.roundsUsed}/${outcome.roundLimit} | ` +
+                  `${outcome.elapsedMs}ms | ${outcome.modelMs}ms | ` +
+                  `${
+                    outcome.gateIds.length === 0
+                      ? "—"
+                      : inlineMarkdown(outcome.gateIds.join(", "))
+                  } | ${
+                    outcome.cacheReusedGateIds.length === 0
+                      ? "—"
+                      : inlineMarkdown(outcome.cacheReusedGateIds.join(", "))
+                  } | ${outcome.finalDecision} |`,
+              ),
+            ]),
       ].join("\n"),
     );
   }
@@ -1226,6 +1280,10 @@ export async function runShipGate(
   };
 
   const advisoryGates = readAdvisoryGateOutcomes(journal.runDir);
+  // Read from the same stream and passed at both plan sites exactly as
+  // `advisoryGates` is, so the PR body and the run summary cannot disagree
+  // about what a quality stage cost (#97 B-11).
+  const qualityStages = readQualityStageOutcomes(journal.runDir);
   let prPlan = buildPrCreationPlan({
     prdSlug,
     specsDir,
@@ -1235,6 +1293,7 @@ export async function runShipGate(
     closesIssues,
     adoptions,
     advisoryGates,
+    qualityStages,
   });
 
   // The gate has a clock (ADR 0057 decision 4). A blocked round that has spent
@@ -1298,6 +1357,7 @@ export async function runShipGate(
       closesIssues,
       adoptions,
       advisoryGates,
+      qualityStages,
       capExit: {
         cap: capDecision.cap,
         unfavorableRounds: capDecision.unfavorableRounds,

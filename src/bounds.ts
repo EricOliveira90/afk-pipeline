@@ -71,6 +71,32 @@ export function finalEvaluationAttemptsRemaining(input: {
 }
 
 /**
+ * Cleaner rounds one slice may spend (#87 B-05, PRD D4).
+ *
+ * Three, beside the other budgets for the same reason. Round 0 — gating the
+ * accepted tree before any cleaner is dispatched — is not one of them: it spends
+ * no round because it writes nothing and dispatches nobody.
+ *
+ * An `INFRASTRUCTURE` gate status is retried by `runCandidateGatePhase`'s own
+ * `infrastructureRetries` and spends no round; a dispatch that dies spends its
+ * round, because the tree it left behind has to be reverted and re-gated.
+ */
+export const MAX_CLEANER_ROUNDS = 3;
+
+/**
+ * Cleaner rounds left, from the rounds already persisted for this slice.
+ * Clamped at zero on the same terms as {@link finalEvaluationAttemptsRemaining}:
+ * a resumed run reading a record with more rounds than the cap allows gets no
+ * round rather than a negative budget, so it cannot buy a fourth.
+ */
+export function cleanerRoundsRemaining(input: {
+  spent: number;
+  limit?: number;
+}): number {
+  return Math.max(0, (input.limit ?? MAX_CLEANER_ROUNDS) - input.spent);
+}
+
+/**
  * Implementation rounds a dispatch may still spend.
  *
  * The cap is global across a slice's lives (ADR 0014): an ordinary
