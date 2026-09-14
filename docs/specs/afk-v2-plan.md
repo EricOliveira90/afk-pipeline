@@ -327,13 +327,25 @@ not debate-rated.
    "machine was loaded" from "someone added an expensive test". The
    numbers remain first-class measurements (item 13's pattern). The
    budget stays blocking for plain developer runs of `pnpm test`.
-5. **Concurrent AFK runs — four conditions, no suite lock.** Two PRDs
-   may run at once when: one clone per run (two orchestrator processes
-   hold in-process merge mutexes that cannot see each other; separate
-   clones make cross-run git races impossible by construction);
-   migration prefixes reserved per PRD at prep time (ADR 0034 claims);
-   the second merger pays a rebase — check the two ticket sets'
-   file-hint overlap before launch; tickets linted (item 6, unchanged).
+5. **Concurrent AFK runs — host run lease, explicit override.**
+   *Superseded 2026-09-13 by #275 (ADR 0069):* the four-condition
+   allowance this policy used to grant no longer authorizes a second
+   AFK run by itself. One pipeline run per host is enforced at launch —
+   `afk`, `afk-claude` and `afk-codex` acquire a host-wide run lease
+   (an owner-recorded directory under the OS temp dir) after validation
+   and before any run-state, branch, worktree, agent or gate side
+   effect; a second launch is refused with the owner's identity unless
+   it passes `--allow-concurrent-run`, and a crashed owner is recovered
+   by PID-plus-birth-identity probing, never by age. The former four
+   conditions survive as subordinate rules a deliberately overridden
+   concurrent launch must still meet: one clone per run (two
+   orchestrator processes hold in-process merge mutexes that cannot see
+   each other; separate clones make cross-run git races impossible by
+   construction); migration prefixes reserved per PRD at prep time
+   (ADR 0034 claims); the second merger pays a rebase — check the two
+   ticket sets' file-hint overlap before launch; tickets linted (item 6,
+   unchanged). Hand-run heavy suites beside a live run remain a
+   judgment call the lease does not police (out of #275's scope).
    The cross-process suite lock was considered and deferred: with
    budgets advisory (policy 4), its only remaining job is protecting
    per-test timeouts from contention flakes — see the §6 trigger.
@@ -388,8 +400,11 @@ Ordering principle: **an item's priority is how soon the *next* AFK run
 collects its benefit.** Everything in Track 2 pays from the very next run
 onward; PRD-embedded items pay from their PRD's run onward. Parallelism is
 real for manual sessions (separate worktrees, the proven #113/#114
-pattern). AFK runs may also run concurrently under §3c policy 5's four
-conditions — this revises the earlier one-suite-at-a-time rule, which
+pattern). AFK runs on one host are serialized by the host run lease
+(#275, ADR 0069); a deliberately overridden concurrent launch
+(`--allow-concurrent-run`) must still meet §3c policy 5's subordinate
+conditions — this replaces the earlier blanket four-condition allowance,
+which itself revised the one-suite-at-a-time rule that
 existed for the `test:budgets` gate that §3c policy 4 makes advisory in
 pipeline context.
 
@@ -478,8 +493,10 @@ What each stage banks for the runs after it:
 - Budget a prep-chain refresh as its own task, not a step; expect conflicts
   whenever main restructures a file a slice branch touches.
 - One full test suite at a time per *manual* session remains the norm;
-  concurrent AFK runs may overlap suites once `test:budgets` is advisory
-  in pipeline context (§3c policies 4–5).
+  concurrent AFK runs require the host run lease's explicit
+  `--allow-concurrent-run` override (§3c policy 5, #275), and only then
+  may overlap suites, `test:budgets` being advisory in pipeline context
+  (§3c policy 4).
 - Every launch passes the verification command explicitly **including
   typecheck** until item 2 lands — and Track 4 corrects the stale
   `AGENTS.md` guidance now, since a document that misleads the next

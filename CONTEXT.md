@@ -389,6 +389,26 @@ stale sentinel cannot reach a later run.
 _Avoid_: "kill file", "stop flag" (it requests a cancellation; it does not
 terminate anything), "lock file" (nothing is being held)
 
+**Host run lease**:
+The machine-wide exclusive claim a pipeline run holds while it is alive:
+an atomically-published directory at `os.tmpdir()/afk-pipeline/run-lease`
+whose `owner.json` records lease id, PID, process-birth identity,
+hostname, provider, PRD, cwd and command. Acquired by `afk` /
+`afk-claude` / `afk-codex` after validation and before any pipeline side
+effect; never acquired by subcommands or `--dry-run`. A second launch is
+refused with the owner's identity unless it passes
+`--allow-concurrent-run`, which proceeds *without* the lease and never
+touches the owner's. A dead or PID-reused owner is recovered
+automatically; a corrupt or otherwise unverifiable one fails closed —
+age alone never proves staleness. Released compare-before-delete on
+every ordinary exit path. Distinct from the **stop sentinel** (a
+delivery mechanism, not a claim), from the in-run merge/preview mutexes
+(serialization inside one run), and from `withFileLock` (a
+milliseconds-held run-state critical section). See ADR 0069.
+_Avoid_: "run lock" (contention refuses immediately; nothing waits),
+"PID file" (the record is probed and verified, never trusted),
+"singleton guard"
+
 **Generator test command**:
 The command the generator is told to verify with while it iterates,
 resolved by `resolveGeneratorTestCommand` from `--test-command`, else the
