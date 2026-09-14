@@ -49,6 +49,11 @@ import {
   validateAcceptanceManifestCoverage,
 } from "./acceptance-manifest.js";
 import {
+  emptyContractFindingLineage,
+  saveContractFindingLineage,
+} from "./contract-convergence.js";
+import { clearExactStageCheckpoint } from "./exact-stage-resume.js";
+import {
   countCommitsAhead,
   hasUncommittedChanges,
   isAncestor,
@@ -110,6 +115,8 @@ export type RecoveryRefusalCode =
   | "snapshot-publication-failed"
   /** The target's last lineage event is `PENDING`: an attempt is already open. */
   | "attempt-already-pending"
+  /** No committed `PENDING` attempt for this target: nothing to execute (#332). */
+  | "no-pending-attempt"
   /** The facts changed between snapshot publication and the locked recheck. */
   | "facts-changed-before-lock";
 
@@ -469,11 +476,17 @@ export type PairSnapshotResult =
  * bytes *in the temporary sibling* — the bytes that will be published — because
  * verifying the source and publishing a copy proves nothing about the copy.
  *
- * A published directory is never overwritten. An attempt id addresses exactly one
+ * A published pair file is never overwritten. An attempt id addresses exactly one
  * accepted pair; if a directory for it exists, either this attempt already
  * published or the id was reused, and both are refusals rather than a silent
  * clobber of the only immutable record of what was accepted (ADR 0039's reasoning
  * applied to artifacts instead of commits).
+ *
+ * The invariant is stated over the two pair files rather than over the directory
+ * because attempt execution publishes a `negotiation/` child *inside* an
+ * already-published attempt directory (#332 B-02): the directory gains children,
+ * while the pair bytes and their fingerprints never change. The refusal below is
+ * unchanged — an `attemptId` directory still admits exactly one pair publication.
  */
 export function publishAcceptedPairSnapshot(args: {
   repoRoot: string;
@@ -791,4 +804,257 @@ export function listPublishedPairSnapshots(sliceDir: string): string[] {
   return readdirSync(root)
     .filter((name) => !name.startsWith("."))
     .sort();
+}
+
+/**
+ * Child of an attempt's snapshot directory holding its negotiation history.
+ *
+ * Inside the attempt directory rather than beside it, because `prd.md` Admission
+ * step 3 gives an attempt exactly one immutable directory identity keyed by
+ * `attemptId`; a second locator would be a second answer to "where is this
+ * attempt's record" (#332 B-02).
+ */
+export const RECOVERY_NEGOTIATION_DIRNAME = "negotiation";
+
+/**
+ * The fixed live negotiation artifacts an attempt preserves, then clears.
+ *
+ * A closed list, in the order `prd.md` "Attempt Execution" names them: the
+ * explorer's context, the contract review, the planner's response, the recorded
+ * negotiation outcome, and the planner's escalation. Every `feedback-r<N>.md`
+ * round joins them at execution time, because the number of rounds is a property
+ * of the negotiation that happened, not of this list (#332 B-02/B-03).
+ */
+export const RECOVERY_NEGOTIATION_FILENAMES: readonly string[] = [
+  "context.md",
+  "contract-review.json",
+  "contract-response.json",
+  "contract-negotiation-outcome.json",
+  "planner-escalation.md",
+];
+
+const FEEDBACK_ROUND_FILENAME = /^feedback-r(\d+)\.md$/;
+
+/**
+ * The negotiation files present live in a slice directory, in a stable order.
+ *
+ * Named kinds first in their declared order, then the feedback rounds by round
+ * *number* rather than by name, so `feedback-r10.md` sorts after `feedback-r9.md`
+ * instead of between `r1` and `r2`. An absent kind is simply not in the list:
+ * "skipped without error" is the absence of an entry, not a special case
+ * downstream (#332 B-03).
+ */
+export function listLiveNegotiationFiles(sliceDir: string): string[] {
+  if (!existsSync(sliceDir)) return [];
+  const named = RECOVERY_NEGOTIATION_FILENAMES.filter((name) =>
+    existsSync(join(sliceDir, name)),
+  );
+  const rounds = readdirSync(sliceDir)
+    .filter((name) => FEEDBACK_ROUND_FILENAME.test(name))
+    .sort(
+      (a, b) =>
+        Number(FEEDBACK_ROUND_FILENAME.exec(a)![1]) -
+        Number(FEEDBACK_ROUND_FILENAME.exec(b)![1]),
+    );
+  return [...named, ...rounds];
+}
+
+/**
+ * Clear the target's exact-stage checkpoint (#332 B-05).
+ *
+ * A wrapper and nothing else. `clearExactStageCheckpoint` owns the checkpoint
+ * map's shape, its collapse-to-absent rule and its lock, and it stays unmodified;
+ * what this module owns is the *decision* that a recovery attempt clears exactly
+ * this one slice's entry. `clearSliceStateForDispatch` is deliberately not used:
+ * it is the coarser dispatch clear, and a per-attempt reopening that reached for
+ * it would drop facts (`prd.md:166-175`) recovery exists to preserve.
+ *
+ * The `prdSlug` field of the owning API's location is fed the *run* slug, which
+ * is what keys the state file every other recovery writer reads (ADR 0002).
+ */
+export function clearRecoveryStageCheckpoint(args: {
+  repoRoot: string;
+  runSlug: string;
+  ghIssue: string;
+}): void {
+  clearExactStageCheckpoint({
+    repoRoot: args.repoRoot,
+    prdSlug: args.runSlug,
+    ghIssue: args.ghIssue,
+  });
+}
+
+/**
+ * Clear the target's durable contract-finding lineage (#332 B-05).
+ *
+ * The owning API has no delete, and it does not need one: an *empty* lineage is
+ * the value a slice that never negotiated carries, so writing it is exactly
+ * "this negotiation starts from nothing". A key deleted instead would make the
+ * same claim in a second shape, and `loadContractFindingLineage` already answers
+ * both with `emptyContractFindingLineage()`.
+ */
+export function clearRecoveryContractConvergence(args: {
+  repoRoot: string;
+  runSlug: string;
+  ghIssue: string;
+}): void {
+  saveContractFindingLineage(
+    {
+      repoRoot: args.repoRoot,
+      runSlug: args.runSlug,
+      ghIssue: args.ghIssue,
+    },
+    emptyContractFindingLineage(),
+  );
+}
+
+export interface ExecuteRecoveryAttemptArgs {
+  repoRoot: string;
+  /** PRD slug — artifact identity. */
+  prdSlug: string;
+  /** Run slug: which run-state file this attempt was admitted in (ADR 0002). */
+  runSlug?: string;
+  /** The target's artifact directory, holding the live negotiation state. */
+  sliceDir: string;
+  /** The recovery target, as its admitted `PENDING` event recorded it. */
+  ghIssue: string;
+  /**
+   * Test seam: fires after the history's temporary sibling is written and before
+   * its bytes are verified.
+   *
+   * A parameter on this entry point rather than a widening of any shared
+   * primitive, for the reason {@link AdmitStaleRenegotiationArgs.beforeLockAcquired}
+   * records: the ordering being proven — "nothing live is cleared until a verified
+   * history is published" — belongs to this module's sequencing.
+   */
+  afterHistoryWritten?: (temporaryDir: string) => void;
+}
+
+export type ExecuteRecoveryAttemptResult =
+  | {
+      ok: true;
+      attemptId: string;
+      /** Absolute path of the published history directory. */
+      historyDir: string;
+      /** `historyDir` relative to the repo root, with `/` separators. */
+      historyLocator: string;
+      /** The negotiation file names copied then cleared, in copy order. */
+      movedFiles: string[];
+    }
+  | { ok: false; code: RecoveryRefusalCode; message: string };
+
+/**
+ * Run the two artifact-and-state steps of one admitted recovery attempt (#332).
+ *
+ * The sequence, and why it is this sequence:
+ *
+ *  1. Read run state and refuse unless the target's lineage ends on a committed
+ *     `PENDING` event. A refusal here has written nothing at all — not a byte
+ *     under the slice directory, not a run-state field.
+ *  2. Byte-copy every present live negotiation file into the attempt's immutable
+ *     history, verify the copy by re-reading it, and publish it with one
+ *     `renameSync`. Publication precedes every deletion, so the failure mode of
+ *     a half-copied history is a refusal with the live state intact rather than
+ *     negotiation state that exists nowhere.
+ *  3. Delete exactly the files that were copied.
+ *  4. Clear the two live negotiation controls — the exact-stage checkpoint and
+ *     the contract-finding lineage — through the wrappers above.
+ *
+ * What it deliberately does not do: append a lineage event (the terminal events
+ * are #333/#335), touch a ref or the preserved worktree (ADR 0039), or write any
+ * byte of the accepted pair, live or published. It leaves the state a fresh
+ * explorer plus planner/evaluator negotiation would find, and dispatches neither.
+ */
+export function executeRecoveryAttempt(
+  args: ExecuteRecoveryAttemptArgs,
+): ExecuteRecoveryAttemptResult {
+  const runSlug = args.runSlug ?? args.prdSlug;
+  const state = loadRunState(args.repoRoot, runSlug);
+  const events = recoveryLineageFor(state, args.ghIssue);
+  const admitted = events[events.length - 1];
+  if (admitted === undefined || !hasOpenRecoveryAttempt(state, args.ghIssue)) {
+    return {
+      ok: false,
+      code: "no-pending-attempt",
+      message: `No committed PENDING recovery attempt exists for #${args.ghIssue}, so there is no admitted attempt to execute; admit one with --renegotiate-stale first`,
+    };
+  }
+
+  // Located from the `snapshotPath` the admission recorded, not re-derived: the
+  // attempt already has one immutable locator, and a second derivation is how two
+  // readers come to disagree about which directory is the attempt's.
+  const attemptDir = join(args.repoRoot, ...admitted.snapshotPath.split("/"));
+  const published = join(attemptDir, RECOVERY_NEGOTIATION_DIRNAME);
+  if (existsSync(published)) {
+    return {
+      ok: false,
+      code: "snapshot-already-published",
+      message: `A negotiation history is already published at ${published}; a published history is never overwritten`,
+    };
+  }
+
+  const names = listLiveNegotiationFiles(args.sliceDir);
+  const live = new Map<string, Buffer>(
+    names.map((name) => [name, readFileSync(join(args.sliceDir, name))]),
+  );
+  const temporary = join(
+    attemptDir,
+    `.${RECOVERY_NEGOTIATION_DIRNAME}.partial`,
+  );
+  try {
+    rmSync(temporary, { recursive: true, force: true });
+    mkdirSync(temporary, { recursive: true });
+    for (const name of names) {
+      writeFileSync(join(temporary, name), live.get(name)!);
+    }
+    args.afterHistoryWritten?.(temporary);
+
+    // Verified on the bytes in the temporary sibling — the bytes that will be
+    // published — because verifying the source and publishing a copy proves
+    // nothing about the copy.
+    for (const name of names) {
+      if (!readFileSync(join(temporary, name)).equals(live.get(name)!)) {
+        rmSync(temporary, { recursive: true, force: true });
+        return {
+          ok: false,
+          code: "snapshot-publication-failed",
+          message: `The negotiation history copy of ${name} under ${attemptDir} did not match the live bytes; nothing was published and no live file was cleared`,
+        };
+      }
+    }
+    renameSync(temporary, published);
+  } catch (error) {
+    rmSync(temporary, { recursive: true, force: true });
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      code: "snapshot-publication-failed",
+      message: `Publishing the negotiation history under ${attemptDir} failed (${detail}); nothing was published and no live file was cleared`,
+    };
+  }
+
+  // Exactly the copied paths, and no other: the `reviews/` subdirectory, every
+  // implementation and QA artifact and the accepted pair are all left alone.
+  for (const name of names) {
+    rmSync(join(args.sliceDir, name), { force: true });
+  }
+
+  clearRecoveryStageCheckpoint({
+    repoRoot: args.repoRoot,
+    runSlug,
+    ghIssue: args.ghIssue,
+  });
+  clearRecoveryContractConvergence({
+    repoRoot: args.repoRoot,
+    runSlug,
+    ghIssue: args.ghIssue,
+  });
+
+  return {
+    ok: true,
+    attemptId: admitted.attemptId,
+    historyDir: published,
+    historyLocator: relative(args.repoRoot, published).split("\\").join("/"),
+    movedFiles: names,
+  };
 }

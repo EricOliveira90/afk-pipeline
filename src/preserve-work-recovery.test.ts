@@ -19,13 +19,29 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { ACCEPTANCE_MANIFEST_FILENAME } from "./acceptance-manifest.js";
+import {
+  parsePipelineRuntimeOptions,
+  parseStaleRenegotiationRequest,
+} from "./cli-options.js";
+import {
+  emptyContractFindingLineage,
+  loadContractFindingLineage,
+  saveContractFindingLineage,
+  type ContractFindingLineage,
+} from "./contract-convergence.js";
+import {
+  inspectExactStageCheckpoint,
+  recordExactStageCheckpoint,
+  type ExactStageCheckpoint,
+} from "./exact-stage-resume.js";
 import {
   featureBranchForProviderName,
   sliceWorktreeDirForProviderName,
@@ -42,17 +58,22 @@ import {
 import type { PersistedRunScope } from "./slice-scope.js";
 import {
   CONTRACT_FILENAME,
+  RECOVERY_NEGOTIATION_DIRNAME,
+  RECOVERY_NEGOTIATION_FILENAMES,
   RECOVERY_SNAPSHOT_DIRNAME,
   admitStaleRenegotiation,
   canonicalizeRecoveryRequest,
   encodeRunScopeFingerprintPayload,
   evaluateRecoveryEligibility,
+  executeRecoveryAttempt,
   hasOpenRecoveryAttempt,
   isLegalRecoveryTransition,
+  listLiveNegotiationFiles,
   listPublishedPairSnapshots,
   publishAcceptedPairSnapshot,
   readLockedAcceptedPair,
   runScopeFingerprint,
+  type ExecuteRecoveryAttemptArgs,
   type RecoveryGitProbes,
   type RecoveryRefusalCode,
 } from "./preserve-work-recovery.js";
@@ -976,4 +997,668 @@ describe("the eligibility predicates' git surface", () => {
     // Comments name the module the predicates must not reach; the code must not.
     expect(MODULE_CODE).not.toContain("worktree-processes");
   });
+});
+
+/*
+ * ---------------------------------------------------------------------------
+ * Recovery attempt execution (#332)
+ * ---------------------------------------------------------------------------
+ *
+ * Every case below reuses the file's one real git repo and the same stubbed
+ * probes: execution reads run state and moves bytes, so the only thing git is
+ * needed for is the `admitStaleRenegotiation` call that commits the `PENDING`
+ * event each case starts from. No spawned pipeline scenario is added — the state
+ * execution needs (a committed attempt, seeded checkpoint and lineage, live
+ * negotiation files) is reachable by writing it, which is the top of the
+ * `AGENTS.md` assertion ladder rather than the bottom.
+ */
+
+/** The seven live negotiation files execution preserves, with distinct bytes. */
+const NEGOTIATION_BYTES: Record<string, string> = {
+  "context.md": "# Explorer context\n\nFACT: the accepted pair predates the discovery.\n",
+  "contract-review.json": '{"version":2,"verdict":"ACCEPT","findings":[]}\n',
+  "contract-response.json": '{"round":2,"response":"accepted"}\n',
+  "contract-negotiation-outcome.json": '{"outcome":"ACCEPTED","rounds":2}\n',
+  "planner-escalation.md": "# Planner escalation\n\nNothing was escalated.\n",
+  "feedback-r1.md": "## Evaluator feedback — round 1\n",
+  "feedback-r2.md": "## Evaluator feedback — round 2\n",
+};
+
+/** Live artifacts execution must leave alone: reviews/, QA, implementation. */
+const PRESERVED_ARTIFACTS: Record<string, string> = {
+  "reviews/contract-review-r1.json": '{"version":2,"verdict":"REVISE","findings":[]}\n',
+  "reviews/qa-review-r1.json": '{"version":2,"verdict":"FAIL"}\n',
+  "qa-report.md": "# QA Report\n\n**Verdict:** PASS\n",
+  "handoff.md": "## What shipped\n\n- B-01: src/fixture.ts\n",
+  "run-summary.md": "# Run summary\n\nThe generator wrote src/fixture.ts.\n",
+};
+
+const TARGET_TREE = "a1".repeat(20);
+const OTHER_TREE = "b2".repeat(20);
+
+/** The one checkpoint shape this repository can hold, as B-05 pins it. */
+const TARGET_CHECKPOINT: ExactStageCheckpoint = {
+  version: 1,
+  completedStage: "deterministic-qa",
+  candidateTreeId: TARGET_TREE,
+  nextPendingStage: "post-qa-deterministic",
+  round: 1,
+};
+
+function occurrences(haystack: string, needle: string): number {
+  return haystack.split(needle).length - 1;
+}
+
+/** Every file under `root`, keyed by `/`-separated relative path, as SHA-256. */
+function digestTree(root: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  const walk = (dir: string, prefix: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const key = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) walk(path, key);
+      else out[key] = createHash("sha256").update(readFileSync(path)).digest("hex");
+    }
+  };
+  if (existsSync(root)) walk(root, "");
+  return out;
+}
+
+function writeSliceFiles(sliceDir: string, files: Record<string, string>): void {
+  for (const [name, body] of Object.entries(files)) {
+    const path = join(sliceDir, ...name.split("/"));
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, body);
+  }
+}
+
+/** A valid non-empty durable lineage — the value B-07 measures the clear against. */
+function seededLineage(id: string): ContractFindingLineage {
+  return {
+    version: 1,
+    extensionUsed: false,
+    revision: 1,
+    findings: {
+      [id]: {
+        stableId: id,
+        currentId: id,
+        disposition: "OPEN",
+        firstSeenRevision: 1,
+        lastSeenRevision: 1,
+        occurrences: 1,
+        finding: {
+          id,
+          severity: "BLOCKING",
+          behaviorIds: ["B-01"],
+          evidence: `"${id} evidence"`,
+          expected: `${id} expected`,
+          observed: `${id} observed`,
+          clearCondition: `${id} clears`,
+          state: "OPEN",
+          revisionCitation: null,
+        },
+      },
+    },
+  };
+}
+
+/** Seed both negotiation controls for the target and for the second slice. */
+function seedNegotiationControls(f: Fixture): void {
+  recordExactStageCheckpoint(
+    { repoRoot: f.repoRoot, prdSlug: PRD_SLUG, ghIssue: GH_ISSUE },
+    TARGET_CHECKPOINT,
+  );
+  recordExactStageCheckpoint(
+    { repoRoot: f.repoRoot, prdSlug: PRD_SLUG, ghIssue: "278" },
+    { ...TARGET_CHECKPOINT, candidateTreeId: OTHER_TREE, round: 2 },
+  );
+  saveContractFindingLineage(
+    { repoRoot: f.repoRoot, runSlug: PRD_SLUG, ghIssue: GH_ISSUE },
+    seededLineage("F-01"),
+  );
+  saveContractFindingLineage(
+    { repoRoot: f.repoRoot, runSlug: PRD_SLUG, ghIssue: "278" },
+    seededLineage("F-02"),
+  );
+}
+
+function inspectTarget(f: Fixture, ghIssue = GH_ISSUE, tree = TARGET_TREE) {
+  return inspectExactStageCheckpoint({
+    repoRoot: f.repoRoot,
+    prdSlug: PRD_SLUG,
+    ghIssue,
+    currentCandidateTreeId: tree,
+    expectedCompletedStage: "deterministic-qa",
+    maximumRound: 3,
+  });
+}
+
+function lineageOf(f: Fixture, ghIssue: string): ContractFindingLineage {
+  return loadContractFindingLineage({
+    repoRoot: f.repoRoot,
+    runSlug: PRD_SLUG,
+    ghIssue,
+  });
+}
+
+function checkpointsOf(f: Fixture): Record<string, unknown> {
+  return (stateDocument(f).stageCheckpoints ?? {}) as Record<string, unknown>;
+}
+
+/** Commit one `PENDING` attempt and return its published snapshot directory. */
+function admitPending(f: Fixture, attemptId = "attempt-exec"): string {
+  const outcome = admit(f, { attemptId });
+  expect(outcome.admitted).toBe(true);
+  return join(f.sliceDir, RECOVERY_SNAPSHOT_DIRNAME, attemptId);
+}
+
+function execute(
+  f: Fixture,
+  overrides: Partial<ExecuteRecoveryAttemptArgs> = {},
+) {
+  return executeRecoveryAttempt({
+    repoRoot: f.repoRoot,
+    prdSlug: PRD_SLUG,
+    sliceDir: f.sliceDir,
+    ghIssue: GH_ISSUE,
+    ...overrides,
+  });
+}
+
+describe("execution refuses without a committed PENDING attempt", () => {
+  it.each([
+    ["the target has no recovery lineage at all", undefined],
+    ["the target's lineage ends on a terminal event", "COMPLETED" as const],
+  ])(
+    "[behavior:#332:B-01] refuses with no-pending-attempt and writes nothing when %s",
+    (_label, terminal) => {
+      writeSliceFiles(fixture.sliceDir, NEGOTIATION_BYTES);
+      if (terminal !== undefined) {
+        admitPending(fixture, "attempt-resolved");
+        const document = stateDocument(fixture);
+        const events = (document.recoveryLineage as Record<
+          string,
+          PersistedRecoveryLineageEvent[]
+        >)[GH_ISSUE]!;
+        events.push({
+          ...events[0]!,
+          state: terminal as RecoveryLineageState,
+        });
+        writeFileSync(fixture.statePath, `${JSON.stringify(document, null, 2)}\n`);
+      }
+      // Captured after the setup, so "unchanged" means unchanged by the call.
+      const before = {
+        tree: digestTree(fixture.sliceDir),
+        state: readFileSync(fixture.statePath, "utf-8"),
+      };
+
+      const outcome = execute(fixture);
+
+      expect(outcome).toMatchObject({ ok: false, code: "no-pending-attempt" });
+      expect(outcome.ok === false ? outcome.message : "").toContain(
+        `#${GH_ISSUE}`,
+      );
+      // Not a byte under the slice directory, and not a run-state field.
+      expect(digestTree(fixture.sliceDir)).toEqual(before.tree);
+      expect(readFileSync(fixture.statePath, "utf-8")).toBe(before.state);
+    },
+    30_000,
+  );
+});
+
+describe("the attempt's immutable negotiation history", () => {
+  it("[behavior:#332:B-02] byte-copies every present kind into the attempt's own directory", () => {
+    const attemptDir = admitPending(fixture);
+    writeSliceFiles(fixture.sliceDir, NEGOTIATION_BYTES);
+    const liveBefore = Object.fromEntries(
+      Object.keys(NEGOTIATION_BYTES).map((name) => [
+        name,
+        readFileSync(join(fixture.sliceDir, name)),
+      ]),
+    );
+
+    const outcome = execute(fixture);
+
+    expect(outcome.ok).toBe(true);
+    const history = join(attemptDir, RECOVERY_NEGOTIATION_DIRNAME);
+    expect(outcome.ok === true ? outcome.historyDir : "").toBe(history);
+    expect(outcome.ok === true ? outcome.historyLocator : "").toBe(
+      `.kiro/specs/${PRD_SLUG}/slices/07-fixture/${RECOVERY_SNAPSHOT_DIRNAME}/` +
+        `attempt-exec/${RECOVERY_NEGOTIATION_DIRNAME}`,
+    );
+    for (const [name, bytes] of Object.entries(liveBefore)) {
+      // The bytes that were live, not a re-derivation of the fixture constant.
+      expect(readFileSync(join(history, name)).equals(bytes)).toBe(true);
+      expect(existsSync(join(fixture.sliceDir, name))).toBe(false);
+    }
+    expect(readdirSync(history).sort()).toEqual(
+      Object.keys(NEGOTIATION_BYTES).sort(),
+    );
+    // Published through a temporary sibling and one rename: nothing is left.
+    expect(
+      existsSync(join(attemptDir, `.${RECOVERY_NEGOTIATION_DIRNAME}.partial`)),
+    ).toBe(false);
+  }, 30_000);
+
+  it("[behavior:#332:B-02] deletes nothing and publishes nothing when the copy fails verification", () => {
+    const attemptDir = admitPending(fixture);
+    writeSliceFiles(fixture.sliceDir, NEGOTIATION_BYTES);
+    const before = digestTree(fixture.sliceDir);
+
+    const outcome = execute(fixture, {
+      // Corrupt the copy that is about to be published: verification reads the
+      // temporary sibling, so this is the only place the check can be proven.
+      afterHistoryWritten: (temporary) => {
+        writeFileSync(join(temporary, "feedback-r2.md"), "not the live bytes");
+      },
+    });
+
+    expect(outcome).toMatchObject({
+      ok: false,
+      code: "snapshot-publication-failed",
+    });
+    expect(outcome.ok === false ? outcome.message : "").toContain("feedback-r2.md");
+    // Every live file still exists with its original bytes, and no history —
+    // partial or published — is on disk.
+    expect(digestTree(fixture.sliceDir)).toEqual(before);
+    for (const name of Object.keys(NEGOTIATION_BYTES)) {
+      expect(existsSync(join(fixture.sliceDir, name))).toBe(true);
+    }
+    expect(existsSync(join(attemptDir, RECOVERY_NEGOTIATION_DIRNAME))).toBe(false);
+    expect(
+      existsSync(join(attemptDir, `.${RECOVERY_NEGOTIATION_DIRNAME}.partial`)),
+    ).toBe(false);
+  }, 30_000);
+
+  it("[behavior:#332:B-02] keeps the snapshot-already-published refusal code and message unchanged", () => {
+    publishAcceptedPairSnapshot({
+      repoRoot: fixture.repoRoot,
+      sliceDir: fixture.sliceDir,
+      attemptId: "attempt-pinned",
+    });
+    const published = join(
+      fixture.sliceDir,
+      RECOVERY_SNAPSHOT_DIRNAME,
+      "attempt-pinned",
+    );
+
+    const again = publishAcceptedPairSnapshot({
+      repoRoot: fixture.repoRoot,
+      sliceDir: fixture.sliceDir,
+      attemptId: "attempt-pinned",
+    });
+
+    expect(again).toEqual({
+      ok: false,
+      code: "snapshot-already-published",
+      message:
+        `A recovery snapshot is already published at ${published}; ` +
+        "a published snapshot is never overwritten",
+    });
+    // The docstring's invariant now reads over the pair *files*, because the
+    // history above is a child inside an already-published attempt directory.
+    expect(MODULE_SOURCE).toContain(
+      "A published pair file is never overwritten.",
+    );
+    expect(MODULE_SOURCE).not.toContain("A published directory is never overwritten");
+  });
+
+  it("[behavior:#332:B-03] moves exactly the present kinds, reports them, and skips the absent", () => {
+    const attemptDir = admitPending(fixture);
+    const present = {
+      "context.md": NEGOTIATION_BYTES["context.md"]!,
+      "feedback-r1.md": NEGOTIATION_BYTES["feedback-r1.md"]!,
+      "feedback-r2.md": NEGOTIATION_BYTES["feedback-r2.md"]!,
+    };
+    writeSliceFiles(fixture.sliceDir, { ...present, ...PRESERVED_ARTIFACTS });
+    const absent = RECOVERY_NEGOTIATION_FILENAMES.filter(
+      (name) => !(name in present),
+    );
+    expect(absent).toHaveLength(4);
+
+    const outcome = execute(fixture);
+
+    expect(outcome).toMatchObject({
+      ok: true,
+      movedFiles: ["context.md", "feedback-r1.md", "feedback-r2.md"],
+    });
+    expect(readdirSync(join(attemptDir, RECOVERY_NEGOTIATION_DIRNAME)).sort()).toEqual(
+      Object.keys(present).sort(),
+    );
+    for (const name of Object.keys(present)) {
+      expect(existsSync(join(fixture.sliceDir, name))).toBe(false);
+    }
+    // An absent kind is skipped without error and without being invented.
+    for (const name of absent) {
+      expect(existsSync(join(fixture.sliceDir, name))).toBe(false);
+      expect(
+        existsSync(join(attemptDir, RECOVERY_NEGOTIATION_DIRNAME, name)),
+      ).toBe(false);
+    }
+    for (const name of Object.keys(PRESERVED_ARTIFACTS)) {
+      expect(existsSync(join(fixture.sliceDir, ...name.split("/")))).toBe(true);
+    }
+    expect(listLiveNegotiationFiles(fixture.sliceDir)).toEqual([]);
+  }, 30_000);
+
+  it("[behavior:#332:B-03] orders feedback rounds by round number, not by name", () => {
+    admitPending(fixture);
+    writeSliceFiles(fixture.sliceDir, {
+      "feedback-r1.md": "r1\n",
+      "feedback-r2.md": "r2\n",
+      "feedback-r10.md": "r10\n",
+    });
+
+    expect(listLiveNegotiationFiles(fixture.sliceDir)).toEqual([
+      "feedback-r1.md",
+      "feedback-r2.md",
+      "feedback-r10.md",
+    ]);
+    expect(execute(fixture)).toMatchObject({
+      ok: true,
+      movedFiles: ["feedback-r1.md", "feedback-r2.md", "feedback-r10.md"],
+    });
+  }, 30_000);
+
+  it("[behavior:#332:B-04] leaves reviews/, QA and implementation artifacts and both published pair bytes identical", () => {
+    const attemptDir = admitPending(fixture);
+    writeSliceFiles(fixture.sliceDir, {
+      ...NEGOTIATION_BYTES,
+      ...PRESERVED_ARTIFACTS,
+    });
+    const untouchedPaths = [
+      ...Object.keys(PRESERVED_ARTIFACTS),
+      CONTRACT_FILENAME,
+      ACCEPTANCE_MANIFEST_FILENAME,
+    ];
+    const before = {
+      live: Object.fromEntries(
+        untouchedPaths.map((name) => [
+          name,
+          readFileSync(join(fixture.sliceDir, ...name.split("/")), "utf-8"),
+        ]),
+      ),
+      snapshot: digestTree(attemptDir),
+    };
+    expect(Object.keys(before.snapshot).sort()).toEqual(
+      [ACCEPTANCE_MANIFEST_FILENAME, CONTRACT_FILENAME].sort(),
+    );
+
+    expect(execute(fixture).ok).toBe(true);
+
+    for (const [name, bytes] of Object.entries(before.live)) {
+      expect(
+        readFileSync(join(fixture.sliceDir, ...name.split("/")), "utf-8"),
+      ).toBe(bytes);
+    }
+    // The two published pair files are byte-identical; the attempt directory
+    // only gained the `negotiation/` child.
+    const after = digestTree(attemptDir);
+    for (const [name, digest] of Object.entries(before.snapshot)) {
+      expect(after[name]).toBe(digest);
+    }
+  }, 30_000);
+});
+
+describe("execution clears exactly the two negotiation controls", () => {
+  it("[behavior:#332:B-05] drops the target's checkpoint and lineage and no other slice's", () => {
+    admitPending(fixture);
+    writeSliceFiles(fixture.sliceDir, NEGOTIATION_BYTES);
+    seedNegotiationControls(fixture);
+    const otherCheckpointBefore = JSON.stringify(checkpointsOf(fixture)["278"]);
+    const otherLineageBefore = lineageOf(fixture, "278");
+    expect(Object.keys(checkpointsOf(fixture)).sort()).toEqual([GH_ISSUE, "278"]);
+
+    expect(execute(fixture).ok).toBe(true);
+
+    expect(GH_ISSUE in checkpointsOf(fixture)).toBe(false);
+    expect(JSON.stringify(checkpointsOf(fixture)["278"])).toBe(
+      otherCheckpointBefore,
+    );
+    expect(lineageOf(fixture, GH_ISSUE)).toEqual(emptyContractFindingLineage());
+    expect(lineageOf(fixture, "278")).toEqual(otherLineageBefore);
+  }, 30_000);
+
+  it("[behavior:#332:B-05] reaches each clear through one wrapper over the API that owns it", () => {
+    const checkpointImport = MODULE_SOURCE.match(
+      /import \{([^}]*)\} from "\.\/exact-stage-resume\.js";/,
+    );
+    const convergenceImport = MODULE_SOURCE.match(
+      /import \{([^}]*)\} from "\.\/contract-convergence\.js";/,
+    );
+    const named = (match: RegExpMatchArray | null): string[] =>
+      (match?.[1] ?? "")
+        .split(",")
+        .map((name) => name.trim())
+        .filter((name) => name !== "")
+        .sort();
+
+    expect(named(checkpointImport)).toEqual(["clearExactStageCheckpoint"]);
+    expect(named(convergenceImport)).toEqual([
+      "emptyContractFindingLineage",
+      "saveContractFindingLineage",
+    ]);
+    // Exactly one call site each: the wrapper. A second would be a second
+    // adaptation of the same clear.
+    expect(occurrences(MODULE_CODE, "clearExactStageCheckpoint(")).toBe(1);
+    expect(occurrences(MODULE_CODE, "saveContractFindingLineage(")).toBe(1);
+    expect(MODULE_CODE).toContain("export function clearRecoveryStageCheckpoint(");
+    expect(MODULE_CODE).toContain(
+      "export function clearRecoveryContractConvergence(",
+    );
+    // The coarser dispatch clear is never reached: it would drop facts recovery
+    // exists to preserve. Named in a comment there, absent from the code.
+    expect(MODULE_CODE).not.toContain("clearSliceStateForDispatch");
+    expect(MODULE_SOURCE).toContain("`clearSliceStateForDispatch` is deliberately not used");
+  });
+
+  it("[behavior:#332:B-06] changes no other persisted fact than those two entries", () => {
+    // A second, smaller guard beside the fixture-built B-06 assertion in
+    // `resume-integration.test.ts`: this one measures the diff on the file's own
+    // baseline state, so a regression is caught by the fast suite too.
+    admitPending(fixture);
+    writeSliceFiles(fixture.sliceDir, NEGOTIATION_BYTES);
+    seedNegotiationControls(fixture);
+    const before = stateDocument(fixture);
+
+    expect(execute(fixture).ok).toBe(true);
+
+    const after = stateDocument(fixture);
+    const differing = Object.keys({ ...before, ...after }).filter(
+      (key) => JSON.stringify(before[key]) !== JSON.stringify(after[key]),
+    );
+    expect(differing.sort()).toEqual(["contractConvergence", "stageCheckpoints"]);
+    expect(after.slices).toEqual(before.slices);
+    expect(after.scope).toEqual(before.scope);
+    expect(after.recoveryLineage).toEqual(before.recoveryLineage);
+    expect(
+      (after.contractConvergence as Record<string, unknown>)["278"],
+    ).toEqual((before.contractConvergence as Record<string, unknown>)["278"]);
+  }, 30_000);
+
+  it("[behavior:#332:B-07] turns a measured resume decision into a reevaluation", () => {
+    admitPending(fixture);
+    writeSliceFiles(fixture.sliceDir, NEGOTIATION_BYTES);
+    seedNegotiationControls(fixture);
+    // Measured first, so the post-execution assertion cannot pass vacuously on a
+    // target that never had a checkpoint or a lineage.
+    expect(inspectTarget(fixture)).toEqual({
+      action: "resume",
+      checkpoint: TARGET_CHECKPOINT,
+    });
+    const seeded = lineageOf(fixture, GH_ISSUE);
+    expect(Object.keys(seeded.findings)).toEqual(["F-01"]);
+    expect(seeded).not.toEqual(emptyContractFindingLineage());
+
+    expect(execute(fixture).ok).toBe(true);
+
+    expect(inspectTarget(fixture)).toEqual({
+      action: "reevaluate",
+      reason: "no exact-stage checkpoint was recorded for this slice",
+    });
+    expect(lineageOf(fixture, GH_ISSUE)).toEqual(emptyContractFindingLineage());
+    // The second slice's resume decision is untouched, so the clear was per-slice.
+    expect(inspectTarget(fixture, "278", OTHER_TREE)).toMatchObject({
+      action: "resume",
+    });
+  }, 30_000);
+});
+
+describe("execution preserves the work it exists to protect", () => {
+  it("[behavior:#332:B-08] moves no ref, writes no worktree byte and spends no attempt", () => {
+    const document = stateDocument(fixture);
+    document.resume = { [GH_ISSUE]: { attempts: 2, lastDecision: "resumed" } };
+    writeFileSync(fixture.statePath, `${JSON.stringify(document, null, 2)}\n`);
+    admitPending(fixture);
+    writeSliceFiles(fixture.sliceDir, NEGOTIATION_BYTES);
+    seedNegotiationControls(fixture);
+    const before = {
+      tips: tips(fixture),
+      worktree: digestTree(fixture.worktreeDir),
+      resume: stateDocument(fixture).resume,
+      slices: stateDocument(fixture).slices,
+    };
+    // The preserved branch really is ahead, so a lost commit would be visible.
+    expect(git(fixture.repoRoot, "rev-list", "--count", `${fixture.featureBranch}..${SLICE_BRANCH}`)).toBe("1");
+
+    expect(execute(fixture).ok).toBe(true);
+
+    expect(tips(fixture)).toEqual(before.tips);
+    expect(digestTree(fixture.worktreeDir)).toEqual(before.worktree);
+    expect(stateDocument(fixture).resume).toEqual(before.resume);
+    expect(stateDocument(fixture).slices).toEqual(before.slices);
+    expect(
+      git(fixture.repoRoot, "rev-list", "--count", `${fixture.featureBranch}..${SLICE_BRANCH}`),
+    ).toBe("1");
+    // No merge, reset or rebase is reachable: the word is absent from the code.
+    expect(MODULE_CODE).not.toMatch(/\b(?:merge|reset|rebase)\b/i);
+  }, 30_000);
+
+  it("[behavior:#332:B-09] appends no lineage event and still ends on the same PENDING event", () => {
+    admitPending(fixture);
+    writeSliceFiles(fixture.sliceDir, NEGOTIATION_BYTES);
+    seedNegotiationControls(fixture);
+    const before = recoveryLineageFor(
+      loadRunState(fixture.repoRoot, PRD_SLUG),
+      GH_ISSUE,
+    );
+    expect(before).toHaveLength(1);
+
+    expect(execute(fixture).ok).toBe(true);
+
+    const after = recoveryLineageFor(
+      loadRunState(fixture.repoRoot, PRD_SLUG),
+      GH_ISSUE,
+    );
+    expect(after).toEqual(before);
+    expect(after.map((event) => event.state)).toEqual(["PENDING"]);
+    expect(hasOpenRecoveryAttempt(loadRunState(fixture.repoRoot, PRD_SLUG), GH_ISSUE)).toBe(true);
+    // Verified restore is #333: no terminal writer exists on this path.
+    for (const terminal of ["COMPLETED", "ROLLED_BACK", "ROLLBACK_FAILED"]) {
+      expect(after.some((event) => event.state === terminal)).toBe(false);
+    }
+  }, 30_000);
+
+  it("[behavior:#332:P-01] leaves admission's single-PENDING mutation intact", () => {
+    const before = stateDocument(fixture);
+
+    const outcome = admit(fixture, { attemptId: "attempt-preserved" });
+
+    expect(outcome.admitted).toBe(true);
+    const after = stateDocument(fixture);
+    const lineage = (after.recoveryLineage as Record<string, unknown[]>)[GH_ISSUE]!;
+    expect(lineage).toHaveLength(1);
+    expect((lineage[0] as PersistedRecoveryLineageEvent).state).toBe("PENDING");
+    // The append is still admission's only mutation, and the seams are still
+    // parameters on its own entry point.
+    expect(after).toEqual({
+      ...before,
+      version: RUN_STATE_VERSION,
+      recoveryLineage: { [GH_ISSUE]: lineage },
+    });
+    expect(MODULE_SOURCE).toContain("beforeLockAcquired?: () => void;");
+    expect(MODULE_SOURCE).toContain("afterTemporaryWritten?: () => void;");
+  }, 30_000);
+
+  it("[behavior:#332:P-02] still refuses --renegotiate-stale on the one shared parse path", () => {
+    // Re-pinned from this slice's own test file so `src/cli-options.test.ts`
+    // stays untouched and out of scope; #277's pin there is unchanged.
+    expect(() =>
+      parsePipelineRuntimeOptions([
+        "--renegotiate-stale",
+        SLICE_NUMBER,
+        "--recovery-reason",
+        "the pair went stale",
+      ]),
+    ).toThrow(/--renegotiate-stale is refused until #335 lands/);
+    // The flags' own validation messages are unchanged, and still reachable.
+    expect(
+      parseStaleRenegotiationRequest([
+        "--renegotiate-stale",
+        SLICE_NUMBER,
+        "--recovery-reason",
+        "  stale  ",
+      ]),
+    ).toEqual({ selector: SLICE_NUMBER, reason: "stale" });
+    expect(() => parseStaleRenegotiationRequest(["--renegotiate-stale", "7"])).toThrow(
+      "--renegotiate-stale requires --recovery-reason <text> recording why the accepted pair is stale",
+    );
+    expect(() => parseStaleRenegotiationRequest(["--recovery-reason", "x"])).toThrow(
+      "--recovery-reason requires --renegotiate-stale <slice|ghIssue> naming the target to renegotiate",
+    );
+    expect(() =>
+      parseStaleRenegotiationRequest(["--renegotiate-stale", "7,7", "--recovery-reason", "x"]),
+    ).toThrow("--renegotiate-stale names 7 more than once; supply the target exactly once");
+    expect(() =>
+      parseStaleRenegotiationRequest(["--renegotiate-stale", "7", "--recovery-reason", "  "]),
+    ).toThrow("--recovery-reason requires non-blank text recording why the accepted pair is stale");
+  });
+
+  it("[behavior:#332:P-03] leaves both owning modules' signatures and semantics unmodified", () => {
+    expect(sourceOf("exact-stage-resume.ts")).toContain(
+      [
+        "export function clearExactStageCheckpoint(",
+        "  location: CheckpointLocation,",
+        "): void {",
+      ].join("\n"),
+    );
+    expect(sourceOf("contract-convergence.ts")).toContain(
+      [
+        "export function saveContractFindingLineage(",
+        "  location: LineageLocation,",
+        "  lineage: ContractFindingLineage,",
+        "): void {",
+      ].join("\n"),
+    );
+    // The existing consumer still consumes its checkpoint the same way.
+    expect(sourceOf("exact-stage-resume.ts")).toContain(
+      "  clearExactStageCheckpoint(input);\n  return { ok: true };",
+    );
+  });
+
+  it("[behavior:#332:P-04] changes no live pair byte and adds no second pair-validation path", () => {
+    admitPending(fixture);
+    writeSliceFiles(fixture.sliceDir, NEGOTIATION_BYTES);
+    const before = {
+      contract: readFileSync(join(fixture.sliceDir, CONTRACT_FILENAME), "utf-8"),
+      manifest: readFileSync(
+        join(fixture.sliceDir, ACCEPTANCE_MANIFEST_FILENAME),
+        "utf-8",
+      ),
+    };
+
+    expect(execute(fixture).ok).toBe(true);
+
+    expect(readFileSync(join(fixture.sliceDir, CONTRACT_FILENAME), "utf-8")).toBe(
+      before.contract,
+    );
+    expect(
+      readFileSync(join(fixture.sliceDir, ACCEPTANCE_MANIFEST_FILENAME), "utf-8"),
+    ).toBe(before.manifest);
+    // One validator, and no writer of the status line: a replacement pair still
+    // reaches LOCKED only through the negotiation's own gate (ADR 0008, 0055).
+    expect(occurrences(MODULE_CODE, "parseAcceptanceManifest(")).toBe(1);
+    expect(occurrences(MODULE_CODE, "validateAcceptanceManifestCoverage(")).toBe(1);
+    expect(MODULE_CODE).not.toContain("**Status:** LOCKED");
+  }, 30_000);
 });
