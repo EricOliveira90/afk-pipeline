@@ -183,6 +183,7 @@ import {
   validateFinalReview,
   type PostApprovalWritingStage,
 } from "./final-evaluation.js";
+import { runSelfAuditStage } from "./self-audit.js";
 import { createCleanerOrchestrationSession } from "./cleaner-orchestration.js";
 import { createCleanerContinuation } from "./cleaner-continuation.js";
 import {
@@ -542,6 +543,12 @@ export interface PipelineConfig {
    * orchestrator reads this for the `run-started` event and nothing else.
    */
   recordPrompts?: boolean;
+  /**
+   * Whether this run gives each gate-released candidate one bounded generator
+   * self-audit invocation before the deterministic QA dispatch (`--self-audit`,
+   * #299, ADR 0069). Default off; one knob for the run, no per-slice form.
+   */
+  selfAudit?: boolean;
   /** Effective inline byte limit for each assembled generator prompt. */
   generatorInlineSizeBudgetBytes?: number;
   /** Effective inline byte limit for each assembled explorer prompt. */
@@ -6401,6 +6408,59 @@ export async function runSliceExecute(
           declarations: preQaDeclarations,
           candidateTreeId: checkpoint.treeId,
         };
+        // One bounded generator self-audit on the tree the gates just released,
+        // before anyone else grades it (#299, ADR 0069). The stage declines when
+        // the run was not launched with `--self-audit`, so this costs a
+        // default run nothing; it declines rather than throws in every case,
+        // because a gate that adds scrutiny may never block a run by its own
+        // failure. Only the unchanged-tree path is orchestrated here — an
+        // `AUDIT_CHANGED` verdict is classified and changes nothing downstream
+        // until #300 wires the audited tree into the dispatch below.
+        await runSelfAuditStage({
+          repoRoot: config.repoRoot,
+          prdSlug: config.prdSlug,
+          ghIssue: slice.ghIssue,
+          worktreeDir: ctx.worktreeDir,
+          sliceDir: ctx.relSliceDir,
+          ...(config.selfAudit !== undefined
+            ? { selfAudit: config.selfAudit }
+            : {}),
+          qaBaseGate,
+          checkpoint,
+          changeSummary: () =>
+            git.logCommitsWithStat(ctx.worktreeDir, featBranch),
+          log: (message) => logger.phase(`${ctx.tag}: ${message}`, "error"),
+          // A re-dispatch of the generator, not a new agent role or a new
+          // backend: the same `AgentProvider` interface, in the slice's own
+          // worktree, under the same per-invocation bounds (ADR 0002, ADR 0007).
+          // No `contextEnvelope` is passed, so no `prompt-assembly` event is
+          // journaled for the audit — an explicit #299 non-goal; the assembled
+          // evidence the stage hands back is where #301 will pick it up. The log
+          // stream is opened here rather than beside the stage so a declined
+          // audit leaves no empty log behind.
+          dispatch: async ({ prompt }) => {
+            const auditLog = logger.agentLog(
+              slice.number,
+              "generator-audit",
+              round,
+            );
+            try {
+              await invoke({
+                role: "generator",
+                prompt,
+                cwd: ctx.worktreeDir,
+                logStream: auditLog,
+                ...longCommandRoleBounds({
+                  idleTimeoutMs: timeoutMs,
+                  idleWarningIntervalMs: heartbeatMs,
+                  maxDurationMs: config.maxAgentDurationMs,
+                }),
+              });
+            } finally {
+              await closeAgentLog(auditLog);
+            }
+          },
+        });
         logger.phase(
           `${ctx.tag}: deterministic QA (round ${round}/${finalRound})...`,
           "error",
