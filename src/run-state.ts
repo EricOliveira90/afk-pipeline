@@ -51,7 +51,8 @@ export interface PersistedSliceState {
  * both keyed by GitHub issue and both optional: the per-slice approved baseline
  * locator below (#91) and `appliedWaivers` (#193). v5 adds a third of the same
  * shape, `finalEvaluations` (#96 B-02/B-09). v6 adds a fourth, `qualityStages`
- * (#87 B-14). `adaptLoadedState` normalizes a v3, v4 or v5 file to it in memory,
+ * (#87 B-14). v7 adds a fifth, `selfAudits` (#299 B-10).
+ * `adaptLoadedState` normalizes a v3, v4, v5 or v6 file to it in memory,
  * so a resumed run reads one shape, and `writeRunState` stamps it on every write
  * so a stale caller literal can never reach disk.
  *
@@ -59,12 +60,15 @@ export interface PersistedSliceState {
  * persists version `6` with no `qualityStages` member, because "no stage ran"
  * and "this file predates quality stages" are the same fact to every reader and
  * a version conditional on a policy member is a version two runs disagree about
- * (#87 P-01).
+ * (#87 P-01). The v7 bump is unconditional for exactly that reason: a run
+ * launched without `--self-audit` persists version `7` with no `selfAudits`
+ * member, because "no audit ran" and "this file predates audits" are the same
+ * fact to every reader (#299 B-10).
  *
  * Exported because it is the one number a reader has to compare against, and a
  * duplicated literal is how two modules disagree about what "current" means.
  */
-export const RUN_STATE_VERSION = 6;
+export const RUN_STATE_VERSION = 7;
 
 /**
  * Where one slice's approved baseline artifact is, and which candidate it
@@ -251,7 +255,7 @@ export interface RunState {
    * keep compiling, and nothing reads a `3`, `4` or `5` back out of a loaded
    * state.
    */
-  version: 3 | 4 | 5 | 6;
+  version: 3 | 4 | 5 | 6 | 7;
   prdSlug: string;
   featureBranch: string;
   /**
@@ -336,6 +340,37 @@ export interface RunState {
    * v5 file loads unchanged.
    */
   qualityStages?: Record<string, PersistedQualityStage[]>;
+  /**
+   * Per-slice generator self-audit outcomes, keyed by GitHub issue — v7's single
+   * addition (#299 B-10). Absent entries read as "no audit ran", so a v3, v4, v5
+   * or v6 file loads unchanged.
+   */
+  selfAudits?: Record<string, PersistedSelfAuditOutcome[]>;
+}
+
+/** The three outcomes a bounded generator self-audit can have (ADR 0069). */
+export type PersistedSelfAuditVerdict =
+  | "AUDIT_UNCHANGED"
+  | "AUDIT_CHANGED"
+  | "AUDIT_NOT_RUN";
+
+/**
+ * One generator self-audit invocation as persisted (#299 B-10).
+ *
+ * Two tree ids rather than one because they answer different questions:
+ * `candidateTreeId` is the tree the required cheap gates released and the audit
+ * was handed, and `auditedTreeId` is the tree the audit left behind. On an
+ * `AUDIT_UNCHANGED` outcome they are equal — which is the fact, not a
+ * redundancy. `auditedTreeId` is absent when there is nothing honest to record
+ * there: an invocation that never ran, or one whose post-audit tree could not
+ * be resolved.
+ */
+export interface PersistedSelfAuditOutcome {
+  /** The candidate tree the audit was handed. */
+  candidateTreeId: string;
+  /** The tree the audit left behind, when it could be resolved. */
+  auditedTreeId?: string;
+  verdict: PersistedSelfAuditVerdict;
 }
 
 /**
@@ -991,6 +1026,94 @@ export function recordQualityStageOutcome(
 }
 
 /**
+ * Keep only well-formed self-audit records (#299 B-10), in the same style as
+ * {@link sanitizeQualityStages}.
+ *
+ * A malformed entry degrades the whole issue's list to absent rather than only
+ * itself, for the reason the round sanitizer gives: dropping one entry would
+ * understate how many audit invocations a slice has already spent.
+ */
+function sanitizeSelfAudits(
+  value: unknown,
+): Record<string, PersistedSelfAuditOutcome[]> | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const nonblank = (field: unknown): field is string =>
+    typeof field === "string" && field.trim() !== "";
+  const VERDICTS = new Set<string>([
+    "AUDIT_UNCHANGED",
+    "AUDIT_CHANGED",
+    "AUDIT_NOT_RUN",
+  ]);
+  const out: Record<string, PersistedSelfAuditOutcome[]> = {};
+  for (const [ghIssue, raw] of Object.entries(
+    value as Record<string, unknown>,
+  )) {
+    if (!Array.isArray(raw)) continue;
+    const entries: PersistedSelfAuditOutcome[] = [];
+    let dropped = false;
+    for (const candidate of raw) {
+      if (typeof candidate !== "object" || candidate === null) {
+        dropped = true;
+        break;
+      }
+      const entry = candidate as Partial<
+        Record<keyof PersistedSelfAuditOutcome, unknown>
+      >;
+      if (
+        !nonblank(entry.candidateTreeId) ||
+        !VERDICTS.has(entry.verdict as string) ||
+        (entry.auditedTreeId !== undefined && !nonblank(entry.auditedTreeId))
+      ) {
+        dropped = true;
+        break;
+      }
+      entries.push({
+        candidateTreeId: entry.candidateTreeId,
+        ...(entry.auditedTreeId !== undefined
+          ? { auditedTreeId: entry.auditedTreeId as string }
+          : {}),
+        verdict: entry.verdict as PersistedSelfAuditVerdict,
+      });
+    }
+    if (dropped || entries.length === 0) continue;
+    out[ghIssue] = entries;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * One slice's self-audit outcomes, oldest first (#299 B-10). A slice audits once
+ * per QA submission, so the list length is the number of submissions that were
+ * audited and its last entry is the current one.
+ */
+export function selfAuditsFor(
+  state: RunState,
+  ghIssue: string,
+): readonly PersistedSelfAuditOutcome[] {
+  return state.selfAudits?.[ghIssue] ?? [];
+}
+
+/**
+ * Append one self-audit outcome the moment its verdict lands (#299 B-09/B-10),
+ * exactly as {@link recordQualityStageRound} persists per round: a run killed
+ * after the audit dispatched resumes having spent the invocation it spent.
+ */
+export function recordSelfAuditOutcome(
+  repoRoot: string,
+  prdSlug: string,
+  ghIssue: string,
+  outcome: PersistedSelfAuditOutcome,
+): void {
+  updateRunState(repoRoot, prdSlug, (state) => {
+    state.version = RUN_STATE_VERSION;
+    state.selfAudits = {
+      ...(state.selfAudits ?? {}),
+      [ghIssue]: [...(state.selfAudits?.[ghIssue] ?? []), outcome],
+    };
+  });
+}
+
+/**
  * Load run state, adapting unversioned (v0), v1, and v2 files in memory. v0 files
  * used a per-slice `status` field whose values were a strict subset of v1's
  * `phase` enum, so that migration is a field rename. v2 adds raw exact-stage
@@ -1002,7 +1125,8 @@ export function recordQualityStageOutcome(
  * way: a v4 file keeps its locator and its waivers and gains no final
  * evaluation, because it had none. v6 adds `qualityStages` (#87) the same way
  * again: a v5 file with no such member reads as "no stage ran" and the adapter
- * writes nothing. Throws on unknown status strings rather than
+ * writes nothing. v7 adds `selfAudits` (#299) the same way once more: a v6 file
+ * reads as "no audit ran". Throws on unknown status strings rather than
  * silently producing an invalid record.
  */
 export function loadRunState(repoRoot: string, prdSlug: string): RunState {
@@ -1038,6 +1162,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     appliedWaivers?: unknown;
     finalEvaluations?: unknown;
     qualityStages?: unknown;
+    selfAudits?: unknown;
   };
   const featureBranch = r.featureBranch ?? `feat/${prdSlug}`;
   const slicesIn = r.slices ?? {};
@@ -1055,7 +1180,8 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     r.version === 3 ||
     r.version === 4 ||
     r.version === 5 ||
-    r.version === 6
+    r.version === 6 ||
+    r.version === 7
   ) {
     const slices: Record<string, PersistedSliceState> = {};
     for (const [id, val] of Object.entries(slicesIn)) {
@@ -1071,6 +1197,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     const appliedWaivers = sanitizeAppliedWaivers(r.appliedWaivers);
     const finalEvaluations = sanitizeFinalEvaluations(r.finalEvaluations);
     const qualityStages = sanitizeQualityStages(r.qualityStages);
+    const selfAudits = sanitizeSelfAudits(r.selfAudits);
     return {
       version: RUN_STATE_VERSION,
       prdSlug,
@@ -1106,6 +1233,10 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
       // writes nothing: "no quality stage ran" and "this file predates quality
       // stages" are the same fact to every reader (#87 B-14).
       ...(qualityStages !== undefined ? { qualityStages } : {}),
+      // v1–v6 files have no such field, so the upgrade leaves it absent and
+      // writes nothing: "no audit ran" and "this file predates audits" are the
+      // same fact to every reader (#299 B-10).
+      ...(selfAudits !== undefined ? { selfAudits } : {}),
     };
   }
 
