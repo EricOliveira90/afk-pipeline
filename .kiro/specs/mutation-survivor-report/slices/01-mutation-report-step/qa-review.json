@@ -1,0 +1,63 @@
+{
+  "version": 2,
+  "verdict": "PASS",
+  "failureClass": "NONE",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-07",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-13", "P-05"],
+      "summary": "The RUN_STATE_VERSION 6 to 7 bump forced two more hard-pinned version literals to move, in src/qa-orchestration.test.ts and src/qa-orchestration-gates.test.ts, neither of which the contract's file list declared.",
+      "evidence": "contract.md:419-420 now lists 'src/qa-orchestration.test.ts (added by scope amendment for QA finding QA-07)' and 'src/qa-orchestration-gates.test.ts (added by scope amendment for QA finding QA-07)'; acceptance-manifest.json fileScope.paths:28-29 lists both bare paths. Commit 7b6740f moves qa-orchestration-gates.test.ts:1043 and qa-orchestration.test.ts:1025 from 6 to 7. Probe: `pnpm vitest run src/qa-orchestration.test.ts src/qa-orchestration-gates.test.ts` — 2 test files passed, 59 tests passed, exit code 0.",
+      "expected": "The contract's file list and acceptance-manifest fileScope.paths declare every file the slice changed, including the two loaded-state version pins the bump forced to move.",
+      "observed": "Both paths are now declared in contract.md's 'Files expected to change' and in acceptance-manifest.json's fileScope.paths, and both files pass with the pins reading 7.",
+      "clearCondition": "The contract's file list and acceptance-manifest `fileScope.paths` declare src/qa-orchestration.test.ts and src/qa-orchestration-gates.test.ts.",
+      "state": "RESOLVED",
+      "remedy": "SCOPE_AMENDMENT",
+      "amendmentPaths": [
+        "src/qa-orchestration.test.ts",
+        "src/qa-orchestration-gates.test.ts"
+      ]
+    },
+    {
+      "id": "QA-08",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-08"],
+      "summary": "`positiveInt` in src/mutation-report.ts accepts 0 and non-integers, so its name overstates what it checks and a mutant location the mutation-testing-elements schema cannot produce parses as valid.",
+      "evidence": "src/mutation-report.ts:103-107 is unchanged from round 3: `typeof value === \"number\" && Number.isFinite(value) && value >= 0`, which admits 0 and 1.5, and the function is still named `positiveInt`. Probe (temporary test file, since deleted) feeding a Survived mutant `location: { start: { line: 0, column: 1.5 }, end: { line: -0, column: 2.25 } }` to `parseMutationReport`: `PROBE RESULT: {\"status\":\"PARSED\",\"survivors\":[{\"id\":\"m1\",\"file\":\"src/a.ts\",\"mutator\":\"Arith\",\"position\":{\"startLine\":0,\"startColumn\":1.5,\"endLine\":0,\"endColumn\":2.25}}]}` — so `formatMutationReportLines` would render that survivor as `src/a.ts:0:1.5`. No case in src/mutation-report.test.ts pins zero or non-integer rejection (66 tests pass without one).",
+      "expected": "A guard named `positiveInt` rejects values that are not positive integers, or carries a name describing what it actually accepts, so a location the schema cannot produce does not parse as a valid survivor position.",
+      "observed": "`positiveInt` accepts 0 and fractional values; a survivor at line 0, column 1.5 parses as PARSED and would render into run-summary.md and the PR body as `src/a.ts:0:1.5`.",
+      "clearCondition": "The location guard either rejects zero and non-integer values (with a case in src/mutation-report.test.ts pinning it) or is renamed to describe what it accepts.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-09",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-13"],
+      "summary": "`sanitizeMutationStep` validates every field of the persisted mutation record except `reason`, which it casts to `MutationNotRunReason` from any nonblank string, so the loaded record's type lies about its contents.",
+      "evidence": "src/run-state.ts:983-985: `...(nonblank(record.reason) ? { reason: record.reason as MutationNotRunReason } : {})` — an unchecked cast, where `runSlug`, `status` and every `survivors` entry are each validated and a failure degrades the whole record to `undefined`. Probe (temporary test file, since deleted) writing `.afk/state/slug.json` with `mutationStep: { runSlug: \"slug\", status: \"MUTATION_NOT_RUN\", reason: \"banana\", survivors: [] }`: `PROBE loaded: {\"runSlug\":\"slug\",\"status\":\"MUTATION_NOT_RUN\",\"reason\":\"banana\",\"survivors\":[]}`, and handing that record to `formatMutationReportLines` yields `- Not run: \\`banana\\` — no survivor list was produced. Nothing was gated on this (ADR 0063).` No consumer reads `state.mutationStep.reason` today — the report text is derived from the event stream (src/logger.ts:877, src/ship-gate.ts:1467) — so the reachable consequence today is type dishonesty rather than wrong report text.",
+      "expected": "A sanitizer whose stated job is that 'a malformed record degrades to absent rather than throwing' (src/run-state.ts:945-948) validates `reason` against the four `MutationNotRunReason` values, the same way it validates `status` against the two status values, so the returned type is true of the returned value.",
+      "observed": "An arbitrary nonblank string on disk is returned as a `MutationNotRunReason` through an unchecked cast, and would render verbatim if any future reader (for example slice 2's baseline/decisions extension) derived text from the persisted record.",
+      "clearCondition": "`sanitizeMutationStep` rejects or drops a `reason` that is not one of BOUND_REACHED, COMMAND_FAILED, REPORT_UNREADABLE or REPORT_MALFORMED, with a case in src/run-state.test.ts pinning it, and the unchecked cast is gone.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-10",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-12"],
+      "summary": "A stale orphan doc comment above `BoundRace` in src/mutation-report.ts contradicts the comment immediately below it, describing the design the code deliberately moved away from.",
+      "evidence": "src/mutation-report.ts:439-447 carries two consecutive doc comments on one type: line 439 reads `/** Sentinel for \"the bound fired first\" — never a value the step can produce. */`, and lines 440-444 then read `Race arms, discriminated rather than sentinel-valued: \\`undefined\\` is a real step result (the abandonment return), so the bound arm cannot be represented by any value the step arm could also produce.` The first comment describes the sentinel approach the second explicitly rejects, and it is attached to nothing.",
+      "expected": "One doc comment per declaration, describing the design the code implements.",
+      "observed": "Two stacked doc comments on `type BoundRace`, the first a leftover from the sentinel-valued revision that the second says was abandoned.",
+      "clearCondition": "src/mutation-report.ts carries a single doc comment on `BoundRace`, and the `Sentinel for \"the bound fired first\"` line is gone.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    }
+  ]
+}

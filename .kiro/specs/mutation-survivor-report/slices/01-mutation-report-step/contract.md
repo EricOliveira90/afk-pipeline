@@ -416,6 +416,8 @@ behavior is unchanged.
 - .kiro/specs/mutation-survivor-report/slices/01-mutation-report-step/contract.md
 - .kiro/specs/mutation-survivor-report/slices/01-mutation-report-step/acceptance-manifest.json
 - .kiro/specs/mutation-survivor-report/slices/01-mutation-report-step/contract-response.json
+- src/qa-orchestration.test.ts (added by scope amendment for QA finding QA-07)
+- src/qa-orchestration-gates.test.ts (added by scope amendment for QA finding QA-07)
 
 ## Migration requirements
 

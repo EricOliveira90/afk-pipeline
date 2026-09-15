@@ -1,0 +1,216 @@
+{
+  "version": 1,
+  "cause": {
+    "kind": "DETERMINISTIC_GATE_EXHAUSTION",
+    "interventionClass": "IMPLEMENTATION_INTERVENTION"
+  },
+  "interventionClass": "IMPLEMENTATION_INTERVENTION",
+  "phase": "deterministic-qa",
+  "reasonCodes": [
+    "DETERMINISTIC_GATE_EXHAUSTED"
+  ],
+  "blockerIds": [
+    "QA-01",
+    "tests"
+  ],
+  "summary": "AFK exhausted deterministic base-gate repair capacity with failed gate(s) tests.",
+  "findingLineage": [
+    {
+      "stableId": "QA-01",
+      "currentId": "QA-01",
+      "state": "OPEN",
+      "disposition": "OPEN",
+      "occurrences": 1,
+      "summary": "A literal NUL byte in src/mutation-report.test.ts makes git classify the slice's largest new test file as binary, so it can never be diff-reviewed or grepped.",
+      "evidence": "The byte is at file offset 7233, line 214 (count 1), inside the parser's never-throws loop: `for (const text of [\"\", \"null\", \"true\", '{\"files\":null}', \"\\x00\"])` — the source holds a raw 0x00 rather than an escape sequence. Located with `python -c` over the raw bytes after `od -An -c | tr ' ' '\\n' | sort -u` enumerated the distinct byte tokens. Consequences observed in this worktree: (1) `git diff --stat main...HEAD` reports `src/mutation-report.test.ts | Bin 0 -> 28258 bytes` while every other new file in the slice reports a line count; (2) `git diff main...HEAD -- src/mutation-report.test.ts` prints only `Binary files /dev/null and b/src/mutation-report.test.ts differ`; (3) `git grep` over the file prints `Binary file src/mutation-report.test.ts matches` and refuses to show matching lines, which is how the problem was first noticed; (4) `.gitattributes` contains only `*.mjs text eol=lf`, so no attribute overrides git's binary heuristic for `*.ts`. The file's 746 tests do pass (`npx vitest run src/mutation-report.test.ts` exit 0), so nothing warns anyone.",
+      "clearCondition": "`git diff main...HEAD -- src/mutation-report.test.ts` prints a textual line-by-line diff (not `Binary files ... differ`), and `git grep -n 'not.toThrow' -- src/mutation-report.test.ts` prints the matching line rather than `Binary file ... matches`, with `npx vitest run src/mutation-report.test.ts` still exiting 0.",
+      "artifactReferences": [
+        ".afk/artifacts/mutation-survivor-report-claude-code/slice-01/reviews/qa-review-r2-a1.json",
+        ".kiro/specs/mutation-survivor-report/slices/01-mutation-report-step/qa-report-r2-a1.md"
+      ]
+    },
+    {
+      "stableId": "QA-02",
+      "currentId": "QA-02",
+      "state": "OPEN",
+      "disposition": "OPEN",
+      "occurrences": 1,
+      "summary": "The gate-id half of B-11's and B-16's observable — that the gate ids and gate results a run reports are identical with the flag set and with it absent — is asserted nowhere.",
+      "evidence": "B-11's contract text requires that \"the gate ids the run reports with the flag set are identical to those it reports with the flag absent, so the step holds no gate id and constructs no `GateDeclaration`\", and B-16's manifest observable says the check \"asserts gate ids, verdicts and the PR-open decision are equal across the two runs\". The `describe(\"[behavior:#303:B-16] ...\")` block in src/ship-gate.test.ts compares only the results of two `buildPrCreationPlan(...)` calls — one with `mutationStep` supplied, one without — and asserts the plans are otherwise equal. Grepping the whole new mutation describe range (src/ship-gate.test.ts:2094-2695) for `gateId`, `gateIds`, `GateDeclaration` and `gates` returns no assertion. `ShipGateResult` is `{ verdict, failureReason?, pr }`, so the gate ids are not reachable from the value the tests already hold.",
+      "clearCondition": "A test in src/ship-gate.test.ts runs the gate twice — once with `mutationReport` declared, once without — and asserts the gate ids/gate results it reports are equal across the two runs (for example by comparing the gate-bearing entries of the teed `events.jsonl`), and that no gate id names the mutation step.",
+      "artifactReferences": [
+        ".afk/artifacts/mutation-survivor-report-claude-code/slice-01/reviews/qa-review-r2-a1.json",
+        ".kiro/specs/mutation-survivor-report/slices/01-mutation-report-step/qa-report-r2-a1.md"
+      ]
+    },
+    {
+      "stableId": "QA-03",
+      "currentId": "QA-03",
+      "state": "OPEN",
+      "disposition": "OPEN",
+      "occurrences": 1,
+      "summary": "B-12's \"the rejoin origin is the post-fork instant at which both guardian results are in hand\" is not distinguished by any assertion — the fake clock returns the same origin whether the capture sits before or after the guardian fork.",
+      "evidence": "The BOUND_REACHED test drives the gate with `spentClock()`, which returns `0` on its first reading and `MUTATION_STEP_BOUND_MS + 1` on every reading after (`readings++ === 0 ? 0 : MUTATION_STEP_BOUND_MS + 1`). In src/ship-gate.ts, `mutationClock` is read nowhere between the step's launch and `const mutationRejoinOrigin = mutationClock();`, so that capture is always the first reading and always yields `0` — identically whether it is placed before the guardian mode fork or after it. The subsequent `now()` inside `awaitMutationStepWithinBound` yields the spent value, so `remaining <= 0` and the BOUND_REACHED branch is taken either way. (I attempted to confirm this by relocating the capture above the fork; the first attempt broke parsing and was restored from backup, the second failed to match its anchor, so the conclusion rests on inspection of the two reads rather than on a passing mutated build. The reasoning does not depend on the probe: with only one clock read before the capture, the position of that read cannot change its value.)",
+      "clearCondition": "A test in src/ship-gate.test.ts drives the gate with a clock whose readings are distinguishable across spawn / guardian completion / rejoin and asserts the bounded wait's origin is the post-fork reading, failing if the capture is moved above the guardian mode fork.",
+      "artifactReferences": [
+        ".afk/artifacts/mutation-survivor-report-claude-code/slice-01/reviews/qa-review-r2-a1.json",
+        ".kiro/specs/mutation-survivor-report/slices/01-mutation-report-step/qa-report-r2-a1.md"
+      ]
+    },
+    {
+      "stableId": "QA-04",
+      "currentId": "QA-04",
+      "state": "OPEN",
+      "disposition": "OPEN",
+      "occurrences": 1,
+      "summary": "The ARCHITECTURE.md line-cap assertion filters with an always-true predicate, so the filter is dead code that reads as if it excluded blank lines.",
+      "evidence": "src/mutation-report.test.ts:232 reads `const lines = architecture.split(\"\\n\").filter((line) => line !== \"\" || true);`. The `|| true` makes the predicate unconditionally true, so no line is ever dropped and `filter` is a no-op that only obscures what is being counted.",
+      "clearCondition": "src/mutation-report.test.ts:232 no longer contains an always-true filter predicate, and the ARCHITECTURE.md line-cap assertion still passes.",
+      "artifactReferences": [
+        ".afk/artifacts/mutation-survivor-report-claude-code/slice-01/reviews/qa-review-r2-a1.json",
+        ".kiro/specs/mutation-survivor-report/slices/01-mutation-report-step/qa-report-r2-a1.md"
+      ]
+    },
+    {
+      "stableId": "QA-05",
+      "currentId": "QA-05",
+      "state": "OPEN",
+      "disposition": "OPEN",
+      "occurrences": 1,
+      "summary": "The bound-reached rejoin exit terminates the step but never sets the abandonment flag, so unlike every guardian-rejection exit it leaves the pre-spawn window open and a command can spawn after the quiesce and after the gate has returned.",
+      "evidence": "`grep -n mutationAbandoned src/ship-gate.ts` prints exactly three lines: `1008: let mutationAbandoned = false;`, `1017: isAbandoned: () => mutationAbandoned,` and `1037: mutationAbandoned = true;` — the last inside `abandonMutationStep`, which only the guardian-rejection `catch` calls. The rejoin exit's `awaitMutationStepWithinBound({ step: mutationStep, origin: mutationRejoinOrigin, now: mutationClock, terminate: terminateMutationStep })` passes `terminate` with no flag set, and `awaitMutationStepWithinBound` (src/mutation-report.ts:475-485) calls `terminate` and returns BOUND_REACHED without touching it. Probe (temporary test appended to src/ship-gate.test.ts, since reverted): a run with `mutationReport` declared, a `mutationScope` promise held pending, and `mutationNow` spent after its first reading printed `PROBE quiesce calls: 1`, `PROBE mutationRun before release: 0`, then after `runShipGate` had already returned and the scope was released, `PROBE mutationRun AFTER gate returned + release: 1`. The identical scenario on a guardian-rejection exit is asserted to leave `mutationRun` at 0 (src/ship-gate.test.ts:2612 `never starts a step still deriving its scope when the guardian rejects`). Production reachability caveat: with no `mutationScope` seam, `runMutationStep` derives its scope through `buildChangeSummary`, whose git calls are `execFileSync` (src/change-summary.ts:69-70), so the body runs to the `mutationRun` invocation synchronously before the fork and today's production path cannot be in the pre-spawn state at the bound. The defect is the asymmetry, not a shipping leak.",
+      "clearCondition": "The bound-reached exit sets the same abandonment flag before it invokes `terminate` (as `abandonMutationStep` already does), and a test in src/ship-gate.test.ts holding the step ahead of the `mutationRun` seam with `mutationNow` past the rejoin origin plus the bound asserts `mutationRun` invocation count is `0` after the gate returns and the held scope is released.",
+      "artifactReferences": [
+        ".afk/artifacts/mutation-survivor-report-claude-code/slice-01/reviews/qa-review-r3-a1.json",
+        ".kiro/specs/mutation-survivor-report/slices/01-mutation-report-step/qa-report-r3-a1.md"
+      ]
+    },
+    {
+      "stableId": "QA-06",
+      "currentId": "QA-06",
+      "state": "OPEN",
+      "disposition": "OPEN",
+      "occurrences": 1,
+      "summary": "`formatMutationReportLines` substitutes a concrete `COMMAND_FAILED` when a `MUTATION_NOT_RUN` report carries no reason, so the run summary and the PR body can state a not-run reason the run never observed.",
+      "evidence": "src/mutation-report.ts:507 renders `` `- Not run: \\`${report.reason ?? \"COMMAND_FAILED\"}\\` — ...` ``. Probe: `node -e \"import('./dist/mutation-report.js').then(m => console.log(JSON.stringify(m.formatMutationReportLines({ status: 'MUTATION_NOT_RUN', survivors: [] }))))\"` prints `[\"- Not run: \\`COMMAND_FAILED\\` — no survivor list was produced. Nothing was gated on this (ADR 0063).\"]`. That input is type-legal and reachable from disk: `reason` is optional on both the `mutation-step` `RunEventPayload` member (src/run-events.ts) and `MutationStepReport` (src/logger.ts), `deriveMutationStepOutcome` omits it when the event lacks it (`...(last.reason !== undefined ? { reason: last.reason } : {})`), and `readMutationStepOutcome` parses `events.jsonl` with no requirement that a `MUTATION_NOT_RUN` entry carry a reason — as does `sanitizeMutationStep` in src/run-state.ts, which keeps such a record and only drops the `reason` field.",
+      "clearCondition": "`formatMutationReportLines` renders an explicitly unknown reason (rather than a substituted `COMMAND_FAILED`) when a `MUTATION_NOT_RUN` report carries none, asserted by a case in src/mutation-report.test.ts that passes a reasonless `MUTATION_NOT_RUN` report and expects the rendered line not to name any specific `MutationNotRunReason`.",
+      "artifactReferences": [
+        ".afk/artifacts/mutation-survivor-report-claude-code/slice-01/reviews/qa-review-r3-a1.json",
+        ".kiro/specs/mutation-survivor-report/slices/01-mutation-report-step/qa-report-r3-a1.md"
+      ]
+    }
+  ],
+  "attemptedRepairs": [
+    {
+      "phase": "deterministic-qa",
+      "revision": 1,
+      "candidateTreeId": "3d186d4497f705d0f9f5895d742abf70265ccaa7",
+      "activeBlockingIds": [
+        "QA-01"
+      ],
+      "findingLineage": [
+        {
+          "stableId": "QA-01",
+          "currentId": "QA-01",
+          "state": "OPEN",
+          "disposition": "OPEN",
+          "occurrences": 1,
+          "summary": "A literal NUL byte in src/mutation-report.test.ts makes git classify the slice's largest new test file as binary, so it can never be diff-reviewed or grepped.",
+          "evidence": "The byte is at file offset 7233, line 214 (count 1), inside the parser's never-throws loop: `for (const text of [\"\", \"null\", \"true\", '{\"files\":null}', \"\\x00\"])` — the source holds a raw 0x00 rather than an escape sequence. Located with `python -c` over the raw bytes after `od -An -c | tr ' ' '\\n' | sort -u` enumerated the distinct byte tokens. Consequences observed in this worktree: (1) `git diff --stat main...HEAD` reports `src/mutation-report.test.ts | Bin 0 -> 28258 bytes` while every other new file in the slice reports a line count; (2) `git diff main...HEAD -- src/mutation-report.test.ts` prints only `Binary files /dev/null and b/src/mutation-report.test.ts differ`; (3) `git grep` over the file prints `Binary file src/mutation-report.test.ts matches` and refuses to show matching lines, which is how the problem was first noticed; (4) `.gitattributes` contains only `*.mjs text eol=lf`, so no attribute overrides git's binary heuristic for `*.ts`. The file's 746 tests do pass (`npx vitest run src/mutation-report.test.ts` exit 0), so nothing warns anyone.",
+          "clearCondition": "`git diff main...HEAD -- src/mutation-report.test.ts` prints a textual line-by-line diff (not `Binary files ... differ`), and `git grep -n 'not.toThrow' -- src/mutation-report.test.ts` prints the matching line rather than `Binary file ... matches`, with `npx vitest run src/mutation-report.test.ts` still exiting 0.",
+          "artifactReferences": [
+            ".afk/artifacts/mutation-survivor-report-claude-code/slice-01/reviews/qa-review-r2-a1.json",
+            ".kiro/specs/mutation-survivor-report/slices/01-mutation-report-step/qa-report-r2-a1.md"
+          ]
+        },
+        {
+          "stableId": "QA-02",
+          "currentId": "QA-02",
+          "state": "OPEN",
+          "disposition": "OPEN",
+          "occurrences": 1,
+          "summary": "The gate-id half of B-11's and B-16's observable — that the gate ids and gate results a run reports are identical with the flag set and with it absent — is asserted nowhere.",
+          "evidence": "B-11's contract text requires that \"the gate ids the run reports with the flag set are identical to those it reports with the flag absent, so the step holds no gate id and constructs no `GateDeclaration`\", and B-16's manifest observable says the check \"asserts gate ids, verdicts and the PR-open decision are equal across the two runs\". The `describe(\"[behavior:#303:B-16] ...\")` block in src/ship-gate.test.ts compares only the results of two `buildPrCreationPlan(...)` calls — one with `mutationStep` supplied, one without — and asserts the plans are otherwise equal. Grepping the whole new mutation describe range (src/ship-gate.test.ts:2094-2695) for `gateId`, `gateIds`, `GateDeclaration` and `gates` returns no assertion. `ShipGateResult` is `{ verdict, failureReason?, pr }`, so the gate ids are not reachable from the value the tests already hold.",
+          "clearCondition": "A test in src/ship-gate.test.ts runs the gate twice — once with `mutationReport` declared, once without — and asserts the gate ids/gate results it reports are equal across the two runs (for example by comparing the gate-bearing entries of the teed `events.jsonl`), and that no gate id names the mutation step.",
+          "artifactReferences": [
+            ".afk/artifacts/mutation-survivor-report-claude-code/slice-01/reviews/qa-review-r2-a1.json",
+            ".kiro/specs/mutation-survivor-report/slices/01-mutation-report-step/qa-report-r2-a1.md"
+          ]
+        },
+        {
+          "stableId": "QA-03",
+          "currentId": "QA-03",
+          "state": "OPEN",
+          "disposition": "OPEN",
+          "occurrences": 1,
+          "summary": "B-12's \"the rejoin origin is the post-fork instant at which both guardian results are in hand\" is not distinguished by any assertion — the fake clock returns the same origin whether the capture sits before or after the guardian fork.",
+          "evidence": "The BOUND_REACHED test drives the gate with `spentClock()`, which returns `0` on its first reading and `MUTATION_STEP_BOUND_MS + 1` on every reading after (`readings++ === 0 ? 0 : MUTATION_STEP_BOUND_MS + 1`). In src/ship-gate.ts, `mutationClock` is read nowhere between the step's launch and `const mutationRejoinOrigin = mutationClock();`, so that capture is always the first reading and always yields `0` — identically whether it is placed before the guardian mode fork or after it. The subsequent `now()` inside `awaitMutationStepWithinBound` yields the spent value, so `remaining <= 0` and the BOUND_REACHED branch is taken either way. (I attempted to confirm this by relocating the capture above the fork; the first attempt broke parsing and was restored from backup, the second failed to match its anchor, so the conclusion rests on inspection of the two reads rather than on a passing mutated build. The reasoning does not depend on the probe: with only one clock read before the capture, the position of that read cannot change its value.)",
+          "clearCondition": "A test in src/ship-gate.test.ts drives the gate with a clock whose readings are distinguishable across spawn / guardian completion / rejoin and asserts the bounded wait's origin is the post-fork reading, failing if the capture is moved above the guardian mode fork.",
+          "artifactReferences": [
+            ".afk/artifacts/mutation-survivor-report-claude-code/slice-01/reviews/qa-review-r2-a1.json",
+            ".kiro/specs/mutation-survivor-report/slices/01-mutation-report-step/qa-report-r2-a1.md"
+          ]
+        },
+        {
+          "stableId": "QA-04",
+          "currentId": "QA-04",
+          "state": "OPEN",
+          "disposition": "OPEN",
+          "occurrences": 1,
+          "summary": "The ARCHITECTURE.md line-cap assertion filters with an always-true predicate, so the filter is dead code that reads as if it excluded blank lines.",
+          "evidence": "src/mutation-report.test.ts:232 reads `const lines = architecture.split(\"\\n\").filter((line) => line !== \"\" || true);`. The `|| true` makes the predicate unconditionally true, so no line is ever dropped and `filter` is a no-op that only obscures what is being counted.",
+          "clearCondition": "src/mutation-report.test.ts:232 no longer contains an always-true filter predicate, and the ARCHITECTURE.md line-cap assertion still passes.",
+          "artifactReferences": [
+            ".afk/artifacts/mutation-survivor-report-claude-code/slice-01/reviews/qa-review-r2-a1.json",
+            ".kiro/specs/mutation-survivor-report/slices/01-mutation-report-step/qa-report-r2-a1.md"
+          ]
+        }
+      ],
+      "supportingEvidence": [
+        ".afk/artifacts/mutation-survivor-report-claude-code/slice-01/reviews/qa-review-r2-a1.json",
+        ".kiro/specs/mutation-survivor-report/slices/01-mutation-report-step/qa-report-r2-a1.md"
+      ]
+    },
+    {
+      "phase": "deterministic-qa",
+      "revision": 1,
+      "candidateTreeId": "353082a55fc454323deecda8e28ebee11b485d60",
+      "activeBlockingIds": [
+        "tests"
+      ]
+    },
+    {
+      "phase": "deterministic-qa",
+      "revision": 2,
+      "candidateTreeId": "3d186d4497f705d0f9f5895d742abf70265ccaa7",
+      "activeBlockingIds": [
+        "tests"
+      ]
+    },
+    {
+      "phase": "deterministic-qa",
+      "revision": 3,
+      "candidateTreeId": "cd949ba8a7013c2493e2c925a78515bb7193683f",
+      "activeBlockingIds": [
+        "tests"
+      ]
+    }
+  ],
+  "preservedCandidate": {
+    "branch": "afk-claude-code/mutation-survivor-report-slice-01-mutation-report-step",
+    "treeId": "cd949ba8a7013c2493e2c925a78515bb7193683f",
+    "phase": "deterministic-qa",
+    "revision": 3,
+    "recoveryRef": "refs/afk/recovery/mutation-survivor-report-claude-code/303/deterministic-qa-r3-cd949ba8a7013c2493e2c925a78515bb7193683f",
+    "recoveryCommit": "0ee9c0f857c257103e678c1ced38277a932749cb"
+  },
+  "supportingEvidence": [
+    ".afk/artifacts/mutation-survivor-report-claude-code/slice-01/reviews/qa-review-r2-a1.json",
+    ".afk/artifacts/mutation-survivor-report-claude-code/slice-01/reviews/qa-review-r3-a1.json",
+    ".kiro/specs/mutation-survivor-report/slices/01-mutation-report-step/qa-report-r2-a1.md",
+    ".kiro/specs/mutation-survivor-report/slices/01-mutation-report-step/qa-report-r3-a1.md",
+    "C:/Code/afk-run-prd11/.afk/logs/mutation-survivor-report-claude-code/run-20260915-071026/gates/s01/attempt-d7b0096e0656.json",
+    "C:/Code/afk-run-prd11/.afk/logs/mutation-survivor-report-claude-code/run-20260915-071026/gates/s01/gate-logs/d7b0096e0656-04-tests.log"
+  ],
+  "requiredOperatorAction": "Inspect QA-01, tests on preserved candidate tree cd949ba8a7013c2493e2c925a78515bb7193683f, make one targeted implementation repair that keeps resolved behavior intact, then resume the slice."
+}

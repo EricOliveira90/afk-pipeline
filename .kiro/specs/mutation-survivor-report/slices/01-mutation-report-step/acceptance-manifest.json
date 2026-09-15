@@ -24,7 +24,9 @@
       "docs/adr/0071-report-only-mutation-survivor-step.md",
       ".kiro/specs/mutation-survivor-report/slices/01-mutation-report-step/contract.md",
       ".kiro/specs/mutation-survivor-report/slices/01-mutation-report-step/acceptance-manifest.json",
-      ".kiro/specs/mutation-survivor-report/slices/01-mutation-report-step/contract-response.json"
+      ".kiro/specs/mutation-survivor-report/slices/01-mutation-report-step/contract-response.json",
+      "src/qa-orchestration.test.ts",
+      "src/qa-orchestration-gates.test.ts"
     ]
   },
   "migrationCount": 0,
