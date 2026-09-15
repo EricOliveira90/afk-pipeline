@@ -11,8 +11,10 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   readAdvisoryGateOutcomes,
+  readMutationStepOutcome,
   readQualityStageOutcomes,
 } from "./logger.js";
+import { MUTATION_REPORT_HEADING } from "./mutation-report.js";
 import {
   RunJournal as Logger,
   type TerminalOutcome,
@@ -1609,5 +1611,120 @@ describe("[behavior:#97:B-10] run-summary.md's per-slice quality-stage rows", ()
     const md = summaryWith("rows-absent", [POLICY]);
     expect(md).toContain("`cleaner`: enabled");
     expect(md).not.toContain("| Slice | Stage |");
+  });
+});
+
+/**
+ * The mutation section (#303 B-14).
+ *
+ * Derived from the persisted event stream by one reader, exactly as the
+ * quality-stage rows are, so `run-summary.md` and the draft PR body cannot
+ * disagree about what survived. Asserted over a hand-written stream that is
+ * really written and really read back — no mutation tool, no spawned run.
+ */
+describe("[behavior:#303:B-14] run-summary.md's mutation section", () => {
+  const SURVIVOR = {
+    id: "12",
+    file: "src/cart.ts",
+    mutator: "ArithmeticOperator",
+    position: { startLine: 12, startColumn: 3, endLine: 12, endColumn: 9 },
+  };
+
+  function summaryWith(
+    slug: string,
+    event?: Extract<RunEventPayload, { type: "mutation-step" }>,
+  ): string {
+    const log = new Logger(makeRepo(), slug);
+    log.restoreCompleted(id("303", "Mutation report starter", "afk/303"));
+    if (event) log.event(event);
+    return log.writeSummary();
+  }
+
+  it("[behavior:#303:B-14] lists every survivor under a heading that says it never blocks", () => {
+    const md = summaryWith("mutation-survivors", {
+      type: "mutation-step",
+      runSlug: "mutation-survivors",
+      status: "MUTATION_REPORTED",
+      survivors: [
+        SURVIVOR,
+        {
+          id: "13",
+          file: "src/checkout.ts",
+          mutator: "StringLiteral",
+          position: { startLine: 4, startColumn: 20, endLine: 4, endColumn: 21 },
+        },
+      ],
+    });
+
+    expect(md).toContain(MUTATION_REPORT_HEADING);
+    const section = md.slice(md.indexOf(MUTATION_REPORT_HEADING));
+    expect(section).toContain("- `12` src/cart.ts:12:3 — ArithmeticOperator");
+    expect(section).toContain("- `13` src/checkout.ts:4:20 — StringLiteral");
+  });
+
+  it("[behavior:#303:B-14] says so in words when nothing survived", () => {
+    const md = summaryWith("mutation-clean", {
+      type: "mutation-step",
+      runSlug: "mutation-clean",
+      status: "MUTATION_REPORTED",
+      survivors: [],
+    });
+
+    // An empty section would read as "the step never ran", which is the one
+    // ambiguity this report exists to remove.
+    const section = md.slice(md.indexOf(MUTATION_REPORT_HEADING));
+    expect(section).toContain("No surviving mutants in the changed source files.");
+  });
+
+  it.each([
+    ["BOUND_REACHED"],
+    ["COMMAND_FAILED"],
+    ["REPORT_UNREADABLE"],
+    ["REPORT_MALFORMED"],
+  ])("[behavior:#303:B-14] names %s as the reason the step produced nothing", (reason) => {
+    const md = summaryWith("mutation-not-run", {
+      type: "mutation-step",
+      runSlug: "mutation-not-run",
+      status: "MUTATION_NOT_RUN",
+      reason: reason as "BOUND_REACHED",
+      survivors: [],
+    });
+
+    const section = md.slice(md.indexOf(MUTATION_REPORT_HEADING));
+    expect(section).toContain(reason);
+    expect(section).not.toContain("No surviving mutants");
+  });
+
+  it("[behavior:#303:B-14] reads the outcome back out of the persisted stream", () => {
+    const log = new Logger(makeRepo(), "mutation-reader");
+    log.restoreCompleted(id("303", "Mutation report starter", "afk/303"));
+    expect(readMutationStepOutcome(log.runDir)).toBeUndefined();
+
+    log.event({
+      type: "mutation-step",
+      runSlug: "mutation-reader",
+      status: "MUTATION_REPORTED",
+      survivors: [SURVIVOR],
+    });
+
+    // One derivation, shared with the draft PR body: the reader goes through
+    // `events.jsonl`, so the two renderings read the same bytes.
+    expect(readMutationStepOutcome(log.runDir)).toEqual({
+      runSlug: "mutation-reader",
+      status: "MUTATION_REPORTED",
+      survivors: [SURVIVOR],
+    });
+  });
+
+  it("[behavior:#303:P-01] renders no section at all for a stream without the event", () => {
+    const md = summaryWith("mutation-absent");
+    expect(md).not.toContain(MUTATION_REPORT_HEADING);
+    expect(md).not.toContain("surviving mutants");
+    expect(md).not.toContain("MUTATION_NOT_RUN");
+    // Every other section still renders: a run that never asked for the report
+    // is byte-identical to one from before this slice existed.
+    expect(md).toContain("| **Run totals** |");
+    expect(md).toContain("Pre-ship sanity gate: N/A");
+    expect(EVENTS_SCHEMA_VERSION).toBe(1);
   });
 });

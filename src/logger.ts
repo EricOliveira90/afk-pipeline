@@ -11,6 +11,12 @@ import type { PromptAssemblyRole } from "./context-envelope.js";
 import type { SanityGateResult } from "./preship.js";
 import { readRunEvents, type RunEvent } from "./run-events.js";
 import {
+  MUTATION_REPORT_HEADING,
+  formatMutationReportLines,
+  type MutationNotRunReason,
+  type MutationSurvivor,
+} from "./mutation-report.js";
+import {
   MAX_CLEANER_ROUNDS,
   MAX_FINAL_EVALUATION_ATTEMPTS,
 } from "./bounds.js";
@@ -272,6 +278,54 @@ export function readQualityStageOutcomes(
   runDir: string,
 ): QualityStageOutcome[] {
   return deriveQualityStageOutcomes(readRunEvents(runDir)?.events ?? []);
+}
+
+/**
+ * What the report-only mutation step reported (#303 B-14), as the run summary
+ * and the draft PR body both render it.
+ *
+ * Reported, never a gate (ADR 0063). This is a survivor list a reviewer reads,
+ * not a number anything is thresholded against.
+ */
+export interface MutationStepReport {
+  /** Run-ID provenance: the `runSlug` the step ran under. */
+  runSlug: string;
+  status: "MUTATION_REPORTED" | "MUTATION_NOT_RUN";
+  reason?: MutationNotRunReason;
+  survivors: MutationSurvivor[];
+}
+
+/**
+ * The one derivation behind {@link readMutationStepOutcome} and the summary's
+ * mutation section, so the file and the stream cannot disagree (#303 B-14/B-15)
+ * — the same rule {@link deriveQualityStageOutcomes} is kept under.
+ *
+ * The last event wins. A run emits at most one, but "last" is the only reading
+ * that stays correct if one ever emits two, and it never invents a third answer.
+ */
+function deriveMutationStepOutcome(
+  events: readonly RunEvent[],
+): MutationStepReport | undefined {
+  const recorded = events.filter((event) => event.type === "mutation-step");
+  const last = recorded[recorded.length - 1];
+  if (last === undefined || last.type !== "mutation-step") return undefined;
+  return {
+    runSlug: last.runSlug,
+    status: last.status,
+    ...(last.reason !== undefined ? { reason: last.reason } : {}),
+    survivors: last.survivors,
+  };
+}
+
+/**
+ * The mutation step's outcome for a run, or `undefined` when the run declared
+ * no step, emitted no such event, or has no `events.jsonl` at all — an absent
+ * section, never a throw, because a PR body must not depend on a log file.
+ */
+export function readMutationStepOutcome(
+  runDir: string,
+): MutationStepReport | undefined {
+  return deriveMutationStepOutcome(readRunEvents(runDir)?.events ?? []);
 }
 
 export interface RunLog {
@@ -811,6 +865,24 @@ ${stagePolicyEvents
   )
   .join("\n")}
 ${qualityStageRows}`;
+    /**
+     * The report-only mutation step (#303 B-14). Rendered from the
+     * `mutation-step` event alone and through the one shared formatter the draft
+     * PR body uses, so the summary, `events.jsonl` and the PR cannot disagree
+     * about what survived — the same rule Quality Stages above is kept under.
+     *
+     * A run that declared no step emits no such event and renders no section,
+     * which keeps every pre-#303 summary byte-identical (P-01).
+     */
+    const mutationStepReport = deriveMutationStepOutcome(runEvents);
+    const mutationSection =
+      mutationStepReport === undefined
+        ? ""
+        : `
+${MUTATION_REPORT_HEADING}
+
+${formatMutationReportLines(mutationStepReport).join("\n")}
+`;
     const dependencyRows = this.dependencyHolds
       .map(
         (hold) =>
@@ -864,7 +936,7 @@ Finished: ${finishedAt!.toISOString()}
 ${rows}
 ${totalsRow}
 ${dependencySection}${adoptionSection}
-${gateSection}${advisorySection}${coverageSection}${isolationSection}${finalReuseSection}${resolutionSection}${waiverSection}${qualityStageSection}
+${gateSection}${advisorySection}${coverageSection}${isolationSection}${finalReuseSection}${resolutionSection}${waiverSection}${qualityStageSection}${mutationSection}
 
 Pre-ship sanity gate: ${sanityGateLabel(sanityGate)}
 Architect review: ${architectVerdict ?? "N/A"}${architectDetail ? ` — ${architectDetail}` : ""}
