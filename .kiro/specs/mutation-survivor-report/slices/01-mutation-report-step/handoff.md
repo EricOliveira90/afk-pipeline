@@ -62,6 +62,17 @@ New migration files: 0
   two runs are compared set-for-set with `toEqual` rather than by asserting the
   absence of a named id, so any future gate the step grows — under any id — moves
   the projection and fails.
+- The abandonment flag is set inside the one `terminate` binding rather than only
+  by the guardian-rejection path's `abandonMutationStep`. The contract requires
+  the flag before `terminate` on the rejection exits and says nothing about the
+  bound-reached rejoin; putting the set in the binding makes both exits close the
+  pre-spawn window through the same code, so a step still deriving its scope at
+  the bound cannot spawn into a quiesced worktree either.
+- A `MUTATION_NOT_RUN` report with no reason renders "reason not recorded" rather
+  than a substituted `COMMAND_FAILED`. The contract names four reasons but leaves
+  the reasonless record — legal on both the event payload and the state record —
+  unaddressed, and naming one the run never observed is worse than saying it is
+  missing.
 - The rejoin origin is pinned by a clock the *guardians* move rather than by a
   read-counting clock. `mutationNow` is read only twice per run (the origin, then
   the helper's deadline arithmetic), so a per-read clock returns the same first
@@ -120,3 +131,12 @@ New migration files: 0
   is `lines.at(-1) === "" ? lines.length - 1 : lines.length` over
   `split("\n")` — a trailing newline closes the last line rather than opening an
   empty one.
+- An optional field plus a `??` default is where an invented fact enters a report.
+  `formatMutationReportLines` filled a missing not-run reason with a real reason
+  name, so the summary and the PR body would have stated a diagnosis the run never
+  made. Slice 2 adds `baselinePath`/`decisionsPath` to the same member: default a
+  missing value to a statement that it is missing, never to a plausible value.
+- `pnpm test:fast` under load can end with `Errors 2 errors` from
+  `Timeout calling "onTaskUpdate"` while every test passes. That is the reporter
+  RPC backing up, documented at `docs/specs/afk-deterministic-quality-gauntlet.md`
+  — do not chase it as a failure of the change under test.
