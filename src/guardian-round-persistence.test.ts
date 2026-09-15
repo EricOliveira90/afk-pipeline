@@ -31,8 +31,12 @@ import {
   appendCompletedGuardianRound,
   loadGuardianRoundLedger,
   recordFiledGuardianFindings,
+  recordGuardianFindingReconciliations,
 } from "./guardian-round-persistence.js";
-import type { PersistedGuardianReviewRound } from "./guardian-round-records.js";
+import type {
+  PersistedFiledFinding,
+  PersistedGuardianReviewRound,
+} from "./guardian-round-records.js";
 
 const tempDirs: string[] = [];
 
@@ -267,6 +271,88 @@ describe("review-phase persistence", () => {
     expect(reloaded?.filedFindings).toHaveLength(2);
     expect(reloaded?.rounds).toHaveLength(2);
   });
+
+  /**
+   * #320: the reconciliation memory. Filing says "this issue exists" and the
+   * first record wins; reconciliation says "this is the latest thing done to
+   * it" and therefore overwrites — but only onto an identity this run actually
+   * filed, because inventing a row would be a filing nobody performed.
+   */
+  it("stamps the reconciliation memory onto filed records and carries it forward", () => {
+    const repo = makeRepo();
+    const note: PersistedFiledFinding = {
+      guardian: "architect",
+      stableId: "A-01",
+      fingerprint: "fp-a1",
+      kind: "NOTE",
+      round: 2,
+      issue: "https://github.com/acme/repo/issues/290",
+      prdSlug: "demo",
+      runId: "run-20260914-101500",
+    };
+    appendCompletedGuardianRound(repo, "demo", { rounds: [invokedRound(1)] });
+    recordFiledGuardianFindings(repo, "demo", [
+      note,
+      { ...note, guardian: "pm", stableId: "P-01", issue: "291" },
+    ]);
+
+    recordGuardianFindingReconciliations(repo, "demo", [
+      {
+        guardian: "architect",
+        stableId: "A-01",
+        reconciled: { round: 3, action: "UPDATED" },
+      },
+      // Never filed by this run: there is no row to stamp, and none is created.
+      {
+        guardian: "pm",
+        stableId: "P-99",
+        reconciled: { round: 3, action: "CLOSED" },
+      },
+    ]);
+    // A later round overwrites the memory rather than appending a second one.
+    recordGuardianFindingReconciliations(repo, "demo", [
+      {
+        guardian: "architect",
+        stableId: "A-01",
+        reconciled: { round: 4, action: "CLOSED" },
+      },
+    ]);
+    recordGuardianFindingReconciliations(repo, "demo", []);
+
+    expect(loadRunState(repo, "demo").reviewPhase?.filedFindings).toEqual([
+      { ...note, reconciled: { round: 4, action: "CLOSED" } },
+      { ...note, guardian: "pm", stableId: "P-01", issue: "291" },
+    ]);
+
+    // The next round's write replaces the caches wholesale; the memory must ride
+    // along with the records, or the next pass comments on the issue again.
+    appendCompletedGuardianRound(repo, "demo", {
+      pm: { headSha: "head-2", verdict: "SHIP" },
+      rounds: [invokedRound(2, "FIX-BEFORE-SHIP", "SHIP")],
+    });
+    const ledger = loadGuardianRoundLedger(
+      loadRunState(repo, "demo").reviewPhase,
+    );
+    expect(ledger.filedFindings[0]?.reconciled).toEqual({
+      round: 4,
+      action: "CLOSED",
+    });
+  });
+
+  it("writes no reconciliation memory when nothing was ever filed", () => {
+    const repo = makeRepo();
+    appendCompletedGuardianRound(repo, "demo", { rounds: [invokedRound(1)] });
+    recordGuardianFindingReconciliations(repo, "demo", [
+      {
+        guardian: "architect",
+        stableId: "A-01",
+        reconciled: { round: 2, action: "CLOSED" },
+      },
+    ]);
+    expect(
+      loadRunState(repo, "demo").reviewPhase?.filedFindings,
+    ).toBeUndefined();
+  });
 });
 
 describe("sanitizeReviewPhase", () => {
@@ -374,6 +460,88 @@ describe("sanitizeReviewPhase", () => {
         },
       ],
     });
+  });
+
+  /**
+   * #320's three fields. A row that names them keeps them; a row that does not
+   * is a pre-#320 record and stays exactly as it is, because it is still a true
+   * statement about an issue that exists — dropping it would file that issue a
+   * second time. A row whose claim about them is malformed goes, because those
+   * are the fields a later close acts on.
+   */
+  it("keeps the filed-finding run context and reconciliation memory", () => {
+    expect(
+      sanitizeReviewPhase({
+        filedFindings: [
+          {
+            guardian: "architect",
+            stableId: "A-01",
+            fingerprint: "fp-a1",
+            kind: "BLOCKER",
+            round: 3,
+            issue: "https://github.com/acme/repo/issues/290",
+            prdSlug: " demo ",
+            runId: " run-20260914-101500 ",
+            reconciled: { round: 4, action: "CLOSED" },
+          },
+          // Pre-#320: no run context, no memory, and no invented keys.
+          {
+            guardian: "pm",
+            stableId: "P-01",
+            fingerprint: "fp-p1",
+            kind: "NOTE",
+            round: 1,
+            issue: "https://github.com/acme/repo/issues/291",
+          },
+        ],
+      }),
+    ).toEqual({
+      filedFindings: [
+        {
+          guardian: "architect",
+          stableId: "A-01",
+          fingerprint: "fp-a1",
+          kind: "BLOCKER",
+          round: 3,
+          issue: "https://github.com/acme/repo/issues/290",
+          prdSlug: "demo",
+          runId: "run-20260914-101500",
+          reconciled: { round: 4, action: "CLOSED" },
+        },
+        {
+          guardian: "pm",
+          stableId: "P-01",
+          fingerprint: "fp-p1",
+          kind: "NOTE",
+          round: 1,
+          issue: "https://github.com/acme/repo/issues/291",
+        },
+      ],
+    });
+  });
+
+  it("drops a filed-finding row whose run context or memory is malformed", () => {
+    const row = {
+      guardian: "pm" as const,
+      stableId: "P-01",
+      fingerprint: "fp-p1",
+      kind: "NOTE" as const,
+      round: 1,
+      issue: "https://github.com/acme/repo/issues/291",
+    };
+    for (const malformed of [
+      { prdSlug: 42 },
+      { prdSlug: "  " },
+      { runId: null },
+      { reconciled: "closed" },
+      { reconciled: { round: 0, action: "CLOSED" } },
+      { reconciled: { round: 2, action: "REOPENED" } },
+      { reconciled: { action: "CLOSED" } },
+    ]) {
+      expect(
+        sanitizeReviewPhase({ filedFindings: [{ ...row, ...malformed }] }),
+      ).toBeUndefined();
+    }
   });
 
   it("reads an unusable filed-finding record as nothing filed rather than refusing the phase", () => {

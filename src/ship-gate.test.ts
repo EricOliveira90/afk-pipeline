@@ -1668,6 +1668,39 @@ describe("runShipGate", () => {
     expect(prCreateBodies().at(-1)!).toContain(
       "https://github.com/acme/repo/issues/100",
     );
+
+    // #320: round 4 re-read the tree and reported both findings again, so both
+    // issues carry round 4's evidence and stay open. The architect verdict is
+    // unfavorable and therefore uncacheable, which is what makes this the
+    // re-reviewed counterpart of the cached pass in the notes test below.
+    const commentCalls = runCommand.mock.calls.filter(
+      ([command, args]) =>
+        command === "gh" && args[0] === "issue" && args[1] === "comment",
+    );
+    expect(commentCalls.map(([, args]) => args[2])).toEqual([
+      "https://github.com/acme/repo/issues/100",
+      "https://github.com/acme/repo/issues/101",
+    ]);
+    for (const [, args] of commentCalls) {
+      expect(args[4]).toContain("Still open after AFK guardian round 4");
+      expect(args[4]).toContain("disposition `REPEATED`");
+    }
+    expect(
+      loadRunState(repo, slug).reviewPhase?.filedFindings?.map(
+        (record) => record.reconciled,
+      ),
+    ).toEqual([
+      { round: 4, action: "UPDATED" },
+      { round: 4, action: "UPDATED" },
+    ]);
+    expect(secondFixture.event).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "guardian-issue-reconciliation",
+        issue: "https://github.com/acme/repo/issues/100",
+        action: "UPDATED",
+        round: 4,
+      }),
+    );
   });
 
   it("refuses the cap exit when an unresolved blocker cannot be filed", async () => {
@@ -1784,14 +1817,64 @@ describe("runShipGate", () => {
 
     // Round 2: both notes ride again — the regression this guards is filing
     // them a second time.
+    const secondFixture = makeJournal();
     const second = await runShipGate({
-      ...makeArgs(repo, slug, makeJournal().journal, invoke, runCommand),
+      ...makeArgs(repo, slug, secondFixture.journal, invoke, runCommand),
       cachedReviewPhase: loadRunState(repo, slug).reviewPhase,
     });
 
     expect(second.verdict).toBe("SHIP");
     expect(issueCalls()).toHaveLength(2);
     expect(loadRunState(repo, slug).reviewPhase?.filedFindings).toHaveLength(2);
+
+    // #320: the round that files nothing new still owes the two issues an
+    // answer. Both notes are still open, so both tickets get the latest evidence
+    // and stay open, and the memory of that says so — which is what keeps a
+    // third pass from commenting a third time.
+    //
+    // The evidence cited is round *1*, not round 2, and that is the honest
+    // answer: this pass reused both favorable verdicts, so no guardian re-read
+    // the tree and the fold's latest word on `A-01` is still the round that did
+    // (`foldGuardianLedger` folds `INVOKED` records only). The memory therefore
+    // names round 1 too, so every further cached pass is a no-op and only a real
+    // review round speaks again.
+    const commentCalls = runCommand.mock.calls.filter(
+      ([command, args]) =>
+        command === "gh" && args[0] === "issue" && args[1] === "comment",
+    );
+    expect(commentCalls.map(([, args]) => args[2])).toEqual([
+      "https://github.com/acme/repo/issues/200",
+      "https://github.com/acme/repo/issues/201",
+    ]);
+    for (const [, args] of commentCalls) {
+      expect(args[4]).toContain("Still open after AFK guardian round 1");
+      expect(args[4]).toContain("disposition `OPEN`");
+    }
+    expect(
+      loadRunState(repo, slug).reviewPhase?.filedFindings?.map(
+        (record) => record.reconciled,
+      ),
+    ).toEqual([
+      { round: 1, action: "UPDATED" },
+      { round: 1, action: "UPDATED" },
+    ]);
+    // One event per issue per pass: the stream the run summary and the terminal
+    // handoff both project their remaining-defect count from. Round 1 had
+    // nothing filed yet to reconcile.
+    const reconciliationEvents = (journalFixture: typeof fixture) =>
+      journalFixture.event.mock.calls
+        .map(([payload]) => payload as { type: string; issue?: string; action?: string })
+        .filter((payload) => payload.type === "guardian-issue-reconciliation");
+    expect(reconciliationEvents(fixture)).toEqual([]);
+    expect(
+      reconciliationEvents(secondFixture).map((payload) => [
+        payload.issue,
+        payload.action,
+      ]),
+    ).toEqual([
+      ["https://github.com/acme/repo/issues/200", "UPDATED"],
+      ["https://github.com/acme/repo/issues/201", "UPDATED"],
+    ]);
   });
 
   it("refuses the cap exit when the filed-issue record cannot be persisted", async () => {

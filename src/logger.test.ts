@@ -495,6 +495,70 @@ PM review: N/A
     );
   });
 
+  /**
+   * #320: the remaining-defect count. The section is rendered from the
+   * `guardian-issue-reconciliation` events alone, so it cannot disagree with
+   * `handoff.json`'s `unresolvedGuardianIssues` — which is the disagreement the
+   * issue was filed about.
+   */
+  it("renders the guardian finding issues a run reconciled, one row per issue", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "reconciled");
+    recordTerminal(log, id("290", "Guardian findings", "afk/290"), {
+      phase: "PASS",
+    });
+    // Round 3 left it open, round 4 closed it: one ticket, and it is closed.
+    for (const [round, action, detail] of [
+      [3, "UPDATED", "round 3 reported it `REPEATED`"],
+      [4, "CLOSED", "round 4 recorded `RESOLVED`, so the issue is closed."],
+    ] as const) {
+      log.event({
+        type: "guardian-issue-reconciliation",
+        guardian: "architect",
+        stableId: "A-01",
+        issue: "https://github.com/acme/repo/issues/290",
+        kind: "NOTE",
+        round,
+        action,
+        detail,
+      });
+    }
+    log.event({
+      type: "guardian-issue-reconciliation",
+      guardian: "pm",
+      stableId: "P-01",
+      issue: "https://github.com/acme/repo/issues/291",
+      kind: "BLOCKER",
+      round: 4,
+      action: "REFUSED",
+      refusal: "stable-id-collision",
+      detail: "an ID alone is not identity",
+    });
+
+    const md = log.writeSummary();
+    expect(md).toContain("## Guardian Finding Issues");
+    const section = md.slice(md.indexOf("## Guardian Finding Issues"));
+    expect(section).toContain("1 of 2 still open.");
+    const rows = section.split("\n").filter((line) => line.startsWith("| a") || line.startsWith("| p"));
+    expect(rows).toEqual([
+      "| architect | `A-01` | https://github.com/acme/repo/issues/290 | NOTE | 4 | " +
+        "CLOSED | round 4 recorded `RESOLVED`, so the issue is closed. |",
+      "| pm | `P-01` | https://github.com/acme/repo/issues/291 | BLOCKER | 4 | " +
+        "REFUSED (stable-id-collision) | an ID alone is not identity |",
+    ]);
+  });
+
+  it("renders no guardian issue section for a run that reconciled nothing", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "unreconciled");
+    recordTerminal(log, id("1", "Pass", "afk/1"), { phase: "PASS" });
+
+    const md = log.writeSummary();
+    expect(md).not.toContain("## Guardian Finding Issues");
+    // The pre-#320 tail, byte for byte.
+    expect(md).toContain("\n\n\nPre-ship sanity gate: N/A");
+  });
+
   it("[behavior:B-03] renders a reused PASS as a reused one, and a prerequisite skip naming the gate that failed", () => {
     const repo = makeRepo();
     const log = new Logger(repo, "cheap");
