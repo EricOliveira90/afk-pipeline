@@ -27,6 +27,8 @@ import {
   cleanerRoundsSpent,
   recordQualityStageOutcome,
   recordQualityStageRound,
+  recordSelfAuditOutcome,
+  selfAuditsFor,
   RUN_STATE_VERSION,
   type RunState,
 } from "./run-state.js";
@@ -983,12 +985,13 @@ describe("RunState.appliedWaivers", () => {
 describe("[behavior:#87:B-14] persisted quality stages", () => {
   const REPO_ISSUE = "87";
 
-  it("[behavior:#87:B-14] pins the written schema at 6 and keeps 3-5 assignable", () => {
-    // 5 -> 6 for `qualityStages`, once. `RunState.version` still admits 3, 4
-    // and 5 so a caller or fixture holding an older record keeps compiling,
-    // and nothing reads one of those back out of a loaded state.
-    expect(RUN_STATE_VERSION).toBe(6);
-    const older: RunState["version"][] = [3, 4, 5, 6];
+  it("[behavior:#87:B-14] pins the written schema at the current version and keeps the older ones assignable", () => {
+    // 5 -> 6 for `qualityStages`, then 6 -> 7 for `selfAudits` (#299 B-10).
+    // `RunState.version` still admits every earlier version so a caller or
+    // fixture holding an older record keeps compiling, and nothing reads one of
+    // those back out of a loaded state.
+    expect(RUN_STATE_VERSION).toBe(7);
+    const older: RunState["version"][] = [3, 4, 5, 6, 7];
     expect(older).toContain(RUN_STATE_VERSION);
   });
 
@@ -1166,6 +1169,143 @@ describe("[behavior:#87:B-14] persisted quality stages", () => {
       { stage: "cleaner", enabled: false, rounds: [], outcome: "DISABLED" },
     ]);
     expect(cleanerRoundsSpent(stages![0])).toBe(0);
+  });
+});
+
+/**
+ * v7 is purely additive in the same shape v4, v5 and v6 were: a per-issue list
+ * of self-audit outcomes (#299 B-10). A list rather than one record per issue,
+ * because a slice returned to the generator and re-approved is audited again,
+ * and the earlier verdict is the thing a reader wants to compare against.
+ */
+describe("persisted self-audit outcomes", () => {
+  const REPO_ISSUE = "299";
+  const releasedTree = "d".repeat(40);
+
+  it("[behavior:#299:B-10] round-trips an AUDIT_UNCHANGED outcome at schema 7", () => {
+    const repo = makeRepo();
+    saveRunState(repo, {
+      version: RUN_STATE_VERSION,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      slices: {},
+    });
+
+    recordSelfAuditOutcome(repo, "demo", REPO_ISSUE, {
+      candidateTreeId: releasedTree,
+      auditedTreeId: releasedTree,
+      verdict: "AUDIT_UNCHANGED",
+    });
+
+    const loaded = loadRunState(repo, "demo");
+    // The bump is unconditional, for the same reason v6's was: "no audit ran"
+    // and "this file predates audits" are the same fact to every reader.
+    expect(loaded.version).toBe(7);
+    expect(RUN_STATE_VERSION).toBe(7);
+    expect(selfAuditsFor(loaded, REPO_ISSUE)).toEqual([
+      {
+        candidateTreeId: releasedTree,
+        auditedTreeId: releasedTree,
+        verdict: "AUDIT_UNCHANGED",
+      },
+    ]);
+    // Both tree ids are persisted, so the verdict is checkable after the fact
+    // from run state alone rather than trusted as a narrative (ADR 0069).
+    const entry = selfAuditsFor(loaded, REPO_ISSUE)[0]!;
+    expect(entry.auditedTreeId).toBe(entry.candidateTreeId);
+    // Another slice's audit is another key: the list is per GitHub issue.
+    expect(selfAuditsFor(loaded, "300")).toEqual([]);
+  });
+
+  it("[behavior:#299:P-03] reads a version-6 file as \"no audit ran\" with every other member intact", () => {
+    const repo = makeRepo();
+    mkdirSync(join(repo, ".afk", "state"), { recursive: true });
+    const statePath = join(repo, ".afk", "state", "demo.json");
+    const v6 = {
+      version: 6,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      scope: {
+        mode: "all-afk",
+        slices: [{ number: "01", ghIssue: REPO_ISSUE }],
+      },
+      slices: { [REPO_ISSUE]: { phase: "PASS", branch: "afk/demo-01" } },
+      contractConvergence: { [REPO_ISSUE]: { rounds: 2 } },
+      migrations: { pool: ["0100"], claims: { [REPO_ISSUE]: ["0100"] } },
+      approvedBaselines: {
+        [REPO_ISSUE]: {
+          treeId: "a".repeat(40),
+          commit: "b".repeat(40),
+          artifactPath: ".afk/baselines/299.json",
+        },
+      },
+      appliedWaivers: {
+        [REPO_ISSUE]: [
+          {
+            riskClass: "deleted-test",
+            path: "src/legacy.test.ts",
+            author: "operator",
+            reason: "superseded by src/self-audit.test.ts",
+          },
+        ],
+      },
+      finalEvaluations: {
+        [REPO_ISSUE]: {
+          decision: "reuse",
+          finalTreeId: "c".repeat(40),
+          attempts: [
+            {
+              attempt: 1,
+              candidateTreeId: "c".repeat(40),
+              verdict: "PASS",
+              outcome: "GRADED",
+            },
+          ],
+          invalidatedCandidateTreeIds: [],
+        },
+      },
+      qualityStages: {
+        [REPO_ISSUE]: [
+          { stage: "cleaner", enabled: true, rounds: [], outcome: "PASS" },
+        ],
+      },
+    };
+    const onDisk = `${JSON.stringify(v6, null, 2)}\n`;
+    writeFileSync(statePath, onDisk);
+
+    const loaded = loadRunState(repo, "demo");
+
+    expect(loaded.version).toBe(RUN_STATE_VERSION);
+    expect(loaded.selfAudits).toBeUndefined();
+    expect(selfAuditsFor(loaded, REPO_ISSUE)).toEqual([]);
+    // The new member is the only difference: every v6 field survives the
+    // adaptation unchanged.
+    expect(loaded.scope).toEqual(v6.scope);
+    expect(loaded.slices).toEqual(v6.slices);
+    expect(loaded.contractConvergence).toEqual(v6.contractConvergence);
+    expect(loaded.migrations).toEqual(v6.migrations);
+    expect(loaded.approvedBaselines).toEqual(v6.approvedBaselines);
+    expect(loaded.appliedWaivers).toEqual(v6.appliedWaivers);
+    expect(loaded.finalEvaluations).toEqual(v6.finalEvaluations);
+    expect(loaded.qualityStages).toEqual(v6.qualityStages);
+    // A read is a read: adapting in memory must not rewrite the file.
+    expect(readFileSync(statePath, "utf8")).toBe(onDisk);
+
+    // A later write re-stamps the schema and leaves the rest alone.
+    recordSelfAuditOutcome(repo, "demo", REPO_ISSUE, {
+      candidateTreeId: releasedTree,
+      auditedTreeId: releasedTree,
+      verdict: "AUDIT_UNCHANGED",
+    });
+    const rewritten = JSON.parse(readFileSync(statePath, "utf8")) as {
+      version: number;
+      qualityStages: unknown;
+    };
+    expect(rewritten.version).toBe(7);
+    expect(rewritten.qualityStages).toEqual(v6.qualityStages);
+    expect(selfAuditsFor(loadRunState(repo, "demo"), REPO_ISSUE)).toHaveLength(
+      1,
+    );
   });
 });
 
