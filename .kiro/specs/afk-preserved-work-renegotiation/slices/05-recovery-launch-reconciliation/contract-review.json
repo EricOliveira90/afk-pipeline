@@ -1,0 +1,54 @@
+{
+  "version": 2,
+  "verdict": "ACCEPT",
+  "findings": [
+    {
+      "id": "F-01",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-03"],
+      "evidence": "\"A `snapshotPath` with fewer than two path segments is reconciled to no restore and reported as a failed reconciliation that appends nothing.\"",
+      "expected": "The malformed-locator guard must reject every locator whose grandparent is not a real slice artifact directory, given that `publishAcceptedPairSnapshot` builds the locator as `relative(repoRoot, join(sliceDir, \"recovery-snapshots\", attemptId))` (verified at src/preserve-work-recovery.ts:519-520,569) and so always has at least three forward-slash segments, with `recovery-snapshots` as the penultimate one.",
+      "observed": "The revision replaces the segment-count threshold with the locator's real shape: B-03 now accepts a `snapshotPath` only as `<sliceDir>/recovery-snapshots/<attemptId>` — at least three segments, every segment non-empty and neither `.` nor `..`, penultimate segment equal to `RECOVERY_SNAPSHOT_DIRNAME` (cited at src/preserve-work-recovery.ts:86), hence a non-empty derived `<sliceDir>` — and names the two-segment `recovery-snapshots/<attemptId>` as rejected precisely because its grandparent is empty and the destination would collapse onto `repoRoot`. The B-03 manifest scenario plants a `contract.md` and `acceptance-manifest.json` of known bytes at the repository root, sweeps four locators, and its observableResult asserts the repository-root pair is byte-identical afterwards and that each rejection message names both the rejected locator and the derived destination that caused it, which binds the two-segment case for the derived-destination reason rather than for segment count.",
+      "clearCondition": "B-03 states a guard that rejects any `snapshotPath` not of the form `<sliceDir>/recovery-snapshots/<attemptId>` with a non-empty `<sliceDir>` (at minimum: at least three segments and a penultimate segment equal to the recovery-snapshots directory name), and the B-03 manifest scenario's given/observableResult binds a locator that is rejected for the derived-destination reason rather than only a single-segment one.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-02",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-02"],
+      "evidence": "\"the first target's pair is byte-restored through restoreAcceptedPairFromSnapshot and exactly one ROLLED_BACK event is appended for the same attemptId inside transactRunState, while the second appends nothing because ROLLBACK_FAILED -> ROLLBACK_FAILED is not a legal transition\"",
+      "expected": "B-02's manifest scenario must bind both append branches of its same-ID contract obligation, which says: \"appending exactly one event via `appendRecoveryLineageEvent`: `ROLLED_BACK` on a verified restore, `ROLLBACK_FAILED` carrying `rollbackError` and the observed fingerprints otherwise\". The failing-restore append is the only place this slice writes `rollbackError`, `observedContractFingerprint` and `observedManifestFingerprint` (fields that exist ROLLBACK_FAILED-only, src/run-state.ts:284-341), so it needs ID-bound observable evidence.",
+      "observed": "The revised B-02 scenario binds three targets, the second being a trailing-`PENDING` target whose snapshot `contract.md` was deleted so the restore must fail. Its `then` requires exactly one appended `ROLLBACK_FAILED` for that same `attemptId` carrying the restore failure message as `rollbackError` plus both observed fingerprints (an absent file recorded as the explicit absent marker, never a blank), and its observableResult asserts each of those three fields by name and value under the test name `[behavior:#334:B-02]`, which `acceptance:behaviors` selects. The contract's B-02 statement declares both append branches as obligations of the ID and cites src/run-state.ts:284-341; the test plan bullet and a Definition-of-done bullet carry the same exactly-one-event obligation. An implementation that never appends a `ROLLBACK_FAILED`, or appends it without those fields, now fails a declared observable.",
+      "clearCondition": "B-02's given/then/observableResult (or a new behavior id with its own gate ids) binds a trailing-PENDING target whose restore fails, with the observable result naming the appended `ROLLBACK_FAILED` event and its `rollbackError` plus observed contract and manifest fingerprints.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-03",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-05", "B-06"],
+      "evidence": "\"writes one `logger.phase(...)` line per reported target naming the target `ghIssue`, the appended outcome (`ROLLED_BACK`, `ROLLBACK_FAILED`, or that nothing was appended and why) and the retry the operator needs\"",
+      "expected": "For each of the three reported outcomes the contract should say what the named retry is, since B-05 turns every reported target into an unsuccessful launch and B-06 keeps the hold in force when nothing is appended.",
+      "observed": "B-05 now fixes the retry per outcome family: relaunch for `ROLLED_BACK`; repair the named snapshot directory so its pair again reads as a valid `LOCKED` pair matching the event's recorded fingerprints, then relaunch, for a `ROLLBACK_FAILED` appended this launch; and for the append-nothing outcomes an explicit statement that the hold is intentionally terminal until #335's completion path, naming the run-state file and the `attemptId`, naming the snapshot repair for the retry-failed case and the unusable recorded `snapshotPath` for the rejected-locator case, and saying a relaunch alone will report the same target and stop again. The B-05 manifest observableResult asserts each line's outcome-specific retry content, and a test-plan bullet plus a Definition-of-done bullet carry the same obligation, so the promised line content is derivable per outcome.",
+      "clearCondition": "B-05 names the concrete operator retry for the append-nothing outcomes (for example restoring the snapshot directory, or an explicit statement that the hold is intentionally terminal until #335), so the log line's promised content is derivable per outcome.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-04",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-05"],
+      "evidence": "\"the recovery fixture with unresolved lineage planted in run state and no live process, exercised once per reported outcome family\"",
+      "expected": "B-05's scenario should say how many spawned `runPipeline` runs it costs, consistent with the contract's own justification, which says \"One spawned `runPipeline` is used because the claim is dispatch order at the orchestrator seam\" and with this repo's rule that a new spawned pipeline scenario is the last resort.",
+      "observed": "The revised given says the fixture is \"exercised once per reported outcome family\" — three families across four planted targets — while the same behavior's `when` says \"`runPipeline` is invoked once\" and the contract's test plan still justifies a single spawn. All four targets could be reconciled by one launch, since B-05 already promises one line per reported target, so the per-family phrasing reads as three or four spawned pipeline runs where one suffices. The gap is only in how the scenario is worded: every asserted observable is reachable from a single launch, so nothing is unbound.",
+      "clearCondition": "B-05's given says the fixture is exercised in a single `runPipeline` launch carrying all outcome families at once (or states why a separate launch per family is required despite the single-spawn justification in the test plan).",
+      "state": "OPEN",
+      "revisionCitation": {
+        "artifact": "acceptance-manifest.json",
+        "before": "      \"given\": \"a launch whose reconciliation reported one target and which carries no exact recovery request\",",
+        "after": "      \"given\": \"the recovery fixture with unresolved lineage planted in run state and no live process, exercised once per reported outcome family: a target reconciled to `ROLLED_BACK`, a target reconciled to `ROLLBACK_FAILED`, and a target that appended nothing (a trailing `ROLLBACK_FAILED` whose retry failed again, and a rejected locator)\","
+      }
+    }
+  ]
+}

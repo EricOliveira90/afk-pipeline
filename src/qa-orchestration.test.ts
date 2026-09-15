@@ -1025,7 +1025,7 @@ describe("PRD 070 QA retry behavior", { timeout: 60_000 }, () => {
     // #96 P-06: the additive finalEvaluations record bumps the version, and
     // #87's additive qualityStages record bumps it again; the #91 baseline
     // locator below still loads unchanged.
-    expect(state.version).toBe(6);
+    expect(state.version).toBe(7);
     expect(state.approvedBaselines?.["70"]).toEqual({
       treeId: baseline.treeId,
       commit: baseline.commit,

@@ -1,0 +1,194 @@
+{
+  "version": 2,
+  "fileScope": {
+    "kind": "paths",
+    "paths": [
+      "src/preserve-work-recovery.ts",
+      "src/run-state.ts",
+      "src/preserve-work-recovery.test.ts",
+      "src/run-state.test.ts",
+      "src/resume-integration.test.ts",
+      "src/resume-integration.fixtures.ts",
+      "architecture.md"
+    ]
+  },
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "GH #335 AC1 (src/preserve-work-recovery.ts:336-361; src/contract-transaction.ts:184-185; src/preserve-work-recovery.ts:279-298)",
+      "given": "a target whose trailing lineage event is this attempt's `PENDING` one, and a `completeRecoveryAttempt(args)` call whose replacement pair is either a valid `LOCKED` pair or an invalid one, whose required `lockGate: (contractPath: string) => string | null` either returns `null` or returns a refusal string, and whose required `provenance` is either a non-blank string or blank",
+      "when": "`completeRecoveryAttempt` runs against each combination, validating the replacement pair through the module's only pair reader `readLockedAcceptedPair` (`src/preserve-work-recovery.ts:336-361`), calling the injected gate once with the replacement contract path, and requiring the non-blank provenance — with no second validation path and no bypass",
+      "then": "the `COMPLETED` append and the run-state document that would carry it are the writes forbidden here: an invalid pair is refused `accepted-pair-invalid` (`src/preserve-work-recovery.ts:113-114`), and a refusing gate or a blank/missing provenance is refused with the new code `lock-gate-refused` — a missing gate is a refusal, never a skip, and a blank provenance is refused exactly as a refusing gate is because the provenance is the lock exit's own stamp. A precondition refusal is terminal for the attempt and does not leave the target's trailing event `PENDING`: the attempt is ended through B-03's delegation to #333's `rollBackRecoveryAttempt`. The gate and the provenance stamp are injected rather than imported, on the module's existing `RecoveryGitProbes` seam (`:279-298`), because `src/contract-transaction.ts` and `src/artifacts.ts` are outside this slice's file scope and `src/artifacts.ts` is a review-rails internal",
+      "observableResult": "a test named `[behavior:#335:B-01]` asserts, per precondition, the returned refusal code (`accepted-pair-invalid` for the invalid pair, `lock-gate-refused` for the refusing gate and for the blank provenance) and that no `COMPLETED` event exists anywhere in the target's lineage; asserts the injected gate was called exactly once with the replacement contract path when the pair validated, and not at all when it did not; asserts that after each refusal the target's trailing event is the `ROLLED_BACK` event `rollBackRecoveryAttempt` appended for the same `attemptId`, so no `PENDING` attempt remains; and asserts `src/preserve-work-recovery.ts` contains no import of `./artifacts.js`, `./contract-transaction.js`, `./orchestrator.js` or `./wave.js` and no `**Lock-Provenance:**` literal, in the shape the module's existing `MODULE_SOURCE` assertions use (`src/preserve-work-recovery.test.ts:1590`)",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-02",
+      "source": "GH #335 AC2, AC3",
+      "given": "the B-01 preconditions pass and persisted scope still carries the fingerprint the PENDING event recorded",
+      "when": "completeRecoveryAttempt performs its single transactRunState body",
+      "then": "the reloaded state is rechecked for the same attemptId still PENDING, for runScopeFingerprint(scope) equal to the event's scopeFingerprint and for a legal PENDING -> COMPLETED transition, and exactly one COMPLETED event is appended carrying both replacement fingerprints, the caller's provenance, the trailing event's attemptId, target, reason and snapshotPath, and an empty extensions array",
+      "observableResult": "a test reads the run-state document before and after and asserts one appended event with those fields, no scope mutation, and byte equality of every unrelated run-state field; a second test asserts exactly one transactRunState call",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-03",
+      "source": "GH #335 AC4 (prd.md \"Every unsuccessful admitted exit—including ... deterministic validation or lock-gate refusal, ... and a lost completion compare-and-swap—restores from the immutable snapshot\"; src/preserve-work-recovery.ts:1369-1446, :1293-1302, :1412-1422, :577-583)",
+      "given": "an admitted completion, exercised once per failure shape: (a) a precondition refusal — an invalid replacement pair, and a refusing gate / blank provenance — with this attempt still the trailing `PENDING` event; (b) a locked recheck lost only because persisted scope no longer fingerprints to the `PENDING` event's `scopeFingerprint`, with this attempt still the trailing `PENDING` event; and (c) a lineage whose trailing event is no longer this attempt's `PENDING` event — planted as a `ROLLED_BACK` event for this attempt, and separately as a fresh `PENDING` event for a second `attemptId` admitted after it, each also driven through the `beforeLockAcquired`-style interleave seam so the change lands after the pair read",
+      "when": "`completeRecoveryAttempt` runs, appending no `COMPLETED` event in any shape and writing no restore, no rollback and no `ROLLED_BACK`/`ROLLBACK_FAILED` append of its own; in shapes (a) and (b) — and only after a read has found the target's trailing event still this `attemptId` in state `PENDING`, because `rollBackRecoveryAttempt` takes no `attemptId` and acts on whatever `rollbackableEvent` returns (`src/preserve-work-recovery.ts:1369-1390`, predicate `:1293-1302`, trailing-only recheck `:1412-1422`) — it delegates to #333's verified rollback writer after the transaction has returned and released the lock, the way `reconcileRecoveryLineage` already calls it (`:1689-1701`)",
+      "then": "shape (a) ends through `rollBackRecoveryAttempt` with `trigger: \"deterministic-validation-refusal\"` or `trigger: \"lock-gate-refusal\"`; shape (b) ends through the same writer with the new `trigger: \"completion-cas-lost\"`; and shape (c) appends nothing, restores nothing and calls no rollback at all, returning the module's existing refusal code `facts-changed-before-lock` (`:133-134`) naming this `attemptId` and the observed trailing `attemptId` and state. Shape (c) is not delegated because delegation would let a completion roll back an attempt it never admitted — after a `ROLLED_BACK` event `hasOpenRecoveryAttempt` is false (`:577-583`), so a fresh `PENDING` attempt can be trailing and the unedited writer would restore *that* attempt's snapshot and append for it — and P-02 forbids the alternative of teaching the writer an `attemptId`",
+      "observableResult": "a test named `[behavior:#335:B-03]` asserts, for shapes (a) and (b), that the lineage gained no `COMPLETED` event, that its new trailing event is the `ROLLED_BACK` one `rollBackRecoveryAttempt` appended for this same `attemptId` (and the `ROLLBACK_FAILED` one when the snapshot is made unreadable), and that the returned failure carries the trigger expected for that shape; and asserts, for shape (c), that the returned refusal code is `facts-changed-before-lock` and names both `attemptId`s, that the lineage is unchanged event for event at every index, that both accepted-pair files are byte-identical to before the call, and that the second attempt's snapshot directory was neither read back onto disk nor given a lineage event — so no gated observable requires the unedited writer to append after a changed trailing event",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-04",
+      "source": "GH #335 AC5",
+      "given": "a target whose trailing lineage event is COMPLETED",
+      "when": "recoveryPreDispatchRefusal(state, ghIssue, sliceDir) rereads the current pair",
+      "then": "it returns undefined only when the pair is still a valid LOCKED pair whose fingerprints equal the COMPLETED event's replacement fingerprints, and otherwise refuses fail-closed with code completed-pair-drifted naming the attemptId and both observed fingerprints; it is exported and wired into no dispatch site, the wiring of src/wave.ts:536's runSliceExecute(ctx) call being #336's work",
+      "observableResult": "unit tests cover the untouched pair, a reopened (non-LOCKED) pair and a mutated-bytes pair; a test asserts src/preserve-work-recovery.ts declares the export and that src/wave.ts and src/orchestrator.ts are absent from the slice's diff",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-05",
+      "source": "GH #335 AC6",
+      "given": "a target whose trailing event is COMPLETED and whose current pair is fingerprint-identical to that event's replacement pair",
+      "when": "admitStaleRenegotiation repeats the exact canonical target, the exact canonical reason and an empty extension set",
+      "then": "the outcome is the replay-completed-no-op member naming the completed attemptId, and nothing is written: no snapshot directory, no lineage event, no run-state write and no accepted-pair byte rewritten",
+      "observableResult": "a test compares the run-state document and both pair files byte for byte before and after, and asserts the recovery-snapshots directory gained no entry",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-10",
+      "source": "GH #335 AC7",
+      "given": "the same completed replacement pair on disk",
+      "when": "the repeat names a different canonical target or a different canonical reason",
+      "then": "admission is refused with code replay-conflict, the message names the completed attempt's attemptId, and nothing is published or appended",
+      "observableResult": "tests assert the refusal code, that the message contains the completed attemptId, and that state and both pair files are unchanged",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-11",
+      "source": "GH #335 AC8",
+      "given": "a target whose trailing event is COMPLETED and whose current pair is a different valid LOCKED pair",
+      "when": "admitStaleRenegotiation runs",
+      "then": "an ordinary new attempt is admitted with a new attemptId, a new <sliceDir>/recovery-snapshots/<attemptId> directory and one new PENDING event",
+      "observableResult": "a test asserts the new attemptId differs from the completed one, the new snapshot directory exists beside the old one, and the trailing event is PENDING",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-12",
+      "source": "GH #335 AC3; PRD \"COMPLETED means ... records the replacement pair fingerprints and lock provenance\"",
+      "given": "run-state documents holding recovery lineage",
+      "when": "sanitizeRecoveryLineage loads them",
+      "then": "replacementContractFingerprint, replacementManifestFingerprint and lockProvenance round-trip and are required non-blank on a COMPLETED event and absent on every other state, RUN_STATE_VERSION stays 7, and a v7 document with no COMPLETED event loads unchanged",
+      "observableResult": "src/run-state.test.ts asserts round-trip of a COMPLETED event, the drop of a COMPLETED event missing one field, the drop of a PENDING or ROLLED_BACK event carrying one, RUN_STATE_VERSION === 7, and no new migration file",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-01",
+      "source": "ADR 0039; #277 B-06 (src/preserve-work-recovery.ts:16-19)",
+      "given": "every completion, replay, refusal and no-op path this slice adds",
+      "when": "each path runs to its end",
+      "then": "no merge, reset, rebase or other ref-moving git operation is invoked, and the preserved worktree, slice branch, commits and resume counters are unchanged",
+      "observableResult": "the existing no-ref-moved describe block is extended over the new seams with injected probes recording every git call, and the fixture's branch tips are asserted unmoved",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-02",
+      "source": "GH #335 \"this slice writes no rollback of its own\" (src/preserve-work-recovery.ts:1161-1252, :1369-1446, :1470-1486, :1625-1714)",
+      "given": "the existing exports `restoreAcceptedPairFromSnapshot` (`src/preserve-work-recovery.ts:1161-1252`), `rollBackRecoveryAttempt` (`:1369-1446`), `recoveryDispatchRefusal` (`:1470-1486`) and `reconcileRecoveryLineage` (`:1625-1714`)",
+      "when": "the slice ships",
+      "then": "all four keep their current behavior and signatures and stay the single implementations of restore-and-verify, rollback, the `ROLLBACK_FAILED` hold and launch reconciliation; the new completion path calls them rather than duplicating or editing them — which is why B-03's changed-trailing-event shape is a write-nothing refusal instead of a delegation",
+      "observableResult": "a test named `[behavior:#335:P-02]` asserts the #333 and #334 recovery suites pass unedited, asserts `src/preserve-work-recovery.ts` declares no second restore-and-verify or lineage-append helper, and typecheck reports no signature change at those call sites",
+      "preservation": true,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-03",
+      "source": "#277 B-03/B-05/B-09, #332 (src/preserve-work-recovery.ts:176-206, :336-361, :644-811, :924-1073)",
+      "given": "any input that is not a replay against a COMPLETED trailing event",
+      "when": "canonicalizeRecoveryRequest, readLockedAcceptedPair, admitStaleRenegotiation and executeRecoveryAttempt run",
+      "then": "their existing outcomes are unchanged — trim-only reason canonicalization, one accepted-pair reader and validator, and the attempt-already-pending refusal on an open attempt",
+      "observableResult": "the existing #277 and #332 describe blocks pass unedited and src/preserve-work-recovery.ts still declares exactly one accepted-pair reader",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-04",
+      "source": "GH #335 non-goals and AC9 (\"#277's entry-point refusal of --renegotiate-stale stays in force after this slice merges, with its tests unedited\")",
+      "given": "#277's entry-point refusal of --renegotiate-stale in src/cli-options.ts",
+      "when": "this slice merges and the suites run",
+      "then": "the refusal is still in force because src/cli-options.ts is unedited, and the tests #277 added for it pass untouched",
+      "observableResult": "src/cli-options.ts, src/cli-options.test.ts and src/cli-entries.test.ts are absent from the slice's diff (git diff --name-only against the feature base) and pnpm vitest run src/cli-options.test.ts src/cli-entries.test.ts passes",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-05",
+      "source": "GH #335 non-goals (\"No RunEventPayload variant, no run-snapshot field and no afk status change\"; \"No edit to src/cli-options.ts, src/orchestrator.ts, src/wave.ts or the three provider entry points\")",
+      "given": "the launch and reporting path as it stands after #334",
+      "when": "this slice merges",
+      "then": "it is unmodified: no RunEventPayload variant, no run-snapshot field and no status field is added, and no live recovery launch reaches this slice's behaviors — every observable is proven through exported seams and fixture-planted lineage",
+      "observableResult": "src/orchestrator.ts, src/wave.ts, src/run-events.ts, src/run-snapshot.ts, src/status.ts, src/afk.ts, src/afk-claude.ts and src/afk-codex.ts are absent from the slice's diff, and the new tests spawn no pipeline",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    }
+  ]
+}

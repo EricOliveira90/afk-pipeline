@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "classification": "NON_CONVERGENCE",
+  "round": 2,
+  "attempt": 1,
+  "findings": [
+    {
+      "id": "F-03",
+      "severity": "BLOCKING",
+      "state": "OPEN",
+      "unresolved": true,
+      "plannerPosition": "CONDITION_MET",
+      "plannerEvidence": "Scope reduced to one body of work: the three exported recovery seams plus the one optional persisted field. B-06, B-07, B-08 and B-09 are removed from the in-scope list and the manifest and named under Non-goals as the follow-up slice `07-recovery-reporting-and-launch-wiring`, which carries the additive run-event variant and its ADR 0060 regression pair, the snapshot fold field and `afk status` block, the removal of src/cli-options.ts:393-400's refusal with the entry-point usage text, and the wiring into runPipeline and src/wave.ts. The file scope drops from 19 paths to 6 — src/preserve-work-recovery.ts, src/run-state.ts, src/preserve-work-recovery.test.ts, src/resume-integration.test.ts, src/resume-integration.fixtures.ts, ARCHITECTURE.md — the same shape and size as the shipped #334 slice's manifest, and the remaining behaviors are B-01..B-05 with P-01..P-05. The \"Changes to existing behavior\" section is now empty: no existing test is rewritten, so the resume-integration and cli suites stay unedited. The re-stage is recorded in the Scope lock and rests on this PRD's own precedent for it (prd.md \"Delivery slices\": six slices \"because two contract negotiations refused the original one-slice … boundary as larger than one generator session\", and \"This staging changes no behavior specified below — it only fixes when each part becomes reachable\"), which is why it was decided rather than escalated.",
+      "evaluatorEvidence": "\"the file scope and acceptance manifest narrowed to match\" (clear condition) against the revised acceptance-manifest.json, whose \"behaviors\" array still contains B-06 (src/run-events.ts variant plus builder), B-07 (src/logger.test.ts ADR 0060 parser pair), B-08 (foldEvents field plus renderStatus block) and B-09 (deletion of src/cli-options.ts:393-400, three entry points' usage text, PipelineConfig fields and the runPipeline wiring), while \"fileScope\".\"paths\" lists only six paths: src/preserve-work-recovery.ts, src/run-state.ts, src/preserve-work-recovery.test.ts, src/resume-integration.test.ts, src/resume-integration.fixtures.ts, architecture.md"
+    },
+    {
+      "id": "F-02",
+      "severity": "BLOCKING",
+      "state": "OPEN",
+      "unresolved": true,
+      "plannerPosition": "CONDITION_MET",
+      "plannerEvidence": "Both unlocated obligations are removed and the seams are named for the record. This slice now wires nothing — B-04 exports `recoveryPreDispatchRefusal` and states it is wired into no dispatch site, following the precedent recorded in `recoveryDispatchRefusal`'s own TSDoc for #333 (src/preserve-work-recovery.ts:1467-1468); src/orchestrator.ts and src/wave.ts are out of the file scope, and B-04's observable is a unit test on the exported function rather than an orchestrator assertion. The contract also records what the round-1 evidence left unknown, so the follow-up slice inherits it: generator dispatch has exactly one call site, `runSliceExecute(ctx)` at src/wave.ts:536 (`runSliceExecute` exported at src/orchestrator.ts:5552; src/orchestrator.ts:8189-8218's `runSlice` has no in-repo production call site), and the LOCKED seam is explicitly **not** single — `runSliceNegotiate` reaches `LOCKED` at src/wave.ts:289 (phase A) and src/wave.ts:501 (lane restart) — so the \"exactly once\" claim is withdrawn as false rather than restated.",
+      "evaluatorEvidence": "\"completeRecoveryAttempt (B-01/B-02) at the one seam where that target's replacement pair reaches LOCKED, and recoveryPreDispatchRefusal (B-04) before its generator dispatch\" — retained in the revised acceptance-manifest.json B-09 as \"completeRecoveryAttempt at the seam where the replacement pair reaches LOCKED, then recoveryPreDispatchRefusal before generator dispatch\" with the observable \"assert the orchestrator call order by source and by a fixture-driven run\""
+    },
+    {
+      "id": "F-06",
+      "severity": "BLOCKING",
+      "state": "OPEN",
+      "unresolved": true,
+      "plannerPosition": "CONDITION_MET",
+      "plannerEvidence": "The unbounded repository-wide search is gone with B-09 (see F-03). Nothing in the revised contract or manifest asserts the absence of a refusal string; the entry-point refusal is instead preserved verbatim by P-04, which cites the concrete site (src/cli-options.ts:393-400) and the concrete unedited tests (src/cli-options.test.ts:340-459,563-564; src/cli-entries.test.ts:79-84; src/preserve-work-recovery.test.ts:1594-1626). The only source-text assertions left are bounded to one owned file and one named literal: B-01's observable asserts src/preserve-work-recovery.ts contains no import of `./artifacts.js` and no `Lock-Provenance` literal.",
+      "evaluatorEvidence": "\"assert src/cli-options.ts contains no \\\"refused until #335\\\" text and the repository contains no refusal string naming an unshipped slice on this path\""
+    }
+  ]
+}

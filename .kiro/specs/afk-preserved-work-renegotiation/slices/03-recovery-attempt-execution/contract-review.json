@@ -1,0 +1,69 @@
+{
+  "version": 2,
+  "verdict": "ACCEPT",
+  "findings": [
+    {
+      "id": "F-01",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-05", "B-06", "B-07"],
+      "evidence": "\"Execution clears only the target's contract-stage checkpoint and its contract-convergence entry\" (contract B-05); \"run state with a contract-stage checkpoint and a contract-convergence lineage entry for the target and for a second slice\" (manifest B-05 given); \"so exact-stage resume can return no resume decision for the target's contract stage\" (contract/manifest B-07)",
+      "expected": "The Given of B-05 must name a run-state shape this repository can actually hold, and the clear it asserts must not contradict B-06; B-07's observable must state the pre-execution value it is measured against so it cannot pass vacuously.",
+      "observed": "Resolved. B-05 now picks reading (a) and names the seeded entry concretely: `state.stageCheckpoints[<target ghIssue>] = { version: 1, completedStage: \"deterministic-qa\", candidateTreeId: <40-hex>, nextPendingStage: \"post-qa-deterministic\", round: 1 }`. That object is exactly what `ExactStageCheckpoint` declares (`src/exact-stage-resume.ts:20-26`) and what `parseCheckpoint` accepts (`:67-109`, with `nextPendingStage` constrained to `\"post-qa-deterministic\"` at `:97` and `round >= 1` at `:100-107`), so the Given is constructible without touching `src/exact-stage-resume.ts`. B-06 no longer collides: its preservation clause now names the one exception explicitly (the target's own `stageCheckpoints[ghIssue]` post-QA-stage checkpoint is dropped; \"implementation and QA state unchanged\" is scoped to artifacts, the `slices[ghIssue]` record, counters, worktree and branch), and because B-05's Given seeds a second slice's entry, the map stays non-empty so `clearExactStageCheckpoint`'s whole-key deletion (`:196-200`) cannot widen the diff beyond `stageCheckpoints[target]`. B-07 is now differential: pre-execution `inspectExactStageCheckpoint` with `expectedCompletedStage: \"deterministic-qa\"` and a matching `currentCandidateTreeId` returns `action: \"resume\"` (`:175`), post-execution it returns `action: \"reevaluate\"` with reason \"no exact-stage checkpoint was recorded for this slice\" — the exact string at `:150` — plus non-empty then empty lineage, so it cannot pass vacuously on a target that never held a checkpoint.",
+      "clearCondition": "B-05, B-06 and B-07 name the checkpoint entry in the terms the repository uses, with the concrete `completedStage` value the test seeds, B-06's preservation clause narrowed so the two do not contradict, and B-07's observable stating the pre-execution value it is measured against.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-02",
+      "severity": "ADVISORY",
+      "behaviorIds": ["P-02"],
+      "evidence": "manifest P-02 gateIds `[\"tests\", \"acceptance:behaviors\"]` with observable \"the parse throws the existing refusal message and parseStaleRenegotiationRequest's validation messages are unchanged\"; contract `Files expected to change` omits `src/cli-options.test.ts`",
+      "expected": "The contract names the test file that will carry the P-02-named assertion, and that file appears in `fileScope`.",
+      "observed": "Resolved. Both artifacts now place the `P-02`-named assertion in `src/preserve-work-recovery.test.ts`, which is already in `fileScope`, importing `parsePipelineRuntimeOptions` and `parseStaleRenegotiationRequest` from `src/cli-options.js`. Both functions are in fact exported (`src/cli-options.ts:318` and `:163`), and the refusal the test pins is the one at `src/cli-options.ts:393-399`, so the import is constructible. The pair also states that `src/cli-options.test.ts` stays unmodified and out of scope, leaving #277's pin at `src/cli-options.test.ts:458` intact, and a Definition-of-done item asserts both halves.",
+      "clearCondition": "The contract names the test file that will carry the P-02-named assertion, and that file appears in `fileScope`.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-03",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-02", "B-04"],
+      "evidence": "\"a subdirectory keeps the published pair's two files unmodified, so \\\"never overwrite a published snapshot\\\" still holds\"",
+      "expected": "The contract states that the never-overwritten invariant's wording in `src/preserve-work-recovery.ts` is narrowed to the published pair files as part of this slice, or that the `negotiation/` history lands outside the published attempt directory.",
+      "observed": "Resolved. B-02 records the decision to keep the history inside the attempt directory and to narrow the invariant's wording in place, and `Changes to existing behavior` carries the edit as a comment-only change to `publishAcceptedPairSnapshot`'s docstring (`src/preserve-work-recovery.ts:472-476`), explicitly holding the `snapshot-already-published` refusal at `:495-501`, its code and its message unchanged — which matches the code: the refusal is a directory-existence check independent of the docstring wording. `src/preserve-work-recovery.ts` is already in `fileScope`, and a Definition-of-done item requires the narrowed wording.",
+      "clearCondition": "The contract states that the never-overwritten invariant's wording in `src/preserve-work-recovery.ts` is narrowed to the published pair files as part of this slice, or that the `negotiation/` history lands outside the published attempt directory.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-04",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-05"],
+      "evidence": "\"asserts by module-level spy or import shape that `src/exact-stage-resume.ts` and `src/contract-convergence.ts` are unmodified and `clearSliceStateForDispatch` is never invoked\"",
+      "expected": "B-05 carries the `acceptance:behaviors` gate, which runs a vitest test named for B-05, so every clause of its observable has to be something that test can actually observe at runtime. \"Which source files are unmodified\" is a property of the diff, not of a running module: the prior observable said so correctly (\"git shows no modification to ...\"). A spy or an import-shape check can prove that the wrapper delegates to `clearExactStageCheckpoint` and `saveContractFindingLineage` and that `clearSliceStateForDispatch` is never invoked, but it cannot prove those two files were not edited.",
+      "observed": "The revision replaced a diff-level observation with a runtime one that cannot hold the same claim, so the B-05-named test is asked for an assertion it cannot write. The underlying fact is not lost — P-03's observable and the second Definition-of-done item both carry \"`src/exact-stage-resume.ts` and `src/contract-convergence.ts` are unmodified\" — which is why this is advisory rather than blocking; the risk is that the generator either fakes the clause or drops it silently.",
+      "clearCondition": "B-05's observable keeps only the runtime-checkable clauses (the two cleared entries, the second slice's entries byte-identical, delegation to the two focused APIs, `clearSliceStateForDispatch` never invoked) and attributes the \"unmodified files\" claim to the diff-level check it already lives in (P-03 / Definition of done) rather than to the B-05 test.",
+      "state": "OPEN",
+      "revisionCitation": {
+        "artifact": "acceptance-manifest.json",
+        "before": "      \"observableResult\": \"the target's stageCheckpoints entry is absent and its contract lineage is empty, the second slice's entries are unchanged, and git shows no modification to src/exact-stage-resume.ts or src/contract-convergence.ts\",",
+        "after": "      \"observableResult\": \"a unit test named for B-05 asserts `<target ghIssue>` is absent from `state.stageCheckpoints` after execution while the second slice's entry is byte-identical, asserts `loadContractFindingLineage` for the target equals `emptyContractFindingLineage()` while the second slice's lineage is unchanged, and asserts by module-level spy or import shape that `src/exact-stage-resume.ts` and `src/contract-convergence.ts` are unmodified and `clearSliceStateForDispatch` is never invoked\","
+      }
+    },
+    {
+      "id": "F-05",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-02"],
+      "evidence": "\"assert the publication used the temporary-sibling path (no `.<attemptId>.partial` remains)\"",
+      "expected": "B-02's atomicity clause is about the *negotiation history* directory, whose temporary sibling would sit next to `negotiation/` inside `recovery-snapshots/<attemptId>/`. `.<attemptId>.partial` is a different path entirely: it is `publishAcceptedPairSnapshot`'s own temporary sibling under `recovery-snapshots/` (`src/preserve-work-recovery.ts:502`), created and consumed by #277's admission, not by this slice. An assertion about a path this slice never writes cannot fail, so the observable should name the temporary sibling the new publish actually uses.",
+      "observed": "The success-case atomicity assertion is vacuous as written and the negotiation publish's temporary-sibling name is left undeclared. The failure case in the same observable does carry real weight — \"every live file still exists with its original bytes and `recovery-snapshots/<attemptId>/negotiation/` is absent\" is a genuine check that nothing was half-published and nothing was deleted early — which is why this is advisory rather than blocking.",
+      "clearCondition": "B-02's observable names the temporary sibling the negotiation publish writes (a path inside `recovery-snapshots/<attemptId>/`, not `.<attemptId>.partial`) and asserts that path is absent after a successful publish, or drops the success-case clause and rests atomicity on the seam-driven failure assertion alone.",
+      "state": "OPEN",
+      "revisionCitation": {
+        "artifact": "acceptance-manifest.json",
+        "before": "      \"observableResult\": \"every copied file under recovery-snapshots/<attemptId>/negotiation/ equals the pre-execution live bytes; when the copy is failed through the exported seam, no live file has been deleted and no partial history directory is published\",",
+        "after": "      \"observableResult\": \"unit tests named for B-02 assert each copied file's bytes equal the pre-execution live bytes, assert the publication used the temporary-sibling path (no `.<attemptId>.partial` remains), and on the failure case assert every live file still exists with its original bytes and `recovery-snapshots/<attemptId>/negotiation/` is absent; a test also asserts the `snapshot-already-published` refusal code and message are unchanged\","
+      }
+    }
+  ]
+}

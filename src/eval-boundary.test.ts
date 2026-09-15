@@ -124,7 +124,7 @@ describe("the eval harness is a leaf", () => {
     expect(offenders).toEqual([]);
     // An eval run writes no event and no state, so neither schema moved.
     expect(EVENTS_SCHEMA_VERSION).toBe(1);
-    expect(RUN_STATE_VERSION).toBe(6);
+    expect(RUN_STATE_VERSION).toBe(7);
   });
 
   it("P-02 consumes the six production parsers and re-implements none", () => {

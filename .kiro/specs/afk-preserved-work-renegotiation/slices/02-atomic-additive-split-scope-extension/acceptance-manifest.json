@@ -1,0 +1,213 @@
+{
+  "version": 2,
+  "fileScope": {
+    "kind": "paths",
+    "paths": [
+      "src/cli-options.ts",
+      "src/cli-options.test.ts",
+      "src/run-state.ts",
+      "src/run-state.test.ts",
+      "src/slice-scope.ts",
+      "src/slice-scope.test.ts",
+      "src/preserve-work-recovery.ts",
+      "src/preserve-work-recovery.test.ts"
+    ]
+  },
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "GH #278; PRD Interface (\"`--extend-scope` is valid only with the other two flags; its members form one atomic, duplicate-free set\"); src/cli-options.ts:293-315, :166-175, :388-392, :148-162; src/issues-parser.ts:80",
+      "given": "argv for any of the three provider entry points, carrying `--extend-scope <selector-list>` with or without `--renegotiate-stale` and `--recovery-reason`",
+      "when": "the one new exported parser in `src/cli-options.ts` reads the flag, splitting the value on commas and trimming each part, and `parsePipelineRuntimeOptions` carries the accepted value on `PipelineRuntimeOptions.extendScope?: string[]`",
+      "then": "each refusal has its own message: the flag present without `--renegotiate-stale`, the flag present without `--recovery-reason`, a second occurrence of `--extend-scope`, a missing value or one starting with `--`, a comma-separated part that is not digits-only, and a literal duplicate selector inside the list. The digits-only rule is the whole accepted selector language and already covers both selector kinds the PRD names — a canonical slice number with its zero padding preserved as typed, and a bare GitHub-issue id, because `issues.md` parsing stores `Slice.ghIssue` with the `#` already stripped (`cells[1].trim().replace(\"#\", \"\")`, `src/issues-parser.ts:80`). `#278` and every other non-digit issue-id spelling is refused by that same message rather than normalized, so one selector string has exactly one meaning at the parser and the resolver never sees two spellings of one identity. One occurrence only, matching the discipline `parseStaleRenegotiationRequest` already enforces for the two recovery flags (`src/cli-options.ts:166-175`) rather than `parseSliceIdList`'s repeatable form. Like `renegotiateStale`/`recoveryReason` (`:388-392`), the value is read out before #277's still-live entry-point guard, so the accepted case is observable on the exported parser (#277 B-12 precedent, `:148-162`)",
+      "observableResult": "`src/cli-options.test.ts` asserts one distinct thrown message per refusal (`--extend-scope 12` alone; `--extend-scope 12 --renegotiate-stale 7` with no reason; `--extend-scope 12 --extend-scope 13`; `--extend-scope` with no value and with `--dry-run` next; `--extend-scope 12,x`; `--extend-scope 12,#278`; `--extend-scope 12,12`), asserts the accepted trio returns `[\"03\", \"278\"]` in order for `--extend-scope 03,278` — the mixed canonical-number and bare-issue-id list — and asserts that on the same argv `parsePipelineRuntimeOptions` still throws #277's unchanged refusal (P-01)",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-02",
+      "source": "GH #278; PRD Admission Protocol step 2 and \"Canonical request and scope identity\"; ADR 0065 (src/preserve-work-recovery.ts:203-209); src/afk-manifest.ts:240-243, :252-266, :268-273; src/preserve-work-recovery.ts:101-108; src/issues-parser.ts:62-69",
+      "given": "one pure exported resolver in `src/preserve-work-recovery.ts` over `(selectors, a persisted-scope view, current issues.md slices, AfkManifest | null)`, where the scope view is the list of `{number, ghIssue}` identities the absent-from-scope and blocker-already-scoped checks are made against and B-03 owns which view each call site supplies",
+      "when": "the resolver runs over a selector list, resolving each member to `{ number: canonicalSliceNumber(slice.number), ghIssue: slice.ghIssue }` (`src/afk-manifest.ts:240-243`) and sorting the set by canonical slice number then GitHub issue before it is stored or compared",
+      "then": "it returns either that canonical, duplicate-free, sorted set or exactly one new named `RecoveryRefusalCode` — one per distinguishable cause, per the code-not-prose rule at `src/preserve-work-recovery.ts:101-108`: `extension-slice-unknown` (matches no slice in current `issues.md`), `extension-slice-not-afk` (declared `HITL` rather than `AFK`), `extension-outside-manifest` (outside `afk.json`'s `selectedSlices`), `extension-already-in-scope` (already present in the supplied view), `extension-identity-conflict` (two selectors resolving to one identity, or one digits-only selector matching one slice by number and another by issue id — both spellings being bare numerics per B-01, which is what makes that collision reachable), and `extension-blocker-unscoped` (a `blockedBy` GH-issue id, `src/issues-parser.ts:62-69`, in neither the view nor the same candidate set). The codes are named in the contract rather than left to the generator because B-09 has to assert a replay outcome is not one of them. The manifest check reuses `assertWithinManifestScope` (`src/afk-manifest.ts:252-266`) inside a try/catch mapping its throw to the code, keeping the shared fail-closed comparison the one comparison every scope funnel makes; a `null` manifest is the documented legacy mode (`:268-273`) and imposes no restriction. The resolver reads `issues.md` slices and the supplied view directly, never `RunState`, and does not reuse `matchesSliceSelector` (ADR 0065 corroboration precedent, `src/preserve-work-recovery.ts:203-209`)",
+      "observableResult": "`src/preserve-work-recovery.test.ts` asserts, one case per cause, the exact `extension-*` code returned and that no run-state file, snapshot directory or accepted-pair byte changed; asserts that selectors `\"03\"` and `\"2\"` for slices whose canonical numbers are `3` and `2` return `[{number:\"2\",…},{number:\"3\",…}]` in that order; and asserts a member whose only blocker is another member of the same set resolves",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-03",
+      "source": "GH #278; PRD Admission Protocol step 2 (\"No state changes on refusal\") and Failure Matrix row \"Eligibility, extension or snapshot refusal\"; src/preserve-work-recovery.ts:781-840, :709-728",
+      "given": "the shipped admission sequence documented at `src/preserve-work-recovery.ts:781-800` — eligibility, then `attempt-already-pending`, then `completedReplacementFor` (`:709-728`), then branch tips, snapshot publication, `beforeLockAcquired`, lock — and a request carrying an extension selector list",
+      "when": "`admitStaleRenegotiation` runs, calling B-02's resolver at exactly one new place in that sequence: after replay detection and before the branch-tip reads, the snapshot publication and the lock",
+      "then": "any invalid member refuses the whole set, and because the resolver is pure and runs before anything is published the refusal is a pre-admission refusal that appends no lineage, publishes no snapshot, rewrites no accepted-pair byte and adds no scope. Which scope view the resolver is handed follows from that position, by one rule in both branches — the persisted scope as it stood for this request's own admission. Not a replay (`completedReplacementFor` found nothing): the view is `state.scope.slices` as loaded, and `extension-already-in-scope` can only arise in this branch. A replay (the pair on disk is a completed attempt's replacement): the view is `state.scope.slices` minus the identities that same trailing `COMPLETED` event records in its `extensions` — reconstructed from the lineage that recorded the additions rather than from a second stored copy (the B-10 argument) — so every member the completed attempt itself added is absent from the view, cannot draw `extension-already-in-scope`, and the resolved set reaches B-09's comparison. A replay whose selectors are malformed as identities (unknown, `HITL`, outside `afk.json`, colliding, or blocked by something in neither view nor set) still refuses with that member's code, because a request whose members do not resolve is not a repeat of anything. Planner decision recorded in the contract as a sequencing call inside this slice, reversible before merge: resolving first and teaching `extension-already-in-scope` to defer to replay was rejected because it makes one refusal code conditional on state the resolver deliberately does not read, and because the shipped sequence comment already fixes replay as the step decided \"before anything is published\"",
+      "observableResult": "`src/preserve-work-recovery.test.ts` asserts, for a non-replay request with one invalid member, the `extension-*` code plus byte-identical run state, no new entry under `recovery-snapshots/` and byte-identical accepted-pair files; asserts, for a repeat against a completed attempt, that the members that attempt added resolve and the returned outcome carries a replay code and never `extension-already-in-scope`; and asserts the resolver call site sits after `completedReplacementFor` and before `publishAcceptedPairSnapshot` by driving a request that is both a replay and would be an already-in-scope refusal and observing the replay answer",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-04",
+      "source": "GH #278 (\"Resolve each member to {number, ghIssue} ... before storage or comparison\"); src/run-state.ts:292-297 placeholder naming #278",
+      "given": "a persisted recovery lineage event whose extensions field holds pairs, an empty array, a bare string, or a pair with a blank member",
+      "when": "run state is loaded through sanitizeRecoveryLineage",
+      "then": "pair arrays and empty arrays round-trip with every event intact while a bare string or blank member drops the event, and RUN_STATE_VERSION stays 7 with no migration added",
+      "observableResult": "src/run-state.test.ts asserts the kept and dropped events and the unchanged version constant",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests"
+      ]
+    },
+    {
+      "id": "B-05",
+      "source": "GH #278 AC3; PRD Admission Protocol step 5",
+      "given": "an eligible target and a valid two-member extension set",
+      "when": "admitStaleRenegotiation commits its PENDING event",
+      "then": "the event's extensions holds both sorted pairs, state.scope is byte-identical to before, no other run-state field changed, and a set that stops resolving to the same identities under the lock is refused with facts-changed-before-lock",
+      "observableResult": "src/preserve-work-recovery.test.ts asserts the appended event's extensions, the unchanged scope object and the drift refusal code from the beforeLockAcquired seam",
+      "preservation": false,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "B-06",
+      "source": "GH #278 AC3 and AC10; PRD \"Proposed additions are data in the PENDING record only\"",
+      "given": "an existing persisted-scope fixture extended with a PENDING attempt carrying two additions",
+      "when": "resolveRunScope and buildDAG run over that state and the current issues.md",
+      "then": "members, selected, skipped and every SliceSkipReason equal the same fixture without the attempt, and neither addition is schedulable",
+      "observableResult": "src/preserve-work-recovery.test.ts (or src/slice-scope.test.ts) asserts deep equality of the resolved scope and DAG-ready sets against the attempt-free fixture",
+      "preservation": false,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "B-07",
+      "source": "GH #278 AC4 and AC6; PRD \"Successful Completion and Scope Atomicity\"",
+      "given": "a PENDING attempt with additions where one addition is deleted from issues.md, disallowed by afk.json, or already in persisted scope by the time completion takes the lock",
+      "when": "completeRecoveryAttempt revalidates the set read from the trailing PENDING event inside its one transactRunState body",
+      "then": "no COMPLETED event is appended, persisted scope is byte-identical, and the attempt ends through rollBackRecoveryAttempt with code facts-changed-before-lock and trigger completion-cas-lost, adding no new lineage state or transition",
+      "observableResult": "src/preserve-work-recovery.test.ts asserts the returned refusal, the trailing ROLLED_BACK event from #333's writer and the unchanged scope array",
+      "preservation": false,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "B-08",
+      "source": "GH #278; PRD \"Successful Completion and Scope Atomicity\" (\"one locked read-modify-write publishes one JSON document containing both the terminal event and the whole extension set\"); ADR 0056 (one cross-process lock per run-state file); src/slice-scope.ts:136-147",
+      "given": "a completion whose rechecks all hold under the ADR 0056 run-state lock",
+      "when": "that one locked read-modify-write publishes one run-state document that both appends the `COMPLETED` event (replacement fingerprints and lock provenance, unchanged from #335) and appends the whole set to `state.scope.slices` through one pure exported helper in `src/slice-scope.ts`, which preserves every existing entry and its order and appends the additions in canonical set order with `scope.mode` unchanged",
+      "then": "the atomicity obligation is what this slice can observe: the completion path performs exactly one run-state write — one `transactRunState` call returning `changed: true` once, with no second `transactRunState`, no `saveRunState` and no other scope writer anywhere on the path — and the single document it publishes carries both halves. There is no seam inside the transaction body to interleave, so \"no document carries only one side\" is proven structurally (one write, one reloaded document holding both halves) rather than by observing an intermediate document; the existing `beforeLockAcquired` seam proves the adjacent fact that a change landing before the lock publishes neither half. Every unrelated run-state field — other scope entries, slice PASS/failure records, resume counters, migration claims, review history — is carried forward untouched, and the additions do not reach persisted scope through `resolveRunScope`, whose narrow-only invariant (`src/slice-scope.ts:136-147`) is preserved",
+      "observableResult": "one test asserts the single reloaded document holds both the `COMPLETED` event and both additions appended after the existing scope entries in canonical order, with `scope.mode`, every prior scope entry, slice records, resume counters, migration claims and review history unchanged, and that the DAG built afterwards holds each addition until its declared blockers complete; a second test counts the completion path's run-state writers and asserts exactly one `transactRunState` call returning `changed: true` once and no other run-state or scope write declared on that path; a third asserts a `PENDING`-clearing interleave at `beforeLockAcquired` leaves neither the addition nor the `COMPLETED` event on disk",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-09",
+      "source": "GH #278 (\"replay is an idempotent no-op only for … the complete canonical extension identity set\"); PRD \"Replay and Conflicts\"; src/preserve-work-recovery.ts:745-779, :730-743, :620-656",
+      "given": "a completed attempt whose replacement pair is still the pair on disk and whose recorded extension set is `{2,3}`, with the request's set resolved against B-03's pre-completion scope view",
+      "when": "`replayOutcome` (`src/preserve-work-recovery.ts:745-779`) compares the completed event's `extensions` against the request's resolved set as values — same length, same sorted `{number, ghIssue}` members — replacing the placeholder comparison at `:730-743`",
+      "then": "only an exact match of target, canonical reason and set is `replay-completed-no-op`; a partial overlap, a superset, a different identity set, a different target or a different reason is `replay-conflict` whose message names the completed attempt. Every one of those cases is reachable because B-03 resolves a replay's selectors against the pre-completion view, so the members the completed attempt added resolve instead of drawing `extension-already-in-scope`: `{2,3}` is the no-op, and `{2}`, `{2,3,4}` and `{2,4}` are conflicts on set inequality. The reached replay answer is distinguished from a resolver refusal by outcome shape and code, not by message text: the no-op is the `replayed: true` member of `AdmissionOutcome` carrying `code: \"replay-completed-no-op\"` and the completed `attemptId` (`:620-656`), the conflict carries `code: \"replay-conflict\"`, and neither is any `extension-*` code from B-02",
+      "observableResult": "a test repeats the same target and reason with `{2,3}` and asserts `replay-completed-no-op` with the completed `attemptId` and `replayed: true`; repeats with `{2}`, `{2,3,4}`, `{2,4}`, a different reason and a different target and asserts `replay-conflict` naming the completed attempt; asserts in every case that the returned `code` is one of those two replay codes and no `extension-*` code, and that nothing was published, appended or rewritten; and asserts a replay whose extra member is deleted from `issues.md` returns `extension-slice-unknown`",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-10",
+      "source": "GH #278 AC9, limited to the persisted facts and their derivation; GH #336 reserves the reporting surface",
+      "given": "run state with one COMPLETED attempt that added two identities and one ROLLED_BACK attempt that proposed a third",
+      "when": "the exported pure derivation over RunState runs",
+      "then": "it reports exactly the two identities added by the completed attempt, without any new persisted provenance field and without changing PersistedScopeSlice",
+      "observableResult": "src/preserve-work-recovery.test.ts asserts the derived identity list and that PersistedScopeSlice still has exactly number and ghIssue",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests"
+      ]
+    },
+    {
+      "id": "P-01",
+      "source": "src/cli-options.ts:393-399 (#277 B-12); GH #336 (\"this slice removes that refusal\")",
+      "given": "argv with a well-formed --renegotiate-stale / --recovery-reason pair, with or without --extend-scope",
+      "when": "parsePipelineRuntimeOptions runs",
+      "then": "#277's refusal naming #335 still throws with its current message, and parseStaleRenegotiationRequest's existing single-selector and duplicate-flag messages are unchanged",
+      "observableResult": "src/cli-options.test.ts still asserts the existing refusal messages verbatim",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-02",
+      "source": "src/slice-scope.ts:136-176 and :14-26",
+      "given": "a re-run whose requested selection is a superset of or disjoint from persisted scope, and a run with narrowed scope",
+      "when": "resolveRunScope runs",
+      "then": "the narrow-only invariant still throws for supersets and disjoint selections and the hitl / not-selected / narrowed skip reasons are unchanged; extension additions never enter scope through this function",
+      "observableResult": "src/slice-scope.test.ts keeps passing unchanged",
+      "preservation": true,
+      "gateIds": [
+        "typecheck",
+        "tests"
+      ]
+    },
+    {
+      "id": "P-03",
+      "source": "src/preserve-work-recovery.ts:14-28 (#277 B-06); ADR 0039",
+      "given": "any admission, completion, refusal or rollback path exercised by this slice",
+      "when": "it runs to its ending",
+      "then": "no merge, reset or rebase is invoked and runScopeFingerprint / encodeRunScopeFingerprintPayload remain the single encoder shared by admission and completion",
+      "observableResult": "src/preserve-work-recovery.test.ts keeps its no-ref-moved assertions and its fingerprint-encoding tests green",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-04",
+      "source": "src/preserve-work-recovery.ts:1785-1996 (#335 B-01/B-02/B-03)",
+      "given": "a completion whose replacement pair is invalid, whose lock gate refuses or is absent, or whose provenance is blank",
+      "when": "completeRecoveryAttempt runs",
+      "then": "the three preconditions, the single lock acquisition, the one lockGate call and the COMPLETED event's fingerprint and provenance members behave exactly as #335 shipped them, with the scope write added inside the existing transaction body rather than as a second write",
+      "observableResult": "the existing #335 completion tests in src/preserve-work-recovery.test.ts pass unchanged",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-05",
+      "source": "src/run-state.ts:76 and :1307-1329 (#277 B-09/B-11)",
+      "given": "a v7 run-state file whose recovery events carry extensions: []",
+      "when": "it is loaded and one event is appended",
+      "then": "RUN_STATE_VERSION is still 7, every historical event loads intact, and appendRecoveryLineageEvent stays append-only and state-taking",
+      "observableResult": "src/run-state.test.ts asserts the loaded lineage and the appended list, with the version constant unchanged",
+      "preservation": true,
+      "gateIds": [
+        "typecheck",
+        "tests"
+      ]
+    }
+  ]
+}

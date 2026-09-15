@@ -1,0 +1,44 @@
+AFK Pipeline (Claude Code backend)
+  PRD: afk-preserved-work-renegotiation
+  PRD dir: C:\Code\afk\.afk\prd-preserve-work-renegotiation\.kiro\specs\afk-preserved-work-renegotiation
+  Repo: C:\Code\afk\.afk\prd-preserve-work-renegotiation
+  Dry run: false
+  Max contract rounds: 2
+  Requested slices: 01, 02, 03, 04, 05, 06
+
+  Slices: 6 total (6 AFK, 0 HITL)
+  Dependency graph:
+    #277 Preserve-work recovery admission (no deps)
+    #278 Atomic additive split-scope extension ← #335
+    #332 Recovery attempt execution ← #277
+    #333 Recovery rollback hold ← #332
+    #334 Recovery launch reconciliation ← #333
+    #335 Recovery completion and replay ← #334
+
+Starting pipeline... (SIGINT / SIGBREAK to cancel, or `afk-claude stop afk-preserved-work-renegotiation` from another shell)
+
+  Retrying #277 Preserve-work recovery admission (previous run: ERROR — Agent generator exited with code 1)
+[afk] #277 Preserve-work recovery admission: dispatched — cleared the previous attempt's persisted record (ERROR — Agent generator exited with code 1); this run owns the record from here
+
+=== AFK Pipeline Summary — afk-preserved-work-renegotiation-claude-code ===
+Duration: 382m30s
+
+Succeeded (4):
+  ✅ #277 Preserve-work recovery admission — merged into feat-claude-code/afk-preserved-work-renegotiation
+  ✅ #332 Recovery attempt execution — merged into feat-claude-code/afk-preserved-work-renegotiation
+  ✅ #333 Recovery rollback hold — merged into feat-claude-code/afk-preserved-work-renegotiation
+  ✅ #334 Recovery launch reconciliation — merged into feat-claude-code/afk-preserved-work-renegotiation
+
+Failed / Stuck (1):
+  🔴 #335 Recovery completion and replay [STUCK] — branch preserved: afk-claude-code/afk-preserved-work-renegotiation-slice-06-recovery-completion-and-replay
+       reason: negotiate: contract negotiation escalated after 2 round(s) — evaluator verdict REVISE (a verdict, not an infrastructure death). AFK exhausted the bounded contract repair capacity with unresolved blocker(s) F-02, F-03, F-06. Structured intervention: .kiro/specs/afk-preserved-work-renegotiation/slices/06-recovery-completion-and-replay/intervention.json. Clarify or decide the contract requirement behind F-02, F-03, F-06 and record that decision in the source issue or an ADR, then rerun the slice: negotiation restarts at round 1 and carries F-02, F-03, F-06 into it as durable lineage. Preserved candidate tree 6a43520b36ae8e4ec5f82a82582f777350e58865 holds the artifacts the exhausted negotiation produced.
+
+Branches:
+  feature: feat-claude-code/afk-preserved-work-renegotiation
+  preserved per-slice: afk-claude-code/afk-preserved-work-renegotiation-slice-06-recovery-completion-and-replay
+
+Ready to merge:
+  Pre-ship sanity gate: N/A
+  Architect review: N/A
+  PM review: N/A
+  Not ready: 1 slice(s) failed; sanity gate not run

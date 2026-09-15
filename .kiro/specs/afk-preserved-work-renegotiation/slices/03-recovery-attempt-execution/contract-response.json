@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "round": 2,
+  "responses": [
+    {
+      "findingId": "F-01",
+      "position": "CONDITION_MET",
+      "evidence": "B-05 now names the one checkpoint shape the repository can hold and states exactly what the test seeds: state.stageCheckpoints[<target ghIssue>] = { version: 1, completedStage: \"deterministic-qa\", candidateTreeId: <40-hex>, nextPendingStage: \"post-qa-deterministic\", round: 1 }, a value parseCheckpoint accepts (src/exact-stage-resume.ts:67-109). Reading (a) is chosen and the choice is recorded in B-05 with its citation: prd.md:171-175 says leaving these controls live \"would let a stale outcome or exact-stage checkpoint bypass the required fresh explorer and negotiation on the next attempt\", so the post-QA-stage entry is deliberately dropped. B-06's preservation clause is narrowed to name that single exception explicitly — the target's implementation and QA artifacts, slices[ghIssue] record, round and attempt counters, worktree and branch are preserved, its exact-stage resume checkpoint is not — so B-05 and B-06 no longer collide, and B-06's observable still admits a difference only in stageCheckpoints[target] and contractConvergence[target]. B-07 now states the pre-execution value it is measured against: with expectedCompletedStage \"deterministic-qa\" and a matching currentCandidateTreeId, inspectExactStageCheckpoint returns action \"resume\" before execution and action \"reevaluate\" with reason \"no exact-stage checkpoint was recorded for this slice\" (src/exact-stage-resume.ts:147-152) after, plus non-empty then empty lineage, so it cannot pass vacuously. src/exact-stage-resume.ts stays unmodified; no CompletedCandidateStage member is added."
+    },
+    {
+      "findingId": "F-02",
+      "position": "CONDITION_MET",
+      "evidence": "P-02 now names the file: the P-02-named assertion is added to src/preserve-work-recovery.test.ts, which is already in fileScope, importing parsePipelineRuntimeOptions and parseStaleRenegotiationRequest from src/cli-options.js, so --testNamePattern P-02 matches a test inside the declared scope. The contract and manifest also state that src/cli-options.test.ts is deliberately not added to scope and stays unmodified, so #277's pin at src/cli-options.test.ts:458 ([behavior:#277:B-12]) and the parseStaleRenegotiationRequest message assertions beside it are untouched; P-02 re-pins the same two facts from this slice's own test file. A Definition-of-done item asserts both halves. fileScope is unchanged."
+    },
+    {
+      "findingId": "F-03",
+      "position": "CONDITION_MET",
+      "evidence": "B-02 now records the decision to keep the history inside the attempt directory and to narrow the invariant's wording in place: publishAcceptedPairSnapshot's docstring (src/preserve-work-recovery.ts:472-476) is restated over the published pair files rather than the published directory. \"Changes to existing behavior\" carries the same edit as a comment-only change, stating that the refusal at :495-501, its snapshot-already-published code and its message are unchanged, so no caller and no existing test is affected; src/preserve-work-recovery.ts is already in fileScope, so no scope change was needed. B-02's observable adds an assertion that the refusal code and message are unchanged, and a Definition-of-done item requires the narrowed docstring wording."
+    }
+  ]
+}

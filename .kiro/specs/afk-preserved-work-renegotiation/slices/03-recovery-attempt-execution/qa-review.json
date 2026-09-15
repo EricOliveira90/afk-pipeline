@@ -1,0 +1,34 @@
+{
+  "version": 2,
+  "verdict": "PASS",
+  "failureClass": "NONE",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-01",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-02"],
+      "summary": "When the admitted attempt's snapshot directory is missing, executeRecoveryAttempt fabricates it and reports success instead of refusing.",
+      "evidence": "src/preserve-work-recovery.ts: `attemptDir` is joined from `admitted.snapshotPath` and never checked for existence; the next filesystem call is `mkdirSync(temporary, { recursive: true })`, which creates `<attemptDir>/.negotiation.partial` and therefore `<attemptDir>` itself. Probe: with QA_PROBE_A/B reverted, the module has no `existsSync(attemptDir)` guard — the only existence check is on `join(attemptDir, RECOVERY_NEGOTIATION_DIRNAME)`.",
+      "expected": "B-02 places the history 'beneath the attempt's already-published snapshot directory', i.e. the attempt has exactly one immutable directory identity created by admission.",
+      "observed": "If that directory is absent (deleted or never published), execution recreates an empty attempt directory holding only `negotiation/`, deletes the live negotiation files, clears both controls and returns ok:true — a history with no accepted pair beside it.",
+      "clearCondition": "Execution refuses (writing nothing and deleting nothing) when the directory named by the admitted event's `snapshotPath` does not exist, and a test pins that refusal.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-02",
+      "severity": "ADVISORY",
+      "behaviorIds": [],
+      "summary": "ExecuteRecoveryAttemptArgs.prdSlug is documented as artifact identity but is only used as a fallback for runSlug.",
+      "evidence": "src/preserve-work-recovery.ts: `/** PRD slug — artifact identity. */ prdSlug: string;` and the sole use `const runSlug = args.runSlug ?? args.prdSlug;`. The target's artifact directory arrives separately as `sliceDir`, so no artifact path is derived from `prdSlug`.",
+      "expected": "A required parameter's doc comment describes the role it actually plays, so a caller cannot pass a PRD slug that differs from the run slug and expect either to be honoured.",
+      "observed": "`prdSlug` is a run-slug default wearing an artifact-identity comment; a caller passing a distinct PRD slug and no `runSlug` would silently read and clear the wrong run-state file.",
+      "clearCondition": "Either the doc comment states that `prdSlug` only supplies the default run slug, or the two slugs are collapsed into one required run-slug parameter.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    }
+  ]
+}

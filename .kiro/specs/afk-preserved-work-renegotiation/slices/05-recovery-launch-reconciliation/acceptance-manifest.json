@@ -1,0 +1,152 @@
+{
+  "version": 2,
+  "fileScope": {
+    "kind": "paths",
+    "paths": [
+      "src/preserve-work-recovery.ts",
+      "src/orchestrator.ts",
+      "src/preserve-work-recovery.test.ts",
+      "src/resume-integration.test.ts",
+      "src/resume-integration.fixtures.ts",
+      "architecture.md"
+    ]
+  },
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "GH #334 AC2, AC3",
+      "given": "a run-state file whose recoveryLineage holds one target with a trailing PENDING event, one with a trailing ROLLBACK_FAILED event and one with a trailing ROLLED_BACK event",
+      "when": "reconcileRecoveryLineage({ repoRoot, prdSlug, runSlug }) runs",
+      "then": "it reports exactly the two unresolved targets, ordered by ghIssue, each record naming the target ghIssue, attemptId, snapshotPath and the appended event state, and reports nothing for the terminal target",
+      "observableResult": "the returned outcome array contains the two unresolved ghIssues in ascending order and not the ROLLED_BACK one",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-02",
+      "source": "GH #334 AC4 (prd.md \"Attempt Execution and Failure Semantics\"; src/preserve-work-recovery.ts:1161; src/run-state.ts:284-341)",
+      "given": "three unresolved targets in one run-state file: a first whose trailing event is `PENDING` and whose published snapshot still holds the accepted pair; a second whose trailing event is `PENDING` and whose snapshot `contract.md` has been deleted so the restore must fail; and a third whose trailing event is `ROLLBACK_FAILED` and whose snapshot is still unreadable so its retry fails again",
+      "when": "`reconcileRecoveryLineage` runs once over that state, calling the existing `restoreAcceptedPairFromSnapshot` (`src/preserve-work-recovery.ts:1161`) with the trailing event's `RecoveryAttemptLocator` fields outside the lock, then — inside `transactRunState` (ADR 0056) — rereading state, rechecking that the trailing event is still the same `attemptId` in the same state, admitting the transition through `isLegalRecoveryTransition`, and appending through `appendRecoveryLineageEvent`",
+      "then": "the first target's pair is byte-restored and exactly one `ROLLED_BACK` event is appended for the same `attemptId`; the second target gets exactly one `ROLLBACK_FAILED` event appended for the same `attemptId`, carrying the restore failure message as `rollbackError` plus `observedContractFingerprint` and `observedManifestFingerprint` read off disk (an absent file recorded as #333's explicit absent marker, never a blank), with its destination pair left as it was; and the third target appends nothing, because `ROLLBACK_FAILED -> ROLLBACK_FAILED` is not a legal transition. Both append branches are obligations of this ID: the failing branch is the only place this slice writes the three `ROLLBACK_FAILED`-only fields (`src/run-state.ts:284-341`)",
+      "observableResult": "a test named `[behavior:#334:B-02]` asserts, for the first target, that its lineage grew by exactly one event whose `state` is `ROLLED_BACK` and whose `attemptId` equals the `PENDING` event's, and that both destination files are byte-identical to their snapshot copies; asserts, for the second target, that its lineage grew by exactly one event whose `state` is `ROLLBACK_FAILED`, whose `attemptId` equals its `PENDING` event's, whose `rollbackError` is non-blank and equal to the restore call's own failure message, and whose `observedContractFingerprint` and `observedManifestFingerprint` equal the values read from disk (the absent marker for the deleted file), and that its destination pair bytes are unchanged; asserts the third target's event list is unchanged event for event at every index; and asserts every appended event round-trips through save/load and that the reloaded file — not just the in-memory value — carries the appends, pinning that they happened inside the transaction",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-03",
+      "source": "GH #334 AC4; src/preserve-work-recovery.ts:86, :519-520, :569",
+      "given": "four trailing-`PENDING` targets differing only in `snapshotPath`: a well-formed `<sliceDir>/recovery-snapshots/<attemptId>`; a two-segment `recovery-snapshots/<attemptId>`, whose grandparent is the empty string so the derived destination collapses onto `repoRoot`; a three-segment locator whose penultimate segment is not `recovery-snapshots`; and a single-segment locator. A `contract.md` and an `acceptance-manifest.json` of known bytes are planted at the repository root beforehand",
+      "when": "`reconcileRecoveryLineage` runs over that state",
+      "then": "only the well-formed locator is resolved — its destination is the grandparent of the resolved snapshot directory, matching the locator `publishAcceptedPairSnapshot` builds as `relative(repoRoot, join(sliceDir, RECOVERY_SNAPSHOT_DIRNAME, attemptId))` (`src/preserve-work-recovery.ts:519-520,569`, `RECOVERY_SNAPSHOT_DIRNAME` = `recovery-snapshots` at `:86`). Each of the other three is rejected before any file is read or written, because the accepted form requires at least three segments, every segment non-empty and neither `.` nor `..`, the penultimate segment equal to `RECOVERY_SNAPSHOT_DIRNAME`, and hence a non-empty derived `<sliceDir>`. A rejected locator restores nothing, appends nothing, and is reported as a failed reconciliation naming the locator and the destination it would have derived",
+      "observableResult": "a test named `[behavior:#334:B-03]` asserts that after the call the repository-root `contract.md` and `acceptance-manifest.json` are byte-identical to the planted bytes — the assertion that fails if the two-segment locator's derived destination collapsed onto `repoRoot` — and that no file exists under `repoRoot` that did not exist before. For each rejected locator it asserts the target's lineage list is unchanged event for event, and that the reported outcome's message names both the rejected locator and the derived destination that caused the rejection, so the two-segment case is rejected for the derived-destination reason and not merely for segment count. For the well-formed locator it asserts the resolved destination equals `dirname(dirname(join(repoRoot, ...snapshotPath.split(\"/\"))))` and that the restore landed there",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-04",
+      "source": "GH #334 AC2, AC3, AC5",
+      "given": "run state carrying a trailing PENDING event for a slice in scope and a recording stub provider",
+      "when": "runPipeline is invoked once",
+      "then": "reconciliation appends its event before ordinary resume decides anything: no provider invocation is recorded, no worktree is prepared and resume[ghIssue].attempts is unchanged",
+      "observableResult": "the stub provider recorded zero invocations, the lineage gained its terminal event, and the resume counter in the run-state file still reads its planted value",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-05",
+      "source": "GH #334 AC5/AC6 (prd.md \"Failure Matrix\", process-death row)",
+      "given": "the recovery fixture with unresolved lineage planted in run state and no live process, exercised once per reported outcome family: a target reconciled to `ROLLED_BACK`, a target reconciled to `ROLLBACK_FAILED`, and a target that appended nothing (a trailing `ROLLBACK_FAILED` whose retry failed again, and a rejected locator)",
+      "when": "`runPipeline` is invoked once with a recording stub provider",
+      "then": "it writes one `logger.phase(...)` line per reported target naming the target `ghIssue`, the appended outcome (`ROLLED_BACK`, `ROLLBACK_FAILED`, or that nothing was appended and why) and the retry fixed for that outcome — relaunch for `ROLLED_BACK`; repair the named snapshot directory then relaunch for a `ROLLBACK_FAILED` appended this launch; and for the append-nothing outcomes, that the hold is intentionally terminal until #335, naming the run-state file and the `attemptId` and saying a relaunch alone will report the same target and stop again — then returns `{ success: false, summary, consoleSummary, failureReason }` whose `failureReason` names the reconciled targets and says the launch stopped after reconciliation, dispatching no agent, resolving no run scope and moving no resume counter",
+      "observableResult": "a test named `[behavior:#334:B-05]` asserts `success` is `false` and `failureReason` contains each reported target's `ghIssue`; asserts `run.log` carries exactly one line per reported target; asserts, per outcome family, that the line contains the outcome name and the retry that outcome fixes — the snapshot directory path for the repair retries, and the run-state file path plus the `attemptId` plus the terminal-until-#335 statement for the append-nothing lines; and asserts the stub provider recorded zero invocations and `resume[ghIssue].attempts` is unchanged",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-06",
+      "source": "GH #334 AC7/AC8 (prd.md \"No attempt changes from `ROLLED_BACK` or `ROLLBACK_FAILED` back to `PENDING`\"); src/preserve-work-recovery.ts:644",
+      "given": "a target whose trailing event is `ROLLBACK_FAILED` and whose snapshot is still unreadable, and separately a target reconciled to `ROLLED_BACK`",
+      "when": "reconciliation runs over the first, and `admitStaleRenegotiation` (`src/preserve-work-recovery.ts:644`) runs for the second afterwards",
+      "then": "reconciliation is append-only: it never edits or deletes a prior lineage event, never writes inside a published snapshot directory, and never rewrites a prior attempt's `attemptId`. The failing retry appends nothing, because `ROLLBACK_FAILED -> ROLLBACK_FAILED` is not a legal transition, so the existing hold stays in force; after the `ROLLED_BACK` append, `admitStaleRenegotiation` is no longer blocked by `hasOpenRecoveryAttempt` and mints a new `attemptId` and a new snapshot directory",
+      "observableResult": "a test named `[behavior:#334:B-06]` asserts every prior event is still present byte-for-byte at its original index, asserts a digest of each published snapshot directory is unchanged across the call, asserts the failing-retry target's list length is unchanged and `recoveryDispatchRefusal` still returns a refusal for it, and asserts the fresh admission produces an event whose `attemptId` differs from the reconciled one and whose `snapshotPath` names a different directory while the prior snapshot directory's contents are untouched",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-07",
+      "source": "GH #334 AC9",
+      "given": "a repository with the target's slice branch, feature branch and preserved worktree recorded before reconciliation",
+      "when": "reconcileRecoveryLineage reconciles the unresolved attempt",
+      "then": "no git merge, reset or rebase runs; only the two accepted-pair files and the run-state file change",
+      "observableResult": "every ref sha, commit list and preserved-worktree file is identical before and after, per ADR 0039",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-01",
+      "source": "GH #334 AC10",
+      "given": "a CLI invocation carrying --renegotiate-stale with a recovery reason at any of the three entry points",
+      "when": "parsePipelineRuntimeOptions parses it after this slice merges",
+      "then": "it is still refused with the existing message, and the existing refusal tests are unedited",
+      "observableResult": "src/cli-options.test.ts, src/cli-entries.test.ts and the #332 P-02 test still pass with no diff to their assertions",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-02",
+      "source": "GH #334 'This slice adds no second restore implementation and no second verification rule'",
+      "given": "the existing exports restoreAcceptedPairFromSnapshot, rollBackRecoveryAttempt, recoveryDispatchRefusal, isLegalRecoveryTransition and appendRecoveryLineageEvent",
+      "when": "the slice ships",
+      "then": "their signatures and behavior are unchanged and the new routine calls them rather than duplicating restore or verification",
+      "observableResult": "the #277/#332/#333 recovery tests pass unchanged and typecheck reports no signature change at those call sites",
+      "preservation": true,
+      "gateIds": [
+        "typecheck",
+        "tests"
+      ]
+    },
+    {
+      "id": "P-03",
+      "source": "GH #334 AC1",
+      "given": "a run whose run state carries no recoveryLineage, and a run whose every target's trailing event is terminal",
+      "when": "runPipeline launches",
+      "then": "reconciliation reports no target, no extra run.log line is written, nothing is refused, and the run proceeds exactly as before this slice",
+      "observableResult": "the run.log contains no reconciliation line and the existing resume and orchestrator suites pass unchanged",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    }
+  ]
+}

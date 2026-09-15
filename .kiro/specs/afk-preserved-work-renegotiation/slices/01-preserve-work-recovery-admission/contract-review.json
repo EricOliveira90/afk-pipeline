@@ -1,0 +1,28 @@
+{
+  "version": 2,
+  "verdict": "ACCEPT",
+  "findings": [
+    {
+      "id": "F-01",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-09"],
+      "evidence": "\"the first mutation on disk is exactly one appended `PENDING` event\" (acceptance-manifest B-09 then; contract.md:128-129 \"On a clean recheck the first mutation on disk is one appended `PENDING` event\")",
+      "expected": "B-09's obligation stated so it does not contradict B-07: the appended `PENDING` event is the first mutation to persisted run state (the first *admitted* mutation, as the scope lock at contract.md:16-18 words it), with the published snapshot directory acknowledged as an earlier, deliberately inert on-disk write.",
+      "observed": "B-09 claims the lineage event is the first mutation on disk, while B-07 and B-08 require a snapshot directory to be published to disk beforehand and B-07 explicitly permits a published snapshot that no `PENDING` event references. Read literally, no test can make B-09's ordering claim true.",
+      "clearCondition": "B-09's `then` (and contract.md:128) scope the ordering claim to run-state/admitted mutation rather than to all on-disk mutation, matching the scope lock's \"first admitted mutation on disk\".",
+      "state": "OPEN",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-02",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-05", "B-06", "B-08"],
+      "evidence": "\"assert that src/git.ts and src/worktree-processes.ts are unmodified in the diff\" (B-05 observableResult); \"asserts the three lock primitives' signatures are untouched in the diff\" (B-08 observableResult); \"the module's source and call graph contain no merge, reset or rebase invocation\" (B-06 observableResult)",
+      "expected": "Observable results under the `tests` / `acceptance:behaviors` gates describe assertions a vitest run can actually make; \"this file is unmodified relative to main\" is enforced by the manifest `fileScope` check and the definition-of-done file-scope rule, not by a named test.",
+      "observed": "Three observable results attribute diff-level and whole-call-graph facts to the test gate. The substantive properties are already covered by testable clauses (P-05's stub-only reachability, B-05's per-predicate reason codes, B-06's unmoved branch tips) plus the deterministic file-scope gate, so the extra clauses overstate what the named tests observe without changing what must be built.",
+      "clearCondition": "Those three observable results drop or reattribute the diff/call-graph clauses, leaving the vitest-observable assertions (reason codes, unmoved tips, stub-driven outcomes, absent lineage) as the behaviors' evidence.",
+      "state": "OPEN",
+      "revisionCitation": null
+    }
+  ]
+}

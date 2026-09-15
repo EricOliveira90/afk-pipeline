@@ -27,10 +27,16 @@ import {
   cleanerRoundsSpent,
   recordQualityStageOutcome,
   recordQualityStageRound,
+  recoveryLineageFor,
+  appendRecoveryLineageEvent,
+  updateRunState,
+  RECOVERY_FINGERPRINT_ABSENT,
   RUN_STATE_VERSION,
+  type PersistedRecoveryLineageEvent,
   type RunState,
 } from "./run-state.js";
 import { cleanerRoundsRemaining, MAX_CLEANER_ROUNDS } from "./bounds.js";
+import type { PersistedScopeSlice } from "./slice-scope.js";
 
 const tempDirs: string[] = [];
 const childProcesses: ChildProcess[] = [];
@@ -983,13 +989,14 @@ describe("RunState.appliedWaivers", () => {
 describe("[behavior:#87:B-14] persisted quality stages", () => {
   const REPO_ISSUE = "87";
 
-  it("[behavior:#87:B-14] pins the written schema at 6 and keeps 3-5 assignable", () => {
-    // 5 -> 6 for `qualityStages`, once. `RunState.version` still admits 3, 4
-    // and 5 so a caller or fixture holding an older record keeps compiling,
-    // and nothing reads one of those back out of a loaded state.
-    expect(RUN_STATE_VERSION).toBe(6);
-    const older: RunState["version"][] = [3, 4, 5, 6];
+  it("[behavior:#87:B-14] keeps 6 assignable after the v7 bump moved the written schema past it", () => {
+    // 5 -> 6 added `qualityStages`; 6 -> 7 added `recoveryLineage` (#277 B-10).
+    // `RunState.version` still admits 3 through 6 so a caller or fixture holding
+    // an older record keeps compiling, and nothing reads one of those back out
+    // of a loaded state.
+    const older: RunState["version"][] = [3, 4, 5, 6, 7];
     expect(older).toContain(RUN_STATE_VERSION);
+    expect(RUN_STATE_VERSION).toBeGreaterThanOrEqual(6);
   });
 
   it("[behavior:#87:B-14] reads a version-5 file as \"no stage ran\" and writes nothing", () => {
@@ -1256,5 +1263,813 @@ describe("cross-process run-state locking", () => {
     expect(
       readFileSync(join(repo, ".afk", "state", "conditional.json"), "utf-8"),
     ).toBe(before);
+  });
+});
+
+/**
+ * v7 is purely additive: an append-only, per-issue list of preserved-work
+ * recovery lineage events (#277 B-10). Append-only rather than a mutable summary
+ * because "is an attempt open" and "what did the attempt claim about the tree"
+ * are different questions, and a summary field can only answer the first.
+ */
+describe("[behavior:#277:B-10] persisted recovery lineage", () => {
+  const ISSUE = "277";
+
+  function lineageEvent(
+    overrides: Partial<PersistedRecoveryLineageEvent> = {},
+  ): PersistedRecoveryLineageEvent {
+    return {
+      attemptId: "attempt-1",
+      state: "PENDING",
+      target: { number: "1", ghIssue: ISSUE },
+      reason: "stale lock",
+      extensions: [],
+      provider: "claude-code",
+      sliceBranch: "afk-claude-code/demo-slice-01",
+      sliceHead: "a".repeat(40),
+      featureHead: "b".repeat(40),
+      scopeFingerprint: "c".repeat(64),
+      snapshotPath: ".kiro/specs/demo/slices/01-x/recovery-snapshots/attempt-1",
+      contractFingerprint: "d".repeat(64),
+      manifestFingerprint: "e".repeat(64),
+      recordedAt: "2026-09-14T00:00:00.000Z",
+      ...overrides,
+    };
+  }
+
+  it("[behavior:#277:B-10] pins the written schema at 7 and names the addition in the version block", () => {
+    expect(RUN_STATE_VERSION).toBe(7);
+    const assignable: RunState["version"][] = [3, 4, 5, 6, 7];
+    expect(assignable).toContain(RUN_STATE_VERSION);
+    // ADR 0018 asks for the change to be documented in the same running comment
+    // block, not just for the literal to move.
+    const source = readFileSync(join(process.cwd(), "src", "run-state.ts"), "utf-8");
+    const block = source.slice(
+      source.indexOf("* The schema version every writer emits"),
+      source.indexOf("export const RUN_STATE_VERSION"),
+    );
+    expect(block).toContain("v7");
+    expect(block).toContain("recoveryLineage");
+  });
+
+  it("[behavior:#277:B-10] reads a version-6 file as \"no attempt was admitted\" and writes nothing", () => {
+    const repo = makeRepo();
+    mkdirSync(join(repo, ".afk", "state"), { recursive: true });
+    const statePath = join(repo, ".afk", "state", "demo.json");
+    const onDisk = `${JSON.stringify(
+      {
+        version: 6,
+        prdSlug: "demo",
+        featureBranch: "feat/demo",
+        slices: { "277": { phase: "PASS", branch: "afk/demo-01" } },
+      },
+      null,
+      2,
+    )}\n`;
+    writeFileSync(statePath, onDisk);
+
+    const loaded = loadRunState(repo, "demo");
+
+    expect(loaded.version).toBe(RUN_STATE_VERSION);
+    expect(loaded.recoveryLineage).toBeUndefined();
+    expect(recoveryLineageFor(loaded, ISSUE)).toEqual([]);
+    expect(readFileSync(statePath, "utf8")).toBe(onDisk);
+  });
+
+  it.each([
+    ["a non-object map", { recoveryLineage: [] }],
+    ["a non-array target list", { recoveryLineage: { "277": {} } }],
+    ["a blank attempt id", { recoveryLineage: { "277": [{ attemptId: "" }] } }],
+    [
+      "an unknown state",
+      { recoveryLineage: { "277": [{ attemptId: "x", state: "OPEN" }] } },
+    ],
+    [
+      "a missing target pair",
+      { recoveryLineage: { "277": [{ attemptId: "x", state: "PENDING" }] } },
+    ],
+    [
+      "a non-array extension set",
+      {
+        recoveryLineage: {
+          "277": [
+            {
+              attemptId: "x",
+              state: "PENDING",
+              target: { number: "1", ghIssue: "277" },
+              reason: "r",
+              extensions: "none",
+            },
+          ],
+        },
+      },
+    ],
+  ])(
+    "[behavior:#277:B-10] degrades %s to absent instead of throwing",
+    (_label, fields) => {
+      const adapted = adaptLoadedState(
+        { version: 6, prdSlug: "demo", featureBranch: "feat/demo", slices: {}, ...fields },
+        "demo",
+      );
+
+      expect(adapted.recoveryLineage).toBeUndefined();
+      expect(recoveryLineageFor(adapted, ISSUE)).toEqual([]);
+    },
+  );
+
+  it("[behavior:#277:B-10] round-trips a well-formed event through the focused reader", () => {
+    const repo = makeRepo();
+    saveRunState(repo, {
+      version: RUN_STATE_VERSION,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      slices: {},
+    });
+    const event = lineageEvent();
+
+    updateRunState(repo, "demo", (state) => {
+      appendRecoveryLineageEvent(state, ISSUE, event);
+    });
+
+    expect(recoveryLineageFor(loadRunState(repo, "demo"), ISSUE)).toEqual([event]);
+  });
+
+  it("[behavior:#277:B-11] appends without shortening or rewriting an earlier event", () => {
+    const repo = makeRepo();
+    saveRunState(repo, {
+      version: RUN_STATE_VERSION,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      slices: {},
+    });
+    const first = lineageEvent();
+    const second = lineageEvent({
+      attemptId: "attempt-1",
+      state: "COMPLETED",
+      // #335 B-12 made the three completion members required on `COMPLETED`;
+      // `COMPLETION_OBSERVATIONS` is declared with the #335 block below.
+      ...COMPLETION_OBSERVATIONS,
+    });
+
+    updateRunState(repo, "demo", (state) => {
+      appendRecoveryLineageEvent(state, ISSUE, first);
+    });
+    updateRunState(repo, "demo", (state) => {
+      appendRecoveryLineageEvent(state, ISSUE, second);
+    });
+
+    const events = recoveryLineageFor(loadRunState(repo, "demo"), ISSUE);
+    expect(events).toEqual([first, second]);
+    // The earlier record is byte-for-byte what it was: a terminal event is a new
+    // record citing the same attempt id, never an edit of the PENDING one.
+    expect(events[0]).toEqual(first);
+  });
+
+  it("[behavior:#277:P-04] preserves every unrelated run-state field when it appends", () => {
+    const repo = makeRepo();
+    const before: RunState = {
+      version: RUN_STATE_VERSION,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      specsDir: ".kiro/specs/demo",
+      scope: {
+        mode: "explicit",
+        slices: [
+          { number: "01", ghIssue: "277" },
+          { number: "02", ghIssue: "278" },
+        ],
+      },
+      slices: {
+        "277": { phase: "PASS", branch: "afk/demo-01", mergedToFeature: false },
+        "278": { phase: "ERROR", error: "boom" },
+      },
+      resume: { "277": { attempts: 2 } },
+      migrations: { pool: ["0070"], claims: { "277": ["0070"] } },
+      approvedBaselines: {
+        "277": { treeId: "t".repeat(40), commit: "c".repeat(40), artifactPath: "a.json" },
+      },
+      appliedWaivers: {
+        "278": [{ riskClass: "migration", path: "m.sql", author: "eric", reason: "ok" }],
+      },
+      finalEvaluations: {
+        "277": {
+          decision: "evaluate",
+          finalTreeId: "f".repeat(40),
+          attempts: [
+            { attempt: 1, candidateTreeId: "f".repeat(40), verdict: "PASS", outcome: "GRADED" },
+          ],
+          invalidatedCandidateTreeIds: [],
+        },
+      },
+      qualityStages: {
+        "277": [
+          {
+            stage: "cleaner",
+            enabled: true,
+            rounds: [
+              {
+                round: 1,
+                attempt: 1,
+                inputTreeId: "i".repeat(40),
+                gateIds: ["clean:format"],
+                outcome: "PASS",
+              },
+            ],
+            outcome: "PASS",
+          },
+        ],
+      },
+    };
+    saveRunState(repo, before);
+    const event = lineageEvent();
+
+    updateRunState(repo, "demo", (state) => {
+      appendRecoveryLineageEvent(state, ISSUE, event);
+    });
+
+    const after = loadRunState(repo, "demo");
+    expect(after).toEqual({ ...before, recoveryLineage: { [ISSUE]: [event] } });
+  });
+
+  it("[behavior:#277:P-03] round-trips a lineage-free file unchanged apart from the version stamp", () => {
+    const repo = makeRepo();
+    mkdirSync(join(repo, ".afk", "state"), { recursive: true });
+    const statePath = join(repo, ".afk", "state", "demo.json");
+
+    for (const version of [3, 4, 5, 6] as const) {
+      const document = {
+        version,
+        prdSlug: "demo",
+        featureBranch: "feat/demo",
+        specsDir: ".kiro/specs/demo",
+        scope: { mode: "explicit", slices: [{ number: "01", ghIssue: "277" }] },
+        slices: { "277": { phase: "PASS", branch: "afk/demo-01", mergedToFeature: true } },
+        resume: { "277": { attempts: 1 } },
+        migrations: { pool: ["0070"], claims: {} },
+      };
+      writeFileSync(statePath, `${JSON.stringify(document, null, 2)}\n`);
+
+      const loaded = loadRunState(repo, "demo");
+      expect(loaded.recoveryLineage).toBeUndefined();
+      // Field-by-field equality apart from the stamp writeRunState applies.
+      expect({ ...loaded, version }).toEqual({
+        ...document,
+        slices: document.slices,
+      });
+
+      // And a real write back through the transaction changes only the stamp.
+      updateRunState(repo, "demo", () => {});
+      const rewritten = JSON.parse(readFileSync(statePath, "utf-8")) as Record<
+        string,
+        unknown
+      >;
+      expect(rewritten).toEqual({ ...document, version: RUN_STATE_VERSION });
+      expect(rewritten.recoveryLineage).toBeUndefined();
+    }
+  });
+});
+
+/*
+ * ---------------------------------------------------------------------------
+ * Rollback-failure observations on a lineage event (#333)
+ * ---------------------------------------------------------------------------
+ *
+ * #333 adds three optional members — `rollbackError`,
+ * `observedContractFingerprint`, `observedManifestFingerprint` — that a
+ * `ROLLBACK_FAILED` event must carry and no other state may. That changes the
+ * validator's accepted input language, so both halves of the regression surface
+ * are bound here per ADR 0060: the newly accepted document round-trips, and each
+ * newly rejected one degrades the target's whole list to absent. Every rejection
+ * case also loads the *corrected* document, so none of them can pass because of
+ * an unrelated malformation.
+ */
+const ROLLBACK_ISSUE = "333";
+
+const ROLLBACK_OBSERVATIONS = {
+  rollbackError: "the snapshot contract.md could not be read (ENOENT)",
+  observedContractFingerprint: "1".repeat(64),
+  observedManifestFingerprint: RECOVERY_FINGERPRINT_ABSENT,
+} as const;
+
+/** The three members only a `ROLLBACK_FAILED` event may carry. */
+const ROLLBACK_FIELDS = [
+  "rollbackError",
+  "observedContractFingerprint",
+  "observedManifestFingerprint",
+] as const;
+
+/**
+ * The three members only a `COMPLETED` event may carry (#335 B-12), and a
+ * well-formed value for each.
+ *
+ * Declared up here beside {@link ROLLBACK_OBSERVATIONS} because the #333 cases
+ * below build `COMPLETED` events as their *clean* control document, and a clean
+ * `COMPLETED` event now has to satisfy the newer rule too or the case stops
+ * being about the field it names.
+ */
+const COMPLETION_OBSERVATIONS = {
+  replacementContractFingerprint: "7".repeat(64),
+  replacementManifestFingerprint: "8".repeat(64),
+  lockProvenance: "renegotiated under run-state lock, run 42",
+} as const;
+
+/** The keys of {@link COMPLETION_OBSERVATIONS}, for per-field rejection cases. */
+const COMPLETION_FIELDS = [
+  "replacementContractFingerprint",
+  "replacementManifestFingerprint",
+  "lockProvenance",
+] as const;
+
+function rollbackLineageEvent(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    attemptId: "attempt-333",
+    state: "PENDING",
+    target: { number: "4", ghIssue: ROLLBACK_ISSUE },
+    reason: "the accepted pair went stale",
+    extensions: [],
+    provider: "claude-code",
+    sliceBranch: "afk-claude-code/demo-slice-04",
+    sliceHead: "a".repeat(40),
+    featureHead: "b".repeat(40),
+    scopeFingerprint: "c".repeat(64),
+    snapshotPath: ".kiro/specs/demo/slices/04-x/recovery-snapshots/attempt-333",
+    contractFingerprint: "d".repeat(64),
+    manifestFingerprint: "e".repeat(64),
+    recordedAt: "2026-09-14T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+/** Load a lineage list the way `loadRunState` would, without touching disk. */
+function adaptLineage(events: Record<string, unknown>[]): RunState {
+  return adaptLoadedState(
+    {
+      version: 7,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      slices: {},
+      recoveryLineage: { [ROLLBACK_ISSUE]: events },
+    },
+    "demo",
+  );
+}
+
+describe("[behavior:#333:B-06] rollback-failure observations on a lineage event", () => {
+  it("[behavior:#333:B-06] round-trips a well-formed ROLLBACK_FAILED event through save/load", () => {
+    const repo = makeRepo();
+    saveRunState(repo, {
+      version: RUN_STATE_VERSION,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      slices: {},
+    });
+    const pending = rollbackLineageEvent() as unknown as PersistedRecoveryLineageEvent;
+    const failed = rollbackLineageEvent({
+      state: "ROLLBACK_FAILED",
+      ...ROLLBACK_OBSERVATIONS,
+    }) as unknown as PersistedRecoveryLineageEvent;
+
+    updateRunState(repo, "demo", (state) => {
+      appendRecoveryLineageEvent(state, ROLLBACK_ISSUE, pending);
+      appendRecoveryLineageEvent(state, ROLLBACK_ISSUE, failed);
+    });
+
+    // Purely additive: the field the events ride on is still v7's.
+    expect(RUN_STATE_VERSION).toBe(7);
+    const loaded = recoveryLineageFor(loadRunState(repo, "demo"), ROLLBACK_ISSUE);
+    expect(loaded).toEqual([pending, failed]);
+    // The `PENDING` half carries none of the three, and the loader invents none.
+    for (const field of ROLLBACK_FIELDS) {
+      expect(field in loaded[0]!).toBe(false);
+      expect(loaded[1]![field]).toBe(ROLLBACK_OBSERVATIONS[field]);
+    }
+  });
+
+  it.each(
+    ROLLBACK_FIELDS.flatMap((field) => [
+      [`${field} missing`, field, undefined] as const,
+      [`${field} present but blank`, field, "   "] as const,
+    ]),
+  )(
+    "[behavior:#333:B-06] rejects a ROLLBACK_FAILED event with %s",
+    (_label, field, value) => {
+      const complete = rollbackLineageEvent({
+        state: "ROLLBACK_FAILED",
+        ...ROLLBACK_OBSERVATIONS,
+      });
+      const broken = { ...complete };
+      if (value === undefined) delete broken[field];
+      else broken[field] = value;
+
+      expect(adaptLineage([broken]).recoveryLineage).toBeUndefined();
+      expect(
+        recoveryLineageFor(adaptLineage([broken]), ROLLBACK_ISSUE),
+      ).toEqual([]);
+      // The same document, corrected, loads: the rejection is about this field.
+      expect(
+        recoveryLineageFor(adaptLineage([complete]), ROLLBACK_ISSUE),
+      ).toEqual([complete]);
+    },
+  );
+
+  it.each([
+    ["PENDING", "rollbackError"],
+    ["ROLLED_BACK", "observedContractFingerprint"],
+    ["COMPLETED", "observedManifestFingerprint"],
+  ] as const)(
+    "[behavior:#333:B-06] rejects a %s event carrying %s",
+    (state, field) => {
+      const clean = rollbackLineageEvent({
+        state,
+        // #335 B-12 made the three completion members required on `COMPLETED`,
+        // so the control document for that state has to carry them.
+        ...(state === "COMPLETED" ? COMPLETION_OBSERVATIONS : {}),
+      });
+      const carrying = { ...clean, [field]: ROLLBACK_OBSERVATIONS[field] };
+
+      expect(adaptLineage([carrying]).recoveryLineage).toBeUndefined();
+      // Removing the offending field is the whole difference.
+      expect(recoveryLineageFor(adaptLineage([clean]), ROLLBACK_ISSUE)).toEqual([
+        clean,
+      ]);
+    },
+  );
+
+  it("[behavior:#333:B-06] drops the whole list when one event of several is malformed", () => {
+    const pending = rollbackLineageEvent();
+    const failed = rollbackLineageEvent({
+      state: "ROLLBACK_FAILED",
+      ...ROLLBACK_OBSERVATIONS,
+      rollbackError: "",
+    });
+
+    expect(adaptLineage([pending, failed]).recoveryLineage).toBeUndefined();
+    // Not "keep the good ones": a surviving PENDING would read as an open attempt.
+    expect(
+      recoveryLineageFor(adaptLineage([pending, failed]), ROLLBACK_ISSUE),
+    ).toEqual([]);
+  });
+});
+
+describe("[behavior:#333:P-04] the #277 lineage shape still loads unchanged", () => {
+  it("[behavior:#333:P-04] loads a PENDING-only #277 lineage field for field with the three new members absent", () => {
+    const pending = rollbackLineageEvent();
+
+    const loaded = recoveryLineageFor(adaptLineage([pending]), ROLLBACK_ISSUE);
+
+    expect(loaded).toEqual([pending]);
+    for (const [key, value] of Object.entries(pending)) {
+      expect(loaded[0]![key as keyof PersistedRecoveryLineageEvent]).toEqual(value);
+    }
+    expect(Object.keys(loaded[0]!).sort()).toEqual(Object.keys(pending).sort());
+  });
+
+  it("[behavior:#333:P-04] still degrades the whole list to absent on a pre-existing malformation", () => {
+    const missingProvider = rollbackLineageEvent();
+    delete missingProvider.provider;
+
+    expect(adaptLineage([missingProvider]).recoveryLineage).toBeUndefined();
+    expect(
+      adaptLineage([rollbackLineageEvent({ extensions: "none" })])
+        .recoveryLineage,
+    ).toBeUndefined();
+  });
+
+  it("[behavior:#333:P-04] rejects the newly-forbidden direction too, so the rule cannot ship half-enforced", () => {
+    const pendingCarrying = rollbackLineageEvent({
+      rollbackError: ROLLBACK_OBSERVATIONS.rollbackError,
+    });
+    const rolledBackCarrying = rollbackLineageEvent({
+      state: "ROLLED_BACK",
+      observedContractFingerprint:
+        ROLLBACK_OBSERVATIONS.observedContractFingerprint,
+    });
+
+    expect(adaptLineage([pendingCarrying]).recoveryLineage).toBeUndefined();
+    expect(adaptLineage([rolledBackCarrying]).recoveryLineage).toBeUndefined();
+    // And both load once the offending field is removed.
+    for (const clean of [
+      rollbackLineageEvent(),
+      rollbackLineageEvent({ state: "ROLLED_BACK" }),
+    ]) {
+      expect(recoveryLineageFor(adaptLineage([clean]), ROLLBACK_ISSUE)).toEqual([
+        clean,
+      ]);
+    }
+  });
+});
+
+/*
+ * ---------------------------------------------------------------------------
+ * Replacement fingerprints and lock provenance on a COMPLETED event (#335 B-12)
+ * ---------------------------------------------------------------------------
+ *
+ * #335 adds three more optional members — `replacementContractFingerprint`,
+ * `replacementManifestFingerprint`, `lockProvenance` — on exactly the
+ * {@link ROLLBACK_FAILURE_FIELDS} precedent: required non-blank on `COMPLETED`,
+ * required absent on every other state. That is another change to the validator's
+ * accepted input language, so ADR 0060 asks for both halves again: the newly
+ * accepted document round-trips through save/load field for field, and each
+ * newly rejected one degrades the target's whole list to absent. Purely additive,
+ * so {@link RUN_STATE_VERSION} stays 7 and no migration ships with it.
+ */
+describe("[behavior:#335:B-12] replacement fingerprints and lock provenance on a COMPLETED event", () => {
+  it("[behavior:#335:B-12] round-trips a well-formed COMPLETED event through save/load", () => {
+    const repo = makeRepo();
+    saveRunState(repo, {
+      version: RUN_STATE_VERSION,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      slices: {},
+    });
+    const pending = rollbackLineageEvent() as unknown as PersistedRecoveryLineageEvent;
+    const completed = rollbackLineageEvent({
+      state: "COMPLETED",
+      ...COMPLETION_OBSERVATIONS,
+    }) as unknown as PersistedRecoveryLineageEvent;
+
+    updateRunState(repo, "demo", (state) => {
+      appendRecoveryLineageEvent(state, ROLLBACK_ISSUE, pending);
+      appendRecoveryLineageEvent(state, ROLLBACK_ISSUE, completed);
+    });
+
+    // Additive on the v7 field the lineage already rides on: no version bump.
+    expect(RUN_STATE_VERSION).toBe(7);
+    const loaded = recoveryLineageFor(loadRunState(repo, "demo"), ROLLBACK_ISSUE);
+    expect(loaded).toEqual([pending, completed]);
+    for (const field of COMPLETION_FIELDS) {
+      // The `PENDING` half carries none of the three and the loader invents none.
+      expect(field in loaded[0]!).toBe(false);
+      expect(loaded[1]![field]).toBe(COMPLETION_OBSERVATIONS[field]);
+    }
+    // Every other member is copied forward untouched, key for key.
+    expect(Object.keys(loaded[1]!).sort()).toEqual(Object.keys(completed).sort());
+  });
+
+  it.each(
+    COMPLETION_FIELDS.flatMap((field) => [
+      [`${field} missing`, field, undefined] as const,
+      [`${field} present but blank`, field, "   "] as const,
+    ]),
+  )(
+    "[behavior:#335:B-12] rejects a COMPLETED event with %s",
+    (_label, field, value) => {
+      const complete = rollbackLineageEvent({
+        state: "COMPLETED",
+        ...COMPLETION_OBSERVATIONS,
+      });
+      const broken = { ...complete };
+      if (value === undefined) delete broken[field];
+      else broken[field] = value;
+
+      expect(adaptLineage([broken]).recoveryLineage).toBeUndefined();
+      expect(
+        recoveryLineageFor(adaptLineage([broken]), ROLLBACK_ISSUE),
+      ).toEqual([]);
+      // The same document, corrected, loads: the rejection is about this field.
+      expect(
+        recoveryLineageFor(adaptLineage([complete]), ROLLBACK_ISSUE),
+      ).toEqual([complete]);
+    },
+  );
+
+  it.each(
+    (["PENDING", "ROLLED_BACK"] as const).flatMap((state) =>
+      COMPLETION_FIELDS.map((field) => [state, field] as const),
+    ),
+  )(
+    "[behavior:#335:B-12] rejects a %s event carrying %s",
+    (state, field) => {
+      const clean = rollbackLineageEvent({ state });
+      const carrying = { ...clean, [field]: COMPLETION_OBSERVATIONS[field] };
+
+      expect(adaptLineage([carrying]).recoveryLineage).toBeUndefined();
+      // Removing the offending field is the whole difference.
+      expect(recoveryLineageFor(adaptLineage([clean]), ROLLBACK_ISSUE)).toEqual([
+        clean,
+      ]);
+    },
+  );
+
+  it("[behavior:#335:B-12] rejects a ROLLBACK_FAILED event carrying a completion member", () => {
+    const clean = rollbackLineageEvent({
+      state: "ROLLBACK_FAILED",
+      ...ROLLBACK_OBSERVATIONS,
+    });
+    const carrying = {
+      ...clean,
+      lockProvenance: COMPLETION_OBSERVATIONS.lockProvenance,
+    };
+
+    expect(adaptLineage([carrying]).recoveryLineage).toBeUndefined();
+    expect(recoveryLineageFor(adaptLineage([clean]), ROLLBACK_ISSUE)).toEqual([
+      clean,
+    ]);
+  });
+
+  it("[behavior:#335:B-12] rejects a COMPLETED event carrying a rollback-failure member", () => {
+    const clean = rollbackLineageEvent({
+      state: "COMPLETED",
+      ...COMPLETION_OBSERVATIONS,
+    });
+    const carrying = {
+      ...clean,
+      rollbackError: ROLLBACK_OBSERVATIONS.rollbackError,
+    };
+
+    // The two per-state rules are independent gates, not one shared branch.
+    expect(adaptLineage([carrying]).recoveryLineage).toBeUndefined();
+    expect(recoveryLineageFor(adaptLineage([clean]), ROLLBACK_ISSUE)).toEqual([
+      clean,
+    ]);
+  });
+
+  it("[behavior:#335:B-12] drops the whole list when the trailing COMPLETED event is malformed", () => {
+    const pending = rollbackLineageEvent();
+    const completed = rollbackLineageEvent({
+      state: "COMPLETED",
+      ...COMPLETION_OBSERVATIONS,
+      replacementManifestFingerprint: "",
+    });
+
+    expect(adaptLineage([pending, completed]).recoveryLineage).toBeUndefined();
+    // Not "keep the good ones": a surviving PENDING would read as an open attempt.
+    expect(
+      recoveryLineageFor(adaptLineage([pending, completed]), ROLLBACK_ISSUE),
+    ).toEqual([]);
+  });
+
+  it("[behavior:#335:B-12] ships no schema step: v7 stays v7 and no migration is added", () => {
+    expect(RUN_STATE_VERSION).toBe(7);
+    // A v7 document written before #335 has none of the three and still loads.
+    const legacy = rollbackLineageEvent();
+    expect(
+      recoveryLineageFor(adaptLineage([legacy]), ROLLBACK_ISSUE),
+    ).toEqual([legacy]);
+    // migrationCount 0: additive fields on an existing v7 field need no
+    // migration, and this repo has no migrations directory to add one to.
+    expect(existsSync(join("supabase", "migrations"))).toBe(false);
+  });
+});
+
+/*
+ * ---------------------------------------------------------------------------
+ * Scope extensions on a lineage event (#278 B-04)
+ * ---------------------------------------------------------------------------
+ *
+ * `extensions` was reserved by #277 as a bare-selector list that every writer
+ * left empty. #278 gives it the only shape a later reader can use without
+ * re-resolving anything: `{number, ghIssue}` pairs, the same identity `target`
+ * carries. That narrows the validator's accepted input language, so ADR 0060
+ * asks for both halves — the newly accepted document round-trips, and each
+ * newly rejected one degrades the target's whole list to absent. Additive on an
+ * existing v7 field, so `RUN_STATE_VERSION` stays 7 and no migration ships.
+ */
+const EXTENSION_PAIRS = [
+  { number: "02", ghIssue: "278" },
+  { number: "03", ghIssue: "279" },
+] as const;
+
+describe("[behavior:#278:B-04] scope extensions on a lineage event", () => {
+  it("[behavior:#278:B-04] round-trips an event carrying a pair set through save/load", () => {
+    const repo = makeRepo();
+    saveRunState(repo, {
+      version: RUN_STATE_VERSION,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      slices: {},
+    });
+    const pending = rollbackLineageEvent({
+      extensions: EXTENSION_PAIRS.map((pair) => ({ ...pair })),
+    }) as unknown as PersistedRecoveryLineageEvent;
+
+    updateRunState(repo, "demo", (state) => {
+      appendRecoveryLineageEvent(state, ROLLBACK_ISSUE, pending);
+    });
+
+    const loaded = recoveryLineageFor(loadRunState(repo, "demo"), ROLLBACK_ISSUE);
+    expect(loaded).toEqual([pending]);
+    // Pairs, not selectors: the member order the writer chose survives, and
+    // each member is exactly the two keys `PersistedScopeSlice` declares.
+    expect(loaded[0]!.extensions).toEqual([
+      { number: "02", ghIssue: "278" },
+      { number: "03", ghIssue: "279" },
+    ]);
+    for (const extension of loaded[0]!.extensions) {
+      expect(Object.keys(extension).sort()).toEqual(["ghIssue", "number"]);
+    }
+  });
+
+  it("[behavior:#278:B-04] types the member as the persisted scope identity", () => {
+    // A type-level fact, checked by `pnpm run typecheck`: the member a scope
+    // append consumes and the member a lineage event records are one shape, so
+    // neither side can drift into a bare selector without a compile error.
+    const pairs: PersistedScopeSlice[] = [...EXTENSION_PAIRS];
+    const event: PersistedRecoveryLineageEvent = {
+      ...(rollbackLineageEvent() as unknown as PersistedRecoveryLineageEvent),
+      extensions: pairs,
+    };
+
+    expect(event.extensions).toBe(pairs);
+    expect(
+      recoveryLineageFor(
+        adaptLineage([{ ...event } as unknown as Record<string, unknown>]),
+        ROLLBACK_ISSUE,
+      ),
+    ).toEqual([event]);
+  });
+
+  it.each([
+    ["a bare selector string", ["02"]],
+    ["a mix of a pair and a selector", [{ number: "02", ghIssue: "278" }, "03"]],
+    ["a pair with a blank number", [{ number: "  ", ghIssue: "278" }]],
+    ["a pair with a blank issue id", [{ number: "02", ghIssue: "" }]],
+    ["a pair missing its issue id", [{ number: "02" }]],
+    ["a null member", [null]],
+    ["a nested array member", [["02", "278"]]],
+    ["a non-array set", "none"],
+  ])(
+    "[behavior:#278:B-04] drops an event whose extensions hold %s",
+    (_label, extensions) => {
+      const broken = rollbackLineageEvent({ extensions });
+
+      expect(adaptLineage([broken]).recoveryLineage).toBeUndefined();
+      expect(recoveryLineageFor(adaptLineage([broken]), ROLLBACK_ISSUE)).toEqual(
+        [],
+      );
+      // The same document with a well-formed set loads: the rejection is about
+      // the extension shape and nothing else in the event.
+      const fixed = rollbackLineageEvent({
+        extensions: [{ number: "02", ghIssue: "278" }],
+      });
+      expect(recoveryLineageFor(adaptLineage([fixed]), ROLLBACK_ISSUE)).toEqual([
+        fixed,
+      ]);
+    },
+  );
+
+  it("[behavior:#278:B-04] drops the whole list when one event of several carries a bad set", () => {
+    const pending = rollbackLineageEvent();
+    const completed = rollbackLineageEvent({
+      state: "COMPLETED",
+      ...COMPLETION_OBSERVATIONS,
+      extensions: ["02"],
+    });
+
+    // Not "keep the good ones": a surviving PENDING would read as an open
+    // attempt, and a half-read set loses an identity this run admitted.
+    expect(adaptLineage([pending, completed]).recoveryLineage).toBeUndefined();
+    expect(
+      recoveryLineageFor(adaptLineage([pending, completed]), ROLLBACK_ISSUE),
+    ).toEqual([]);
+  });
+
+  it("[behavior:#278:P-05] keeps v7 loading with every event intact and adds no migration", () => {
+    expect(RUN_STATE_VERSION).toBe(7);
+    const assignable: RunState["version"][] = [3, 4, 5, 6, 7];
+    expect(assignable).toContain(RUN_STATE_VERSION);
+
+    // Every writer that could have produced a v7 file before #278 emitted the
+    // literal `[]`, which is a valid pair array — so no document on disk needs
+    // rewriting and the pre-#278 lineage loads event for event.
+    const pending = rollbackLineageEvent({ extensions: [] });
+    const rolledBack = rollbackLineageEvent({
+      state: "ROLLED_BACK",
+      extensions: [],
+    });
+    const loaded = recoveryLineageFor(
+      adaptLineage([pending, rolledBack]),
+      ROLLBACK_ISSUE,
+    );
+    expect(loaded).toEqual([pending, rolledBack]);
+    expect(loaded.map((event) => event.extensions)).toEqual([[], []]);
+    expect(existsSync(join("supabase", "migrations"))).toBe(false);
+  });
+
+  it("[behavior:#278:P-05] leaves appendRecoveryLineageEvent append-only and state-taking", () => {
+    const state: RunState = {
+      version: RUN_STATE_VERSION,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      slices: {},
+    };
+    const first = rollbackLineageEvent({
+      extensions: [{ number: "02", ghIssue: "278" }],
+    }) as unknown as PersistedRecoveryLineageEvent;
+    const second = rollbackLineageEvent({
+      state: "COMPLETED",
+      ...COMPLETION_OBSERVATIONS,
+      extensions: [{ number: "02", ghIssue: "278" }],
+    }) as unknown as PersistedRecoveryLineageEvent;
+
+    appendRecoveryLineageEvent(state, ROLLBACK_ISSUE, first);
+    appendRecoveryLineageEvent(state, ROLLBACK_ISSUE, second);
+
+    // Two records citing the same field, in order, with the earlier one
+    // untouched: widening the member changed no part of how it is appended.
+    expect(recoveryLineageFor(state, ROLLBACK_ISSUE)).toEqual([first, second]);
+    expect(recoveryLineageFor(state, ROLLBACK_ISSUE)[0]).toEqual(first);
   });
 });

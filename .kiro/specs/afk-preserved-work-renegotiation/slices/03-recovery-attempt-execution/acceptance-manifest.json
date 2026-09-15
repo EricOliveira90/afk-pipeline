@@ -1,0 +1,189 @@
+{
+  "version": 2,
+  "fileScope": {
+    "kind": "paths",
+    "paths": [
+      "src/preserve-work-recovery.ts",
+      "src/preserve-work-recovery.test.ts",
+      "src/resume-integration.fixtures.ts",
+      "src/resume-integration.test.ts",
+      "architecture.md"
+    ]
+  },
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "GH #332 AC1",
+      "given": "run state whose recovery lineage for the target is absent, or ends on a terminal event rather than a committed PENDING one",
+      "when": "the new execution entry point exported from src/preserve-work-recovery.ts is called for that target",
+      "then": "it refuses with a stable RecoveryRefusalCode member added by this slice and performs no write",
+      "observableResult": "the refusal code is returned, and every byte under the target's slice directory plus the whole run-state file are identical to before the call",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-02",
+      "source": "GH #332 AC2 (prd.md:160-165; src/preserve-work-recovery.ts:76, :472-476, :478-548)",
+      "given": "a committed `PENDING` event for the target and a slice directory holding all six live negotiation file kinds — `context.md`, `contract-review.json`, `contract-response.json`, `contract-negotiation-outcome.json`, `planner-escalation.md`, `feedback-r1.md` and `feedback-r2.md` — plus, in a second case, an injected failure at the exported verification seam",
+      "when": "execution runs",
+      "then": "the present files are byte-copied into `recovery-snapshots/<attemptId>/negotiation/` beneath the attempt's already-published snapshot directory (`RECOVERY_SNAPSHOT_DIRNAME`), the copy is byte-verified by re-reading it and published atomically through a temporary sibling plus one `renameSync` following `publishAcceptedPairSnapshot`, and no live file is deleted before that publication succeeds; on the seam-driven failure nothing is deleted and no partial history directory exists. The slice reuses the attempt's one immutable directory identity keyed by `attemptId` rather than inventing a second locator, and narrows `publishAcceptedPairSnapshot`'s docstring invariant (`:472-476`) from the published directory to the published pair files, leaving the `snapshot-already-published` refusal at `:495-501`, its code and its message unchanged",
+      "observableResult": "unit tests named for B-02 assert each copied file's bytes equal the pre-execution live bytes, assert the publication used the temporary-sibling path (no `.<attemptId>.partial` remains), and on the failure case assert every live file still exists with its original bytes and `recovery-snapshots/<attemptId>/negotiation/` is absent; a test also asserts the `snapshot-already-published` refusal code and message are unchanged",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-03",
+      "source": "GH #332 AC3",
+      "given": "a slice directory where only some of the six named negotiation file kinds are present, alongside other files",
+      "when": "execution runs",
+      "then": "exactly the files copied in B-02 are deleted from the live slice directory, absent kinds are skipped without error, and every feedback-r<N>.md round present is included",
+      "observableResult": "after execution the copied paths no longer exist live, every other live path still exists, and execution reports the kinds it moved",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-04",
+      "source": "GH #332 AC4 (prd.md:164-165, :171-175)",
+      "given": "a slice directory additionally holding a `reviews/` subdirectory with contents, a QA report, an implementation artifact, and the published `contract.md` / `acceptance-manifest.json` inside `recovery-snapshots/<attemptId>/`",
+      "when": "execution runs",
+      "then": "the `reviews/` contents, every implementation and QA artifact, and the two published pair files stay byte-identical",
+      "observableResult": "a unit test named for B-04 digests each of those paths before and after execution and asserts equality, including both published pair files",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-05",
+      "source": "GH #332 AC5 (prd.md:166-175; src/exact-stage-resume.ts:14-16, :20-26, :67-109, :179; src/contract-convergence.ts:78, :609; src/run-state.ts:1567)",
+      "given": "run state where `state.stageCheckpoints[<target ghIssue>]` is `{ version: 1, completedStage: \"deterministic-qa\", candidateTreeId: <40-hex>, nextPendingStage: \"post-qa-deterministic\", round: 1 }` — the only checkpoint shape this repository can hold, and a value `parseCheckpoint` accepts — plus a second slice's checkpoint entry and a non-empty contract-convergence lineage for both slices",
+      "when": "execution runs",
+      "then": "exactly two entries for the target are cleared and nothing else: its `stageCheckpoints` key, whatever the entry's `completedStage` value, and its `contractConvergence` entry — each through a thin wrapper in `src/preserve-work-recovery.ts` over `clearExactStageCheckpoint` and over `saveContractFindingLineage` with `emptyContractFindingLineage()`; neither owning module is modified and `clearSliceStateForDispatch` is not called. `prd.md:171-175` decides the reading: a live exact-stage checkpoint would let the next attempt bypass the required fresh explorer and negotiation, so the post-QA-stage entry is deliberately dropped",
+      "observableResult": "a unit test named for B-05 asserts `<target ghIssue>` is absent from `state.stageCheckpoints` after execution while the second slice's entry is byte-identical, asserts `loadContractFindingLineage` for the target equals `emptyContractFindingLineage()` while the second slice's lineage is unchanged, and asserts by module-level spy or import shape that `src/exact-stage-resume.ts` and `src/contract-convergence.ts` are unmodified and `clearSliceStateForDispatch` is never invoked",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-06",
+      "source": "GH #332 AC6 (prd.md:166-175)",
+      "given": "run state built on the existing resume/negotiation fixture in `src/resume-integration.fixtures.ts`, extended rather than replaced, carrying resume counters and attempts, a slice outcome, migration claims, guardian history, `scope`, `reviewPhase`, the recovery lineage, the B-05 checkpoint for the target and a second slice's checkpoint and lineage",
+      "when": "execution runs",
+      "then": "every one of those facts is unchanged, with exactly one named exception that B-05 drops: the target's own `stageCheckpoints[ghIssue]` post-QA-stage resume checkpoint. \"Implementation and QA state unchanged\" therefore means the target's implementation and QA artifacts, its `slices[ghIssue]` record, its round and attempt counters, its worktree and its branch — not its exact-stage resume checkpoint; nothing else under `stageCheckpoints` and no other QA-related field changes",
+      "observableResult": "a unit test named for B-06 diffs the loaded run state before and after and asserts the only differing paths are `stageCheckpoints[<target ghIssue>]` and `contractConvergence[<target ghIssue>]`, and asserts field by field that the counters, outcome, migration claims, guardian history, `scope`, `reviewPhase`, lineage and the target's `slices[ghIssue]` record are equal",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-07",
+      "source": "GH #332 AC7 (prd.md:153-158, :166-175; src/exact-stage-resume.ts:133-176, :147-152; src/contract-convergence.ts:561)",
+      "given": "the B-05 seeded state, with `currentCandidateTreeId` equal to the seeded `candidateTreeId`",
+      "when": "`inspectExactStageCheckpoint` with `expectedCompletedStage: \"deterministic-qa\"` and `loadContractFindingLineage` are called for the target both before and after execution",
+      "then": "before execution they return `action: \"resume\"` carrying that checkpoint and the seeded non-empty lineage; after execution they return `action: \"reevaluate\"` with reason \"no exact-stage checkpoint was recorded for this slice\" and an empty lineage — so exact-stage resume can return no resume decision for the target and the ordinary path runs explorer fact collection and then the planner/evaluator negotiation, which this slice delivers the starting state for rather than dispatching",
+      "observableResult": "a unit test named for B-07 asserts the pre-execution `action: \"resume\"` and the non-empty lineage it is measured against, then asserts the post-execution `action`, the exact `reason` string and the empty lineage — so the assertion cannot pass vacuously on a target that never had a checkpoint",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-08",
+      "source": "GH #332 AC8; ADR 0039",
+      "given": "a preserved worktree at the recorded slice branch with commits ahead of the feature branch",
+      "when": "execution runs",
+      "then": "no path invokes a git merge, reset or rebase, and the worktree, branch tips, commits and round counters are unchanged",
+      "observableResult": "slice and feature branch tips resolve to the same commits, the worktree reports clean, implementation-round and resume-attempt counts are unchanged, and no merge/reset/rebase invocation is observed",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-09",
+      "source": "GH #332 AC10; prd.md \"Delivery slices\"",
+      "given": "a committed PENDING lineage event for the target",
+      "when": "execution completes successfully",
+      "then": "no lineage event of any state is appended and the lineage still ends on that same PENDING event",
+      "observableResult": "the target's recovery lineage array is deep-equal to its pre-execution value, containing no COMPLETED, ROLLED_BACK or ROLLBACK_FAILED event",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-01",
+      "source": "prd.md Admission Protocol step 5; #277",
+      "given": "an eligible stale-pair recovery request",
+      "when": "admitStaleRenegotiation runs",
+      "then": "it still appends exactly one PENDING event as its only mutation, with its existing sequence, refusal codes and test seams unchanged",
+      "observableResult": "the existing #277 admission tests in src/preserve-work-recovery.test.ts pass unmodified in behavior",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-02",
+      "source": "GH #332 AC10 (prd.md \"Until #335 merges\"; src/cli-options.ts:393-399)",
+      "given": "a well-formed `--renegotiate-stale` / `--recovery-reason` pair, and `parseStaleRenegotiationRequest`'s refused inputs",
+      "when": "`parsePipelineRuntimeOptions` — the one shared parse path all three entry points use — parses them after this slice merges",
+      "then": "the parse throws the existing #335 refusal and `parseStaleRenegotiationRequest`'s validation messages are unchanged",
+      "observableResult": "a test named for P-02 in `src/preserve-work-recovery.test.ts` (in this slice's file scope), importing `parsePipelineRuntimeOptions` and `parseStaleRenegotiationRequest` from `src/cli-options.js`, asserts the thrown refusal names #335 and asserts the validation message strings; `src/cli-options.test.ts` stays unmodified and out of scope, so #277's pin at `src/cli-options.test.ts:458` is untouched",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-03",
+      "source": "GH #332 AC5",
+      "given": "the existing callers of the two focused run-state clear APIs, including runPendingDeterministicStage",
+      "when": "the touched suites run",
+      "then": "clearExactStageCheckpoint and saveContractFindingLineage keep their current signatures and semantics",
+      "observableResult": "src/exact-stage-resume.ts and src/contract-convergence.ts are unmodified and their existing tests pass",
+      "preservation": true,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-04",
+      "source": "GH #332 AC9; ADR 0008; ADR 0055",
+      "given": "a target holding a valid LOCKED accepted pair",
+      "when": "execution runs",
+      "then": "no byte of the live contract.md or acceptance-manifest.json changes and no second accepted-pair validation, lock gate or lock-provenance path is introduced",
+      "observableResult": "the live pair is byte-identical after execution and no new writer of \"**Status:** LOCKED\" or duplicate pair validator exists in src/preserve-work-recovery.ts",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    }
+  ]
+}

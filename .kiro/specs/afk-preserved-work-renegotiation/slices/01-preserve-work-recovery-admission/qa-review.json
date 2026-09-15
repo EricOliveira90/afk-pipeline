@@ -1,0 +1,34 @@
+{
+  "version": 2,
+  "verdict": "PASS",
+  "failureClass": "NONE",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-01",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-08", "B-09"],
+      "summary": "admitStaleRenegotiation defaults runSlug to prdSlug, which is the kiro-only run-state filename, while the same call derives provider-qualified branch and worktree names — a caller that omits runSlug for any other provider reads and writes the wrong run-state file.",
+      "evidence": "src/preserve-work-recovery.ts:621 `const runSlug = args.runSlug ?? args.prdSlug;` feeds loadRunState/transactRunState, whose statePath is `.afk/state/<slug>.json` (src/run-state.ts:594-596). Real runs key that file by run slug: src/orchestrator.ts:738 `return runSlugForProviderName(prdSlug, provider.name);` and :2188-2191 `const runSlug = pipelineRunSlug(...); loadRunState(repoRoot, runSlug)`, i.e. `<prdSlug>-claude-code` for every non-kiro provider (src/run-identity.ts:23-28). The same call already provider-qualifies the branch (`featureBranchForProviderName`) and worktree (`sliceWorktreeDirForProviderName`) at src/preserve-work-recovery.ts:383-392. The fixture cements the mismatch rather than exposing it: src/preserve-work-recovery.test.ts:61 uses PROVIDER = \"claude-code\" yet writes state at `${PRD_SLUG}.json` (:206), so every green admission test runs the pairing a real launch never produces.",
+      "expected": "One admission call resolves every run-scoped identity through src/run-identity.ts, so the run-state file it locks is the same file the run's own writers lock (B-08's ADR 0056 recheck and B-09's append are both against that file).",
+      "observed": "The default run-state slug is provider-unqualified. With provider \"claude-code\" and no explicit runSlug, admission would load an absent `.afk/state/<prdSlug>.json`, refuse with `scope-absent`, or — if such a file existed — append the PENDING event beside the real run's state instead of into it. No shipped entry point can reach this today, because parsePipelineRuntimeOptions refuses every well-formed request until #335 (B-12), so the defect is latent.",
+      "clearCondition": "With a non-kiro provider name and no explicit runSlug argument, admission reads and appends to the same run-state file the run's own writers use (the run-identity-derived slug), and a test exercises that provider-qualified pairing rather than a fixture whose provider and state filename disagree.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-02",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-05"],
+      "summary": "Worktree registration is inferred from the presence of a `.git` file in the expected directory, so a survivor directory git no longer tracks reads as registered and admission proceeds.",
+      "evidence": "src/preserve-work-recovery.ts:397 `if (!existsSync(worktreeDir) || !existsSync(join(worktreeDir, \".git\")))` is the whole `worktree-unregistered` check, and the comment at :393-396 explains registration is read off the filesystem to keep eligibility's git surface at the three predicates P-05 pins. The fixture supplies exactly that shape by hand — src/preserve-work-recovery.test.ts:167-169 writes a `.git` file containing `gitdir: ...` into a plain directory and every eligible case passes — so no test distinguishes a real linked worktree from a leftover directory. This repo already treats worktree survivors as a live condition (`formatWorktreeSurvivorWarning`, src/git.ts:469-472).",
+      "expected": "B-05: the target \"has a recorded slice branch and a registered worktree at it\" — registration being what git records, per the contract's phrasing.",
+      "observed": "Any directory containing a `.git` entry at the derived path satisfies the check, including a worktree whose removal failed and which git no longer lists; admission can then record a PENDING attempt against a worktree git does not track.",
+      "clearCondition": "A directory that carries a `.git` entry but is not a worktree git tracks is refused with `worktree-unregistered`, and a test covers that case alongside the missing-directory case.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "version": 2,
+  "verdict": "PASS",
+  "failureClass": "NONE",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-01",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-02", "B-07", "B-08"],
+      "summary": "The completion revalidation re-derived its selectors from each addition's ghIssue instead of revalidating the stored identity, refusing a validly admitted set with extension-identity-conflict.",
+      "evidence": "Resolved. `resolveScopeExtensions` now takes `ScopeExtensionMember = string | PersistedScopeSlice` (src/preserve-work-recovery.ts:323), and `matchScopeExtensionMember` (:504-521) matches a stored pair on BOTH halves (`canonicalSliceNumber(slice.number) === wanted && slice.ghIssue === member.ghIssue`) while a typed selector still matches on either half. The completion hands the stored pairs back whole: `const additions = current.extensions;` then `selectors: additions` (:2442-2448). Regression test: src/preserve-work-recovery.test.ts:4669 `[behavior:#278:B-08] completes an addition whose issue id is another slice's number`, over COLLIDING_SLICES = EXTENSION_SLICES + declaredSlice(\"15\", \"9\") (:4138-4144) — slice 15's issue id `9` is also declared slice `09`'s canonical number, so a ghIssue-derived selector would match two slices. Probe proving the test can fail: I changed :2444 to `selectors: additions.map((entry) => entry.ghIssue)` and ran `pnpm vitest run src/preserve-work-recovery.test.ts -t \"completes an addition whose issue id is another slice's number\"` — `Expected completed: true / Received completed: false` at test line 4687, `Test Files 1 failed`. Restoring the line via `git checkout -- src/preserve-work-recovery.ts` returns it to green. The other half of the clear condition holds: the REVALIDATION_CASES table (:4589-4666) drives all three genuine-drift causes — deleted from issues.md (`extension-slice-unknown`), disallowed by afk.json (`extension-outside-manifest`), and already present in persisted scope — and each asserts `code: \"facts-changed-before-lock\"`, `failure.trigger === \"completion-cas-lost\"`, a trailing event list of `[\"PENDING\", \"ROLLED_BACK\"]` and an unchanged `scope`; :4700 adds the deleted-addition case for the colliding fixture itself. Full probe run of the four in-scope test files: 407 passed, 4 files passed, exit 0.",
+      "expected": "An admit-then-complete case whose addition's ghIssue equals another declared slice's number completes: trailing event COMPLETED, persisted scope holding the admitted identity appended after the existing entries, no ROLLED_BACK event — while genuine drift still ends through rollBackRecoveryAttempt with facts-changed-before-lock and completion-cas-lost.",
+      "observed": "Exactly that. The colliding addition {number:\"15\", ghIssue:\"9\"} completes with events [PENDING, COMPLETED] and scope widened to widenedScope(ADDITION_COLLIDING); the three drift causes still roll back with the required code and trigger and a byte-identical scope.",
+      "clearCondition": "An admit-then-complete case in which one addition's `ghIssue` equals a different declared slice's slice number completes: the trailing event is `COMPLETED`, persisted scope holds the admitted identity appended after the existing entries, and no `ROLLED_BACK` event is written — while an addition genuinely deleted from `issues.md`, disallowed by `afk.json`, or already present in persisted scope still ends through `rollBackRecoveryAttempt` with `facts-changed-before-lock` and `completion-cas-lost`.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-02",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-07"],
+      "summary": "The completion's absent-scope refusal was untested and reported a cause it had not observed.",
+      "evidence": "Resolved both ways the clear condition allows. The branch now names the cause it actually observed: `locked.scope === undefined ? \"no persisted slice scope for the additions to widen\"` (src/preserve-work-recovery.ts:2463-2464), separate from `identityDrift(...)`, and the comment at :2449-2456 argues why the guard is kept fail-closed rather than removed ('unreachable through this module's own admission, which refuses `scope-absent` before any attempt exists ... the alternative is publishing a COMPLETED event whose additions silently reached no scope'). The test exists: src/preserve-work-recovery.test.ts:4735 `[behavior:#278:B-07] names the absent scope, not identity drift, when there is none to widen` plants the state (deletes `document.scope`, rewrites every lineage event's `scopeFingerprint` to RECOVERY_FINGERPRINT_ABSENT so the earlier fingerprint recheck passes and the absent-scope branch is genuinely reached), then asserts `code: \"facts-changed-before-lock\"`, `failure.trigger === \"completion-cas-lost\"`, `message` contains 'no persisted slice scope for the additions to widen', `message` does NOT contain 'a different identity set', events `[\"PENDING\", \"ROLLED_BACK\"]`, and `scope` still undefined. It passes in the probe run above.",
+      "expected": "A completion whose run state carries additions but no state.scope has a test asserting its ending and a message naming the absent scope as the cause.",
+      "observed": "Both: a dedicated test asserting the ending and the message, plus a message that names the absent scope and explicitly excludes the identity-drift wording, with the unreachability argued in a comment at the guard.",
+      "clearCondition": "A completion whose run state carries additions but no `state.scope` either has a test asserting its ending and a message that names the absent scope as the cause, or the branch is removed because the path is unreachable and that unreachability is argued where the guard was.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-03",
+      "severity": "ADVISORY",
+      "behaviorIds": [],
+      "summary": "Three of the four test files this slice touched had lost their trailing newline.",
+      "evidence": "Resolved. `git diff 29cc87f HEAD -- src/ | Select-String 'No newline at end of file'` returns no output at all, for any of the eight changed files. The two commits' diff over src/cli-options.test.ts, src/run-state.test.ts and src/slice-scope.test.ts now shows +211/+161/+162 pure additions with no `\\ No newline` marker.",
+      "expected": "src/cli-options.test.ts, src/run-state.test.ts and src/slice-scope.test.ts each end with a trailing newline and git diff prints no marker for them.",
+      "observed": "No `\\ No newline at end of file` marker appears anywhere in the slice's src diff.",
+      "clearCondition": "`src/cli-options.test.ts`, `src/run-state.test.ts` and `src/slice-scope.test.ts` each end with a trailing newline and `git diff` prints no `\\ No newline at end of file` marker for them.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-04",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-08"],
+      "summary": "The one canonical order for an extension identity set is implemented twice, once per module, and the two implementations disagree on non-digit inputs.",
+      "evidence": "`compareScopeExtension` (src/preserve-work-recovery.ts:529-535, over `compareGhIssue` at :2728-2735) and `compareScopeIdentity` (src/slice-scope.ts, over `compareIdPart`) both document themselves as the canonical order for the same `{number, ghIssue}` set — the first as 'The one order the set is stored, compared and appended in, so the PENDING record, B-09's replay comparison and the persisted scope all read the same way', the second as 'Canonical ordering for a scope identity set ... (#278 B-08)'. Their numeric tests differ: `compareGhIssue` uses `Number.isInteger(Number(x))`, so `\"\"`, `\" 9\"` and `\"9.0\"` compare numerically; `compareIdPart` uses `/^\\d+$/`, so the same values fall through to a string comparison. They agree on every digits-only input, which is all the parser (B-01's digits-only rule) and `sanitizeRecoveryLineage`'s non-blank pair rule can currently produce, so no shipped path orders a set two ways today. This is a maintainability note, not a live defect: the divergence is latent behind two validators, and no test pins the two comparators to each other. The same module warns against exactly this shape at src/preserve-work-recovery.ts:358-361 — 'a second differently-shaped normalization of one identity is how two callers come to disagree about which slice was named'.",
+      "expected": "One canonical ordering for an extension identity set, defined once, so the order the PENDING record stores, the order B-09 compares and the order appendScopeExtensions appends cannot drift apart.",
+      "observed": "Two comparators, one per module, each claiming to be that order, with differing numeric-detection rules that agree only for digits-only inputs.",
+      "clearCondition": "The canonical order for a `{number, ghIssue}` set has one implementation that both `src/preserve-work-recovery.ts` and `src/slice-scope.ts` call, or the second implementation carries a comment saying why a separate one is required and a test pins the two to the same order for the inputs where their numeric rules differ.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    }
+  ]
+}

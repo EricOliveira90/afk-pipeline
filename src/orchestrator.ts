@@ -149,6 +149,10 @@ import {
 } from "./feedback-integrity-gate.js";
 import { loadGatePolicy, type GatePolicy } from "./gate-policy.js";
 import {
+  describeRecoveryReconciliation,
+  reconcileRecoveryLineage,
+} from "./preserve-work-recovery.js";
+import {
   authorizeBaseGateSkip,
   formatBaseGateSkipAuthorization,
   type BaseGateSkipAuthorization,
@@ -8495,6 +8499,48 @@ export async function runPipeline(
   };
 
   try {
+  // --- Unresolved recovery attempts, before anything else in the run (#334).
+  //
+  // A process that admitted a `PENDING` renegotiation and then died left the
+  // target's accepted pair reopened with nobody intending to finish it. Every
+  // decision below — the manifest scope check, the `resolveRunScope` write,
+  // resume, dispatch — would be made against a pair no one accepted, so the
+  // first thing this launch establishes is that no target is in that state.
+  //
+  // Because #277's entry-point refusal of `--renegotiate-stale` is still in
+  // force, no reachable launch carries an exact recovery request; a launch that
+  // reconciled anything therefore has nothing to *do* with the result, and
+  // stops. Reporting it and running on would dispatch agents against artifacts
+  // that changed underneath the operator's own command.
+  const reconciled = reconcileRecoveryLineage({
+    repoRoot,
+    prdSlug,
+    runSlug: loggerSlug,
+  });
+  if (reconciled.length > 0) {
+    for (const outcome of reconciled) {
+      logger.phase(`[afk] ${describeRecoveryReconciliation(outcome)}`, "error");
+    }
+    const failureReason =
+      `Launch stopped after reconciling ${reconciled.length} unresolved recovery ` +
+      `attempt(s): ` +
+      reconciled
+        .map(
+          (outcome) =>
+            `#${outcome.ghIssue} (${
+              outcome.appended === "none" ? "nothing appended" : outcome.appended
+            })`,
+        )
+        .join(", ") +
+      `. No slice was dispatched; run.log names the retry each target needs.`;
+    logger.event({ type: "run-ended", outcome: "FAILED" });
+    return {
+      success: false,
+      summary: logger.writeSummary(),
+      consoleSummary: logger.formatConsoleSummary(),
+      failureReason,
+    };
+  }
   const requestedSliceNumbers =
     config.selectedSliceNumbers ?? config.manifest?.selectedSlices;
   if (config.manifest && requestedSliceNumbers) {
