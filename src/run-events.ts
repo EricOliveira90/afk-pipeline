@@ -459,6 +459,42 @@ export type RunEventPayload =
       /** The subset of `gateIds` served from the gate cache (D17's `reused`). */
       cacheReusedGateIds: string[];
     }
+  | {
+      /**
+       * What a later guardian round made of one issue the ship gate had already
+       * filed (#320). One event per filed identity per reconciliation pass, in
+       * the past tense: `action` is what happened to the issue, not what was
+       * decided — a decision whose `gh` call failed is `FAILED`, and the issue
+       * is still exactly as the previous pass left it.
+       *
+       * The one stream both readers read: `run-summary.md`'s
+       * `## Guardian Finding Issues` section and `handoff.json`'s
+       * `unresolvedGuardianIssues` are projections of these events, so a
+       * dashboard counting open defects and an operator reading the summary
+       * cannot disagree. Additive, so `EVENTS_SCHEMA_VERSION` stays 1 — the same
+       * way `quality-stage-policy` arrived.
+       */
+      type: "guardian-issue-reconciliation";
+      guardian: "architect" | "pm";
+      /** The ledger identity the issue was filed under. */
+      stableId: string;
+      /** Whatever the tracker returned to name the issue, usually a URL. */
+      issue: string;
+      kind: "BLOCKER" | "NOTE";
+      /** The ledger round whose evidence the decision read. */
+      round: number;
+      action:
+        | "UPDATED"
+        | "CLOSED"
+        | "REOPENED"
+        | "REFUSED"
+        | "UNCHANGED"
+        | "FAILED";
+      /** Machine-readable refusal cause (`FindingIssueRefusal`); `REFUSED` only. */
+      refusal?: string;
+      /** Human-readable one-liner, the same text the run log carries. */
+      detail: string;
+    }
   | { type: "run-ended"; outcome: "SUCCEEDED" | "FAILED" | "ABORTED" }
   | { type: "slice-outcome"; slice: SliceLifecycle }
   | {
@@ -548,7 +584,14 @@ export type RunEventPayload =
         | "review-worktree-drift"
         | "guardian-finding-filed"
         | "guardian-cap-filing-failed"
-        | "guardian-note-filing-failed";
+        | "guardian-note-filing-failed"
+        /**
+         * A reconciliation that reached the tracker but whose durable memory
+         * could not be written (#320). The issue already moved, so the warning
+         * is the whole consequence: the next pass reads the same ledger and
+         * says the same thing again, one duplicate comment later.
+         */
+        | "guardian-issue-reconciled";
       ghIssue?: string;
       /** Human-readable one-liner rendered inline in the chronology. */
       message: string;

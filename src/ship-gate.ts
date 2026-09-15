@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync, type WriteStream } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { finished } from "node:stream/promises";
 import type {
   InvokeOptions,
@@ -39,9 +39,13 @@ import {
   DEFAULT_GUARDIAN_ROUND_CAP,
 } from "./guardian-round-cap.js";
 import {
+  applyFindingIssueReconciliation,
   buildFindingIssueDrafts,
   fileFindingIssues,
+  reconcileFindingIssues,
+  unresolvedGuardianIssueDecisions,
   type FindingFilingOutcome,
+  type FindingIssueDecision,
   type FindingIssueDraft,
 } from "./finding-filing.js";
 import type { PersistedReviewPhase } from "./run-state.js";
@@ -1202,6 +1206,136 @@ export async function runShipGate(
   ];
   const foldedLedger = foldGuardianLedger(ledgerRounds);
   const alreadyFiled = ledger.filedFindings;
+  // The run directory names the filing run (ADR 0017): evidence a reconciliation
+  // comment cites, and the run context #320's identity carries.
+  const runId = basename(journal.runDir);
+
+  /**
+   * Reconcile the issues earlier rounds filed against what this round decided
+   * (#320).
+   *
+   * Runs here, before the cap and PR decisions below, so that every exit from
+   * this point on has already told the tracker the same story: an issue for a
+   * finding a later round resolved is closed, and one for a finding still open
+   * carries this round's evidence. It reads `alreadyFiled` — the records as this
+   * pass loaded them — because an issue this pass is about to file was filed for
+   * a live finding and has nothing to reconcile.
+   *
+   * Every failure is data. The module's rule for filing holds twice over for
+   * reconciliation: a `gh` outage may not fail a run whose guardians spoke, and
+   * a refused reconciliation leaves the issue exactly as it was.
+   */
+  const issueRef = (decision: FindingIssueDecision) => decision.record.issue;
+  const reconciliation = reconcileFindingIssues({
+    ledger: foldedLedger,
+    alreadyFiled,
+    evidence: {
+      prdSlug,
+      runId,
+      featureBranch,
+      specsDir: relativeSpecsDir,
+      reviewedHeadSha: roundHeadSha,
+    },
+  });
+  const reconciled = applyFindingIssueReconciliation({
+    reconciliation,
+    retries: options.reviewRetries,
+    onRetry: (decision, attempt, error) => {
+      journal.phase(
+        `  ⚠️  Could not reconcile ${issueRef(decision)} for ${decision.record.guardian} finding ` +
+          `${decision.record.stableId}: ${error}. Retry ${attempt}/${options.reviewRetries}.`,
+        "warn",
+      );
+    },
+    comment: (decision, body) =>
+      runCommand("gh", ["issue", "comment", issueRef(decision), "--body", body], {
+        cwd: repoRoot,
+        encoding: "utf-8",
+      }),
+    close: (decision) =>
+      runCommand("gh", ["issue", "close", issueRef(decision)], {
+        cwd: repoRoot,
+        encoding: "utf-8",
+      }),
+    reopen: (decision) =>
+      runCommand("gh", ["issue", "reopen", issueRef(decision)], {
+        cwd: repoRoot,
+        encoding: "utf-8",
+      }),
+  });
+  if (reconciled.applied.length > 0) {
+    try {
+      persistence.recordGuardianFindingReconciliations(
+        repoRoot,
+        runSlug,
+        reconciled.applied.map(({ decision, reconciled: memory }) => ({
+          guardian: decision.record.guardian,
+          stableId: decision.record.stableId,
+          reconciled: memory,
+        })),
+      );
+    } catch (error) {
+      // The tracker already moved, so the memory is the only thing lost: the
+      // next pass re-reads the same ledger and says it again. One duplicate
+      // comment, announced.
+      const detail = error instanceof Error ? error.message : String(error);
+      const message =
+        `Reconciled ${reconciled.applied.length} guardian finding issue(s) but could not ` +
+        `record it in run state: ${detail}. A later round may comment on them again.`;
+      journal.phase(`  ⚠️  ${message}`, "warn");
+      journal.event({ type: "warn", reason: "guardian-issue-reconciled", message });
+    }
+  }
+  {
+    const failedByRecord = new Map(
+      reconciled.failed.map(({ decision, error }) => [decision.record, error]),
+    );
+    const journalDecision = (decision: FindingIssueDecision) => {
+      const error = failedByRecord.get(decision.record);
+      const past = {
+        UPDATE: "UPDATED",
+        CLOSE: "CLOSED",
+        REOPEN: "REOPENED",
+        REFUSE: "REFUSED",
+        UNCHANGED: "UNCHANGED",
+      } as const;
+      const action = error ? "FAILED" : past[decision.action];
+      const detail = error
+        ? `the issue tracker call failed: ${error}. The issue is unchanged — ${decision.reason}`
+        : decision.reason;
+      const { guardian, stableId, kind, issue } = decision.record;
+      journal.event({
+        type: "guardian-issue-reconciliation",
+        guardian,
+        stableId,
+        issue,
+        kind,
+        round: decision.matched?.round ?? decision.record.round,
+        action,
+        ...(decision.refusal ? { refusal: decision.refusal } : {}),
+        detail,
+      });
+      if (action === "REFUSED" || action === "FAILED") {
+        journal.phase(
+          `  ⚠️  Left ${issue} open — ${guardian === "pm" ? "PM" : "architect"} finding ` +
+            `${stableId}: ${detail}`,
+          "warn",
+        );
+      } else if (action !== "UNCHANGED") {
+        journal.phase(
+          `  📝 ${action.toLowerCase()} ${issue} — ${guardian === "pm" ? "PM" : "architect"} ` +
+            `finding ${stableId}: ${decision.reason}`,
+          "log",
+        );
+      }
+    };
+    for (const decision of [
+      ...reconciliation.close,
+      ...unresolvedGuardianIssueDecisions(reconciliation),
+    ]) {
+      journalDecision(decision);
+    }
+  }
 
   /**
    * File one batch of drafts and record what was opened.
@@ -1317,6 +1451,7 @@ export async function runShipGate(
     const filing = fileIssues(
       buildFindingIssueDrafts({
         prdSlug,
+        runId,
         specsDir,
         featureBranch,
         kind: "BLOCKER",
@@ -1392,6 +1527,7 @@ export async function runShipGate(
   const noteFiling = fileIssues(
     buildFindingIssueDrafts({
       prdSlug,
+      runId,
       specsDir,
       featureBranch,
       kind: "NOTE",

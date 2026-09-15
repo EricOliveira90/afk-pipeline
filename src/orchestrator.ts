@@ -31,6 +31,7 @@ import {
   type ContractTransaction,
 } from "./contract-transaction.js";
 import { RunJournal, type TerminalOutcome } from "./run-journal.js";
+import { readRunEvents } from "./run-events.js";
 import { renderPrompt } from "./prompt-template.js";
 import {
   assembleExplorerEnvelope,
@@ -191,6 +192,7 @@ import {
 } from "./slice-scope.js";
 import {
   parseDraftPrNumber,
+  unresolvedGuardianIssues,
   writeTerminalHandoff,
   type RunStatus,
 } from "./handoff.js";
@@ -8487,6 +8489,13 @@ export async function runPipeline(
           ? git.listAddedMigrationFiles(repoRoot, baseBranch, featBranch)
           : [],
       githubIssuesToClose: scope.selected.map((slice) => slice.ghIssue),
+      // Read from this run's own event stream, so the handoff, the run summary
+      // and `events.jsonl` report one remaining-defect count (#320). Written on
+      // every exit path, including the failure ones: an aborted run's filed
+      // guardian issues are still open.
+      unresolvedGuardianIssues: unresolvedGuardianIssues(
+        readRunEvents(logger.runDir)?.events ?? [],
+      ),
       draftPr: {
         number: draftPrNumber ?? parseDraftPrNumber(draftPrUrl),
         url: draftPrUrl,

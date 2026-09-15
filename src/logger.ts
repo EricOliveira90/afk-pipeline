@@ -811,6 +811,58 @@ ${stagePolicyEvents
   )
   .join("\n")}
 ${qualityStageRows}`;
+    /**
+     * Every guardian finding issue this run touched, and which ones it left
+     * open (#320).
+     *
+     * Rendered from the `guardian-issue-reconciliation` events alone — the same
+     * rule Applied Waivers and Final Evaluation Reuse are kept under — so this
+     * table, `events.jsonl`, and `handoff.json`'s `unresolvedGuardianIssues`
+     * cannot disagree about the remaining defect count, which is the
+     * miscount #320 was filed about. A stream with no such event renders no
+     * section, so every pre-#320 summary stays byte-identical.
+     *
+     * One row per issue, the last event winning: a pass that updated an issue
+     * and a later pass that closed it are two statements about one ticket, and a
+     * table with both reads as two tickets.
+     */
+    const reconciliationEvents = runEvents.filter(
+      (event) => event.type === "guardian-issue-reconciliation",
+    );
+    const latestReconciliations = new Map<
+      string,
+      (typeof reconciliationEvents)[number]
+    >();
+    for (const event of reconciliationEvents) {
+      latestReconciliations.set(event.issue, event);
+    }
+    const reconciliationRows = [...latestReconciliations.values()];
+    const stillOpen = reconciliationRows.filter(
+      (event) => event.action !== "CLOSED",
+    );
+    const guardianIssueSection =
+      reconciliationRows.length === 0
+        ? ""
+        : `
+## Guardian Finding Issues
+
+Issues filed for guardian findings, reconciled against the round ledger (#320).
+${stillOpen.length} of ${reconciliationRows.length} still open. \`REFUSED\` means identity or evidence was
+ambiguous and the issue was left exactly as it was; \`FAILED\` means the tracker
+call did not go through, which never fails a run.
+
+| Guardian | Finding | Issue | Kind | Round | Action | Detail |
+|----------|---------|-------|------|-------|--------|--------|
+${reconciliationRows
+  .map(
+    (event) =>
+      `| ${event.guardian} | \`${event.stableId}\` | ${event.issue} | ` +
+      `${event.kind} | ${event.round} | ${event.action}${
+        event.refusal ? ` (${event.refusal})` : ""
+      } | ${inlineMarkdown(event.detail)} |`,
+  )
+  .join("\n")}
+`;
     const dependencyRows = this.dependencyHolds
       .map(
         (hold) =>
@@ -864,7 +916,7 @@ Finished: ${finishedAt!.toISOString()}
 ${rows}
 ${totalsRow}
 ${dependencySection}${adoptionSection}
-${gateSection}${advisorySection}${coverageSection}${isolationSection}${finalReuseSection}${resolutionSection}${waiverSection}${qualityStageSection}
+${gateSection}${advisorySection}${coverageSection}${isolationSection}${finalReuseSection}${resolutionSection}${waiverSection}${qualityStageSection}${guardianIssueSection}
 
 Pre-ship sanity gate: ${sanityGateLabel(sanityGate)}
 Architect review: ${architectVerdict ?? "N/A"}${architectDetail ? ` — ${architectDetail}` : ""}

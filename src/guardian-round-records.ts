@@ -73,11 +73,32 @@ export interface PersistedGuardianReviewRound {
 }
 
 /**
+ * The last reconciliation a later review round applied to a filed issue (#320).
+ *
+ * Recorded only once the tracker call it describes succeeded, so the field is a
+ * statement about the issue's actual state and not about an intention. Its
+ * `round` is the ledger round whose evidence was applied, which is what makes
+ * reconciliation idempotent: a replayed pass over the same round has nothing
+ * left to say, while a later round carries fresh evidence and speaks again.
+ */
+export interface PersistedFindingReconciliation {
+  /** The ledger round whose disposition this reconciliation acted on. */
+  round: number;
+  action: "UPDATED" | "CLOSED";
+}
+
+/**
  * One guardian finding this run has opened an issue for.
  *
  * The durable half of "filed exactly once" (ADR 0057 decision 4, last
  * sentence): a note that rides two consecutive rounds is filed on the first and
  * skipped on the second because its ledger identity is already in here.
+ *
+ * The three optional fields are #320's: an issue's lifecycle outlives the round
+ * that filed it, so the record has to carry enough context to be reconciled
+ * later and enough memory to be reconciled only once. All three are optional
+ * because a record written before #320 is still a true statement about an issue
+ * that exists, and dropping it would file that issue a second time.
  */
 export interface PersistedFiledFinding {
   guardian: GuardianKind;
@@ -89,6 +110,25 @@ export interface PersistedFiledFinding {
   round: number;
   /** Whatever the tracker returned to name the issue, usually a URL. */
   issue: string;
+  /**
+   * The PRD whose ship gate filed this issue. Absent in a pre-#320 record.
+   *
+   * Scope evidence, and it can only ever *refuse*: a record naming another PRD
+   * is not this run's to close, while a record naming none is read as this
+   * run's own, because it was loaded from this run's state file.
+   */
+  prdSlug?: string;
+  /**
+   * The run directory that filed it (`run-<timestamp>`, ADR 0017). Absent in a
+   * pre-#320 record.
+   *
+   * Evidence for the comment a reconciliation writes, never a gate: a resumed
+   * run legitimately reconciles issues an earlier run's directory filed, so a
+   * run-id mismatch says nothing about identity.
+   */
+  runId?: string;
+  /** The last reconciliation applied to `issue`; absent until one was. */
+  reconciled?: PersistedFindingReconciliation;
 }
 
 /**
@@ -372,6 +412,39 @@ function sanitizeGuardianRounds(
 }
 
 /**
+ * An optional string field: absent, or a non-blank string. `undefined` is the
+ * answer for both "absent" and "present and valid"; `null` means the field was
+ * present and is not a claim this record may make.
+ */
+function optionalText(value: unknown): string | null | undefined {
+  if (value === undefined) return undefined;
+  return nonBlank(value) ? value.trim() : null;
+}
+
+/**
+ * The reconciliation memory of one filed record: absent, or a round plus the
+ * action that round's evidence produced. `null` for a present-but-invalid
+ * claim, which drops the row (see {@link sanitizeFiledFindings}).
+ */
+function sanitizeReconciliation(
+  value: unknown,
+): PersistedFindingReconciliation | null | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    !Number.isSafeInteger(record.round) ||
+    (record.round as number) < 1 ||
+    (record.action !== "UPDATED" && record.action !== "CLOSED")
+  ) {
+    return null;
+  }
+  return { round: record.round as number, action: record.action };
+}
+
+/**
  * Validate the filed-issue record, entry by entry.
  *
  * Unlike the ledger this is *not* all-or-nothing. Every record dropped is one
@@ -383,6 +456,13 @@ function sanitizeGuardianRounds(
  * Identity is `guardian` + `stableId`, the same key
  * {@link recordFiledGuardianFindings} dedups writes by, so a file that somehow
  * carries the identity twice reads back as the one filing it records.
+ *
+ * A row whose #320 fields are present but malformed is dropped whole rather
+ * than read without them. Those three fields are what a later round's
+ * reconciliation acts on — scope, evidence, and what was already done — and
+ * reading `prdSlug: 42` as "no PRD named" would let a close act on a claim
+ * nobody validated. The cost is the usual one, a duplicate issue, and a
+ * duplicate issue is visible.
  */
 function sanitizeFiledFindings(
   value: unknown,
@@ -406,6 +486,10 @@ function sanitizeFiledFindings(
     ) {
       continue;
     }
+    const prdSlug = optionalText(record.prdSlug);
+    const runId = optionalText(record.runId);
+    const reconciled = sanitizeReconciliation(record.reconciled);
+    if (prdSlug === null || runId === null || reconciled === null) continue;
     const key = `${record.guardian} ${record.stableId.trim()}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -416,6 +500,9 @@ function sanitizeFiledFindings(
       kind: record.kind,
       round: record.round as number,
       issue: record.issue.trim(),
+      ...(prdSlug !== undefined ? { prdSlug } : {}),
+      ...(runId !== undefined ? { runId } : {}),
+      ...(reconciled !== undefined ? { reconciled } : {}),
     });
   }
   return records.length > 0 ? records : undefined;

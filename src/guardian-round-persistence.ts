@@ -20,9 +20,10 @@
  *   against replace-wholesale caches, filed-findings carry-forward, and
  *   filed-finding identity dedup.
  *
- * The three operations are named for the lifecycle that will consume them: ADR
+ * The four operations are named for the lifecycle that will consume them: ADR
  * 0057's third convergence lifecycle (#222) loads the ledger, appends a
- * completed round, and records what it filed. {@link GuardianRoundPersistence}
+ * completed round, records what it filed, and records what a later round
+ * reconciled onto those issues (#320). {@link GuardianRoundPersistence}
  * is that seam as a type, so the lifecycle can take this module as a
  * collaborator and a test can substitute a failing writer for one operation
  * without standing up a state file.
@@ -32,8 +33,10 @@
  * a parallel slice write and a round append must not clobber each other.
  */
 import { updateRunState, type PersistedReviewPhase } from "./run-state.js";
+import type { GuardianKind } from "./artifacts.js";
 import type {
   PersistedFiledFinding,
+  PersistedFindingReconciliation,
   PersistedGuardianReviewRound,
 } from "./guardian-round-records.js";
 
@@ -85,7 +88,9 @@ export function loadGuardianRoundLedger(
  * caches. It is an append-only memory of issues that exist in the tracker, so
  * dropping it would make the next round file every note a second time — and the
  * round write that would drop it happens on every pass, before the filing
- * decision has even run.
+ * decision has even run. Carried forward whole, records included, so each one's
+ * #320 reconciliation memory survives too: losing it would re-comment on every
+ * issue the previous round already spoke to.
  */
 export function appendCompletedGuardianRound(
   repoRoot: string,
@@ -150,12 +155,56 @@ export function recordFiledGuardianFindings(
   });
 }
 
+/** One filed identity, and what a reconciliation pass did to its issue. */
+export interface GuardianFindingReconciliationRecord {
+  guardian: GuardianKind;
+  stableId: string;
+  reconciled: PersistedFindingReconciliation;
+}
+
+/**
+ * Stamp the reconciliation memory onto filed records that already exist (#320).
+ *
+ * Separate from {@link recordFiledGuardianFindings} because the two writes make
+ * opposite claims about a known identity. Filing says "this issue exists", so
+ * the first record wins and a second is dropped — the issue cannot be un-opened.
+ * Reconciliation says "this is the latest thing done to that issue", so it
+ * overwrites, and it may only ever *overwrite*: an identity this run never filed
+ * is an issue this run has no record of, and inventing a row for it would be a
+ * filing nobody performed.
+ *
+ * Writes only what succeeded, so replaying a crashed pass re-reads the same
+ * memory and takes the same decision. Re-reads the file first, like every other
+ * operation here.
+ */
+export function recordGuardianFindingReconciliations(
+  repoRoot: string,
+  runSlug: string,
+  applied: readonly GuardianFindingReconciliationRecord[],
+) {
+  if (applied.length === 0) return;
+  updateRunState(repoRoot, runSlug, (current) => {
+    const reviewPhase = current.reviewPhase ?? {};
+    const records = reviewPhase.filedFindings;
+    if (!records || records.length === 0) return;
+    const updated = records.map((record) => {
+      const match = applied.find(
+        (entry) =>
+          entry.guardian === record.guardian &&
+          entry.stableId === record.stableId,
+      );
+      return match ? { ...record, reconciled: match.reconciled } : record;
+    });
+    current.reviewPhase = { ...reviewPhase, filedFindings: updated };
+  });
+}
+
 /**
  * The adapter surface as one type: load the ledger, append a completed round,
- * record what was filed.
+ * record what was filed, record what was reconciled.
  *
  * Declared so the future `GuardianRoundLifecycle` (ADR 0057's third
- * consequence) can name its persistence collaborator instead of importing three
+ * consequence) can name its persistence collaborator instead of importing four
  * functions, and so a caller can substitute one operation — the ship gate's
  * write-failure tests substitute a throwing writer — without a state file.
  */
@@ -163,6 +212,7 @@ export interface GuardianRoundPersistence {
   loadGuardianRoundLedger: typeof loadGuardianRoundLedger;
   appendCompletedGuardianRound: typeof appendCompletedGuardianRound;
   recordFiledGuardianFindings: typeof recordFiledGuardianFindings;
+  recordGuardianFindingReconciliations: typeof recordGuardianFindingReconciliations;
 }
 
 /** The adapter bound to the shared run-state file. */
@@ -170,4 +220,5 @@ export const guardianRoundPersistence: GuardianRoundPersistence = {
   loadGuardianRoundLedger,
   appendCompletedGuardianRound,
   recordFiledGuardianFindings,
+  recordGuardianFindingReconciliations,
 };
