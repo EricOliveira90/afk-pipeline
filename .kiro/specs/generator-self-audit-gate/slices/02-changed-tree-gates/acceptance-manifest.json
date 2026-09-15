@@ -1,0 +1,240 @@
+{
+  "version": 2,
+  "fileScope": {
+    "kind": "paths",
+    "paths": [
+      "src/self-audit.ts",
+      "src/self-audit.test.ts",
+      "src/orchestrator.ts",
+      "src/orchestrator.test.ts",
+      "docs/adr/0069-bounded-generator-self-audit-before-qa-dispatch.md"
+    ]
+  },
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "GH #300 AC1 (a differing post-audit tree records AUDIT_CHANGED in run state); src/self-audit.ts:186-196; src/run-state.ts:1101",
+      "given": "runSelfAuditStage awaited with selfAudit true, a dispatch that rewrites the worktree so the post-audit tree id differs from the released checkpoint tree id, and a temporary run-state directory",
+      "when": "the stage classifies AUDIT_CHANGED and returns",
+      "then": "it recorded exactly one outcome through recordSelfAuditOutcome before returning, whose verdict is AUDIT_CHANGED, whose candidateTreeId is the pre-audit released tree id and whose auditedTreeId is the post-audit tree id, so the two ids differ; the AUDIT_UNCHANGED-only condition at src/self-audit.ts:190 has widened to both graded verdicts while AUDIT_NOT_RUN stays unrecorded; and the entry uses the existing PersistedSelfAuditOutcome shape with no new field and no version bump",
+      "observableResult": "src/self-audit.test.ts's [behavior:B-01] test asserts the returned { ran: true, verdict: \"AUDIT_CHANGED\", treeId } and that selfAuditsFor(loadRunState(<that temporary directory>), ghIssue) returns exactly one entry with verdict \"AUDIT_CHANGED\", candidateTreeId equal to the released tree id and auditedTreeId equal to the post-audit tree id; a stage that classifies AUDIT_CHANGED and records nothing fails here",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-02",
+      "source": "GH #300 AC2 (the required cheap-on-changed-tree gates run on the audited tree); src/gate-runner.ts:351-353; src/orchestrator.ts:6162, :6221-6229, :6258-6320; src/self-audit.ts:136 (the injected-dispatch precedent)",
+      "given": "the new exported verifyAuditedTree in src/self-audit.ts, given createCheckpoint, onCandidateTree and runGates spies and the selected declarations",
+      "when": "it is awaited once with a gate run in which every selected required gate PASSes and once with one at FAIL",
+      "then": "it minted the audited checkpoint of the worktree through createCheckpoint exactly once at a path other than the round's checkpointDir (createCandidateCheckpoint throws on an existing target), reported the minted tree id through onCandidateTree exactly once before calling runGates, handed runGates exactly the selected declarations, and returned { outcome: \"PASS\", graded, artifacts } for the first case and { outcome: \"REPAIR\", auditedTreeId, failedGateIds, evidenceReferences, artifacts } naming the failed gate for the second; its input declares no dispatch parameter",
+      "observableResult": "src/self-audit.test.ts's [behavior:B-02] test drives verifyAuditedTree with those three spies and no git process or provider, asserting the single createCheckpoint call with a path !== checkpointDir, the call order onCandidateTree-before-runGates, the declarations runGates received, and the two returned discriminated results including failedGateIds",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-03",
+      "source": "GH #300 settled decisions (the re-run set is the same required cheap-gate set derived from the gate catalog that gated the original candidate, not a new list); src/base-gates.ts:154-174; src/orchestrator.ts:6192-6210",
+      "given": "declarations shaped like the round's preQaDeclarations — a required cheap catalog gate, a non-required catalog gate, and an acceptance-style declaration carrying no expectedCostMs — plus a cheap gate catalog whose required ids are typecheck and lint",
+      "when": "the pure selectAuditedGateDeclarations is called on them",
+      "then": "it returns exactly the declarations whose id is a required id of resolveCheapGateCatalog(cwd), as the same objects in declaration order, so the commands, args and required flags re-run are byte-identical to the ones that released the pre-audit tree; the acceptance declaration is excluded because the catalog does not name it",
+      "observableResult": "src/self-audit.test.ts's [behavior:B-03] test asserts the returned array's ids and that each element is reference-identical (toBe) to the input declaration object, and that the acceptance-style and non-required entries are absent, from literal inputs with no filesystem",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-04",
+      "source": "GH #300 AC4 and the \"Recorded risk — base-gate substitution at the QA dispatch\" section (neither spread override nor pass-through); ADR 0012; src/qa-gate-authorization.ts:115-157; src/orchestrator.ts:4438",
+      "given": "verifyAuditedTree on the audited PASS path, holding the re-run's own evidence and repo-relative evidence artifact id",
+      "when": "it builds the graded value it returns",
+      "then": "graded is { treeId, commitSha, baseGate } with treeId and commitSha from the audited checkpoint and baseGate a newly constructed object carrying the re-run evidence, that artifact id, the selected declarations and candidateTreeId equal to the audited tree id — never a spread of the pre-audit qaBaseGate and never that object passed through; before building it the pass path calls assertGateEvidenceReleasesEvaluation over the re-run evidence, the selected declarations and the audited tree id and verifyGateEvidence over the re-run artifacts, additively on the audited tree; and the object is declared structurally in src/self-audit.ts rather than by importing QABaseGateEvidence from the hub, so no import cycle is introduced",
+      "observableResult": "src/self-audit.test.ts's [behavior:B-04] test asserts graded.baseGate.candidateTreeId === the audited tree id, graded.baseGate.declarations is the selected set, graded.treeId/commitSha are the audited checkpoint's, and graded.baseGate is not reference-identical to the pre-audit base-gate object nor shares its evidence or evidenceArtifactId; pnpm run typecheck accepts the returned baseGate at the hub's QABaseGateEvidence assignment",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-05",
+      "source": "GH #300 AC3 (a cheap-gate pass on the audited tree proceeds to QA dispatch); ARCHITECTURE.md \"Hubs — do not grow these\"; src/orchestrator.ts:6419-6463, :6475",
+      "given": "src/orchestrator.ts read as text",
+      "when": "the occurrence indices of \"verifyAuditedTree(\", \"runSelfAuditStage(\" and \"await runQAStage(\" are collected",
+      "then": "there is exactly one \"verifyAuditedTree(\" occurrence, it sits after the single \"runSelfAuditStage(\" occurrence and before the first \"await runQAStage(\", and it is entered only on a { ran: true, verdict: \"AUDIT_CHANGED\" } stage result — the value the hub discards today — so an audited cheap-gate pass falls through to the same deterministic QA dispatch",
+      "observableResult": "src/orchestrator.test.ts's [behavior:B-05] test reads src/orchestrator.ts as text and asserts the single occurrence and both orderings over those three anchors, and that the guard token \"AUDIT_CHANGED\" occurs between the runSelfAuditStage( and verifyAuditedTree( indices",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-06",
+      "source": "GH #300 AC8 (a cheap-gate failure on the audited tree enters the existing bounded repair loop) and its settled decision that this is an ordinary repair round with the usual budget; src/orchestrator.ts:6360-6390",
+      "given": "src/orchestrator.ts read as text with the audited-failure sub-branch delimited by its outcome === \"REPAIR\" token and the next \"await runQAStage(\"",
+      "when": "that region is scanned",
+      "then": "it pushes the returned evidenceReferences onto stuckReferences, rebuilds generatorFailureSet from failedGateIds and those references in the shape of :6360-6369, sets a same-shaped retryNote, and contains both \"if (implementationAttempt < implementationAttemptLimit) continue;\" and \"attemptTreeIds: implementationCandidateTreeIds,\" inside its candidateLifecycle.exhaustDeterministicGates( call with candidateTreeId the audited tree id; it declares no new attempt, round or budget counter, and adds no new terminal exit",
+      "observableResult": "src/orchestrator.test.ts's [behavior:B-06] test slices the source between those two tokens and asserts the region contains each of those literal fragments, that the exhaust call's attemptTreeIds argument is implementationCandidateTreeIds (whose last entry is the audited tree id by B-10), and that the region matches no new `let`/`const` counter declaration",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-07",
+      "source": "GH #300 AC9 (the audit invocation consumes no generator round) and AC10 (a changed audited tree receives no second audit invocation); PRD Solution (exactly one audit invocation per QA submission)",
+      "given": "src/self-audit.ts and src/orchestrator.ts read as text, and verifyAuditedTree's declared input type",
+      "when": "the audit call site region between \"runSelfAuditStage(\" and the first \"await runQAStage(\" is scanned, and verifyAuditedTree's input and body are read",
+      "then": "verifyAuditedTree's input declares no dispatch member and its body contains no \"runSelfAuditStage(\" and no \"dispatch(\" call, so the audited tree cannot be challenged a second time by construction; and no \"logger.bumpEvalRound(\" occurrence and no increment of round sits in that region, so neither the audit nor its verification spends a generator round — an audited failure spends an ordinary repair round through B-06 instead",
+      "observableResult": "src/self-audit.test.ts's and src/orchestrator.test.ts's [behavior:B-07] tests assert the absence of those tokens in verifyAuditedTree's body and in the delimited orchestrator region respectively, and the B-02 spy harness records exactly zero dispatch invocations because the input type has no such callback (pnpm run typecheck refuses one)",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-08",
+      "source": "GH #300 settled decision 2026-09-15 Option A (a single graded-candidate identity; one binding, not four independent expressions, because a single value cannot diverge from itself)",
+      "given": "the pure exported resolveGradedCandidate in src/self-audit.ts, a released { treeId, commitSha } pair and the released base-gate object",
+      "when": "it is called with an audited PASS graded value, and separately with undefined — the declined, AUDIT_UNCHANGED, AUDIT_NOT_RUN and audited-REPAIR cases",
+      "then": "the first returns the audited { treeId, commitSha, baseGate } and every other case returns the released treeId and commitSha with the released base-gate object by reference; the function reads no filesystem, no run state and no clock",
+      "observableResult": "src/self-audit.test.ts's [behavior:B-08] test asserts both returned triples from literal inputs, and that in the undefined case the returned baseGate is reference-identical (toBe) to the released object and the tree id and commit sha equal the released pair",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-09",
+      "source": "GH #300 AC4 and AC5 and its settled decision of 2026-09-15 (Option A); ADR 0012 (the QA verdict authorizes one tree); src/orchestrator.ts:6475-6492, :6508-6512, :6569, :6713, :4541-4551 (the artifact.treeId === input.treeId evidence filter); src/post-qa-gates.ts:202-223 (the action: \"ERROR\" guard)",
+      "given": "src/orchestrator.ts read as text, with the single gradedCandidate binding of B-08 in place",
+      "when": "the pass-path consumer arguments are scanned and the writeApprovedBaseline(ctx, round, { … }); argument slice is delimited",
+      "then": "every pass-path consumer of the candidate identity reads that one binding — the deterministic QA dispatch's base-gate argument and candidateTreeId/candidateCommitSha (:6475-6492), writeApprovedBaseline's treeId and commit (:6508-6512), so the baseline records the tree the verdict covered and its artifact.treeId === input.treeId evidence filter selects the audited run's artifacts instead of dropping every one, the shared-preview stage's candidateTreeId (:6569), and runPostQAGates's qaApprovedTreeId (:6713), which is why this is required rather than optional, since src/post-qa-gates.ts:202-223 compares qaApprovedTreeId against a fresh checkpoint of ctx.worktreeDir and returns action: \"ERROR\" (\"The QA verdict does not authorize this tree (ADR 0012)\") before running the suite for any difference outside reviewArtifactDir; and no pass-path consumer still reads the pre-audit pair. The pre-audit gate run's own treeId: checkpoint.treeId, argument at :6264 is not a pass-path consumer and survives untouched, because P-06 and B-04 both rest on the pre-audit gates having released checkpoint.treeId. src/post-qa-gates.ts and src/qa-gate-authorization.ts are not edited (P-04): only which tree id the hub hands the existing guard changes, upholding ADR 0012 as written",
+      "observableResult": "src/orchestrator.test.ts's [behavior:B-09] unit test reads src/orchestrator.ts as text and asserts it contains \"gradedCandidate.baseGate,\", \"candidateTreeId: gradedCandidate.treeId,\" exactly twice (the deterministic dispatch and the shared-preview stage), \"candidateCommitSha: gradedCandidate.commitSha,\", and — bounded to the slice between \"writeApprovedBaseline(ctx, round, {\" and its closing \"});\" — both \"treeId: gradedCandidate.treeId,\" and \"commit: gradedCandidate.commitSha,\" present and \"treeId: checkpoint.treeId,\" absent; and \"qaApprovedTreeId: gradedCandidate.treeId,\" present. It further asserts \"qaApprovedTreeId: checkpoint.treeId,\", \"candidateCommitSha: checkpoint.commitSha,\" and \"commit: checkpoint.commitSha,\" occur zero times; that \"treeId: checkpoint.treeId,\" occurs exactly once in the whole file and that its index is before the \"runSelfAuditStage(\" index and inside the runCandidateGatePhase( call whose declarations: argument is preQaDeclarations (src/orchestrator.ts:6264, the pre-audit gate run's own identity, preserved by P-06); and that \"candidateTreeId: checkpoint.treeId,\" occurs exactly twice, both before the \"runSelfAuditStage(\" index — P-02's pre-audit exhaust argument and P-06's qaBaseGate literal. pnpm run typecheck proves the audited base-gate object is assignable at the dispatch argument",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-10",
+      "source": "GH #300 AC6 (the audited tree id is appended to implementationCandidateTreeIds when the audited checkpoint is minted, on both branches); src/orchestrator.ts:6230, :6706; src/post-qa-gates.ts:272",
+      "given": "verifyAuditedTree with an onCandidateTree spy bound in the hub to implementationCandidateTreeIds.push, mirroring src/orchestrator.ts:6230 for the pre-audit checkpoint",
+      "when": "the audited checkpoint is minted, once on a run whose selected gates pass and once on a run whose required gate fails",
+      "then": "onCandidateTree was called exactly once with the audited tree id in both runs, before runGates, so the array's last entry is the tree currently under grading on the pass branch and the failure branch alike — which is what src/post-qa-gates.ts:272's .slice(0, -1) on priorAttemptTreeIds (src/orchestrator.ts:6706) and B-06's terminal attemptTreeIds both assume",
+      "observableResult": "src/self-audit.test.ts's [behavior:B-10] test asserts the single onCandidateTree call with the audited tree id and its ordering before runGates in both the PASS and the REPAIR harness; src/orchestrator.test.ts's [behavior:B-10] text scan asserts the hub passes a callback that pushes onto implementationCandidateTreeIds at the verifyAuditedTree( call site and that no push of the audited id sits inside a pass-only branch",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-11",
+      "source": "GH #300 (the slice's five expected files name \"the self-audit ADR amended in place\"); docs/adr/0069-bounded-generator-self-audit-before-qa-dispatch.md:78-82",
+      "given": "docs/adr/0069-bounded-generator-self-audit-before-qa-dispatch.md",
+      "when": "it is read as text after the amendment",
+      "then": "its decision, narrative, SwarmForge provenance and one-invocation bound keep their present text, and the Consequences paragraph that today says an AUDIT_CHANGED verdict is recorded and changes nothing downstream is replaced by the changed-tree mechanism: the re-run of the catalog-derived required cheap gates on the audited tree, the single graded-candidate identity every pass-path consumer reads with its ADR 0012 tree-authority reason, and that an audited cheap-gate failure is an ordinary repair round rather than a new failure path",
+      "observableResult": "src/self-audit.test.ts's [behavior:B-11] test reads the ADR with readFileSync and asserts it still contains \"## Decision\", \"## Consequences\", \"swarm_handoff.sh\" and the one-invocation bound, that it now contains statements of the cheap-gate re-run, the single graded-candidate identity and ADR 0012, and that it no longer contains \"changes nothing downstream\"",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-01",
+      "source": "GH #300 AC4 second clause (after AUDIT_UNCHANGED the pre-audit pair is received unchanged); src/self-audit.ts:164-174, :190-196",
+      "given": "a runSelfAuditStage input whose selfAudit is not true, and separately one whose dispatch leaves the worktree tree identical to the released checkpoint tree id",
+      "when": "each is awaited against a temporary run-state directory",
+      "then": "the first returns { ran: false } with zero dispatches and no run-state entry; the second returns { ran: true, verdict: \"AUDIT_UNCHANGED\", treeId: <released id> } and records exactly one entry whose candidateTreeId and auditedTreeId are both that released id; in neither case is an audited checkpoint minted or an extra gate run, and resolveGradedCandidate therefore yields the pre-audit checkpoint pair, so a default run does exactly what it does today",
+      "observableResult": "src/self-audit.test.ts's [behavior:P-01] test asserts both results, the dispatch spy counts (0 and 1), the recorded entries, and that the createCheckpoint spy used by B-02 was never called on either path",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-02",
+      "source": "GH #299 AC3 and this slice's requirement that the audit creates no new failure path; src/orchestrator.ts:6348-6390",
+      "given": "a candidate whose required cheap gates failed before the audit, so requiredFailures.length > 0",
+      "when": "runSliceExecute reaches that pre-existing branch",
+      "then": "it still builds the base-gate repair references, still sets its retry note, and still continues or returns through finishIntervention(candidateLifecycle.exhaustDeterministicGates({ candidateTreeId: checkpoint.treeId, attemptTreeIds: implementationCandidateTreeIds, ... })) with no audit dispatched, no audited checkpoint minted and no selfAudits entry written",
+      "observableResult": "the existing #299 P-02 orchestrator test naming that preserved required-gate-failure exit passes unmodified, the B-05 source-order scan finds no verifyAuditedTree( occurrence between the requiredFailures assignment and the gate-release assertion, and the existing spawned QA-orchestration scenarios that exhaust the deterministic gates keep their current outcome",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-03",
+      "source": "GH #300 (\"No schema change, no migration, no new dependency\"); src/run-state.ts:348-374",
+      "given": "the run-state module and a v6 run-state fixture",
+      "when": "RUN_STATE_VERSION, the version union and PersistedSelfAuditOutcome are read and the fixture is loaded",
+      "then": "RUN_STATE_VERSION is still 7, the union is still 3 | 4 | 5 | 6 | 7, PersistedSelfAuditOutcome still carries exactly { candidateTreeId, auditedTreeId?, verdict } with no field added, and the v6 fixture loads with no selfAudits member and every other field intact",
+      "observableResult": "src/self-audit.test.ts's [behavior:P-03] test asserts RUN_STATE_VERSION === 7 and the absence of any new PersistedSelfAuditOutcome key on a written entry, and the existing src/run-state.test.ts v6-adaptation and v7 round-trip tests pass unmodified",
+      "preservation": true,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-04",
+      "source": "GH #300 (\"src/qa-gate-authorization.ts and src/post-qa-gates.ts are not edited\"); ADR 0012; src/qa-gate-authorization.ts:105-113, :137-150; src/post-qa-gates.ts:202-223",
+      "given": "the ADR 0012 tree-authority machinery — authorizeBaseGateSkip, its callers in src/post-qa-gates.ts, and resolveCandidateTreeId in src/gate-runner.ts",
+      "when": "this slice ships",
+      "then": "none of those three files is edited: authorizeBaseGateSkip still refuses whenever the evidence's tree id or a gate result's tree id is not the tree under review, and runPostQAGates still returns action: \"ERROR\" when its qaApprovedTreeId disagrees with the fresh post-QA checkpoint outside reviewArtifactDir — only which tree id the hub hands the guard changes",
+      "observableResult": "src/qa-gate-authorization.ts, src/post-qa-gates.ts and src/gate-runner.ts are absent from this manifest's fileScope, so the scope gate refuses a candidate that edits them, and the existing base-gate authorization and post-QA gate tests pass unchanged",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-05",
+      "source": "GH #299 B-03 and its shipped source-order scan; src/orchestrator.test.ts:8262-8289; ADR 0002, ADR 0007",
+      "given": "src/orchestrator.ts read as text",
+      "when": "the occurrences of \"runSelfAuditStage(\", \"assertGateEvidenceReleasesEvaluation(\", the \"requiredFailures = collectRequiredGateFailures(\" assignment and \"await runQAStage(\" are collected",
+      "then": "\"runSelfAuditStage(\" still occurs exactly once, still after the gate-release assertion and after the requiredFailures assignment and still before the first \"await runQAStage(\", and its injected dispatch keeps its present body and per-invocation bounds — capturing the stage's return value moves no call site",
+      "observableResult": "the existing [behavior:#299:B-03] scan at src/orchestrator.test.ts:8262-8289 passes unmodified after this slice's edits",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-06",
+      "source": "src/orchestrator.ts:6264 (the pre-audit runCandidateGatePhase identity), :6392-6396 (assertGateEvidenceReleasesEvaluation), :6397 (the verifyGateEvidence loop), :6402-6410 (the qaBaseGate literal); ADR 0012",
+      "given": "src/orchestrator.ts read as text",
+      "when": "the pre-audit release sequence is scanned and compared with the \"runSelfAuditStage(\" index",
+      "then": "the sequence keeps its present text and order and still runs before the audit: the pre-audit runCandidateGatePhase({ ... treeId: checkpoint.treeId, cwd: gateCwd, declarations: preQaDeclarations, ... }) call still names checkpoint.treeId and is never rebound to the audited tree, then assertGateEvidenceReleasesEvaluation(gateEvidence, preQaDeclarations, checkpoint.treeId), then for (const artifact of gateArtifacts) verifyGateEvidence(artifact);, then the qaBaseGate literal with candidateTreeId: checkpoint.treeId — each still occurring in that order and before the runSelfAuditStage( occurrence. Only a tree the pre-audit gates released is ever audited, and B-04's audited verification is additive, not a relocation",
+      "observableResult": "src/orchestrator.test.ts's [behavior:P-06] unit test reads src/orchestrator.ts as text and asserts the ordered indices of \"treeId: checkpoint.treeId,\" inside the runCandidateGatePhase( call whose declarations: argument is preQaDeclarations, \"assertGateEvidenceReleasesEvaluation(\", \"for (const artifact of gateArtifacts) verifyGateEvidence(artifact);\" and \"candidateTreeId: checkpoint.treeId\" inside the qaBaseGate literal, and that all four sit before the \"runSelfAuditStage(\" index — which is also why B-09's residual count for \"treeId: checkpoint.treeId,\" is exactly one rather than zero",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    }
+  ]
+}

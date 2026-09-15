@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "verdict": "ACCEPT",
+  "findings": [
+    {
+      "id": "F-07",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-09", "P-06"],
+      "evidence": "\"`candidateCommitSha: checkpoint.commitSha,` and `commit: checkpoint.commitSha,` occur zero times; `treeId: checkpoint.treeId,` is absent from that `writeApprovedBaseline(ctx, round, {` … `});` slice and occurs exactly once in the file, before the `runSelfAuditStage(` index\"",
+      "expected": "B-09's declared observable must be satisfiable without touching a site the contract elsewhere preserves: the pre-audit `runCandidateGatePhase` argument `treeId: checkpoint.treeId,` at src/orchestrator.ts:6264 must survive, because P-06 and B-04 both rest on the pre-audit gates having released `checkpoint.treeId`.",
+      "observed": "The revision replaced the global zero-count with a slice-scoped absence plus an exact residual count of one, pinned by position and by call identity, in both artifacts. Verified against this worktree: `treeId: checkpoint.treeId,` occurs exactly twice today, at src/orchestrator.ts:6264 (inside `runCandidateGatePhase({ ... treeId: checkpoint.treeId, cwd: gateCwd, evidenceDir, declarations: preQaDeclarations, ... })`, the only `runCandidateGatePhase(` call in the file) and at :6509 (inside `writeApprovedBaseline(ctx, round, {` at :6508 through its closing `});` at :6512). Rebinding only the :6509 consumer leaves exactly one residual occurrence, at :6264, whose index precedes the single `runSelfAuditStage(` occurrence at :6419 — so B-09's assertion as now written passes in the honest implementation. The neighbouring zero-count fragments are each single-occurrence today (`candidateCommitSha: checkpoint.commitSha,` :6484, `commit: checkpoint.commitSha,` :6510, `qaApprovedTreeId: checkpoint.treeId,` :6713) and all are pass-path consumers, so their zero-count survives. P-06's `then`, its test-plan bullet and its `observableResult` now name the :6264 occurrence as the first element of the ordered pre-audit release sequence, so the residual is preserved by a behavior rather than merely tolerated by a count, and the Definition of done bullet is qualified to pass-path consumers for the same reason.",
+      "clearCondition": "B-09's manifest `then` and `observableResult` (and the matching `contract.md` bullet) state a satisfiable expectation for `treeId: checkpoint.treeId,`: either scoped to the `writeApprovedBaseline(` argument slice, or an explicit residual count that accounts for the pre-audit `runCandidateGatePhase` call at `src/orchestrator.ts:6264` and pins it before the audit call site, so the assertion can pass while P-06's and B-04's pre-audit release identity stays `checkpoint.treeId`.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    }
+  ]
+}

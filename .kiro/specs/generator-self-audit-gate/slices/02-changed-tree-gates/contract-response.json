@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "round": 2,
+  "responses": [
+    {
+      "findingId": "F-07",
+      "position": "CONDITION_MET",
+      "evidence": "The over-broad zero-count is gone and replaced with an exact residual count of one, pinned by position, plus a slice-scoped absence. `Select-String -Path src/orchestrator.ts -Pattern 'treeId: checkpoint\\.treeId'` returns 6264, 6384, 6409, 6483, 6509, 6569, 6713 in this worktree, confirming the finding's arithmetic: `treeId: checkpoint.treeId,` occurs at :6264 (the pre-audit `runCandidateGatePhase({ ... treeId: checkpoint.treeId, cwd: gateCwd, evidenceDir, declarations: preQaDeclarations, ... })`) and at :6509 (inside `writeApprovedBaseline(ctx, round, { treeId: checkpoint.treeId, commit: checkpoint.commitSha, gateArtifacts });`, :6508-6512). contract.md's B-09 test-plan bullet now asserts `treeId: checkpoint.treeId,` is absent from the `writeApprovedBaseline(ctx, round, {` … `});` slice and occurs exactly once in the file, before the `runSelfAuditStage(` index, identified as the pre-audit gate run's own identity; the zero-count list is narrowed to `qaApprovedTreeId: checkpoint.treeId,`, `candidateCommitSha: checkpoint.commitSha,` and `commit: checkpoint.commitSha,`, each a single occurrence today (:6713, :6484, :6510). acceptance-manifest.json's B-09 `then` and `observableResult` carry the same corrected expectation, and B-09's in-scope bullet now states explicitly that the :6264 argument is not a pass-path consumer and survives. P-06's preserve bullet, its test-plan bullet and its manifest entry now name that surviving occurrence as the first element of the pre-audit release sequence, so the residual one is preserved by a behavior rather than merely tolerated by a count, and the assertion passes while P-06's and B-04's pre-audit release identity stays `checkpoint.treeId`. The Definition of done bullet for the four consumers is qualified to pass-path consumers for the same reason. No other behavior, file-scope path, migration declaration or gate binding changed."
+    }
+  ]
+}
