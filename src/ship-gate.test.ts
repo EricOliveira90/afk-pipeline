@@ -2221,6 +2221,61 @@ describe("runShipGate — the report-only mutation step", () => {
       .filter((payload) => payload.type === "mutation-step");
   }
 
+  /** The phases whose events are this gate's gate identity and gate result. */
+  const GATE_PHASES = new Set(["sanity"]);
+
+  /**
+   * Every gate identity and gate result a run reported, read back out of the
+   * teed `events.jsonl`: any `gateId`/`gateIds` a payload carries, plus the
+   * gate-phase entries the ship gate emits for its pre-ship sanity gate. This
+   * is the surface B-11 and B-16 require to be identical with the declaration
+   * present and absent — the projection a promoted mutation gate would have to
+   * appear in (ADR 0063: reported, never a gate).
+   */
+  function gateSurface(
+    fixture: ReturnType<typeof makeJournal>,
+  ): Record<string, unknown>[] {
+    return readFileSync(join(fixture.journal.runDir, "events.jsonl"), "utf-8")
+      .split("\n")
+      .filter((line) => line !== "")
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter(
+        (payload) =>
+          "gateId" in payload ||
+          "gateIds" in payload ||
+          GATE_PHASES.has(payload["phase"] as string),
+      )
+      .map((payload) =>
+        Object.fromEntries(
+          ["type", "phase", "gateId", "gateIds", "verdict", "cached", "failureKind"]
+            .filter((key) => key in payload)
+            .map((key) => [key, payload[key]]),
+        ),
+      );
+  }
+
+  /**
+   * A clock the guardians move, so spawn, each guardian's completion and the
+   * rejoin are three distinguishable readings rather than one repeated number.
+   * Reading it never advances it: only `guardianFinished` does, which is what
+   * makes *where* the gate reads it observable.
+   */
+  function guardianDrivenClock(costPerGuardian: number) {
+    let elapsed = 0;
+    const readings: number[] = [];
+    return {
+      readings,
+      at: (): number => elapsed,
+      guardianFinished: (): void => {
+        elapsed += costPerGuardian;
+      },
+      now: (): number => {
+        readings.push(elapsed);
+        return elapsed;
+      },
+    };
+  }
+
   it("[behavior:#303:B-11] starts the declared command on the review worktree before the first guardian resolves", async () => {
     vi.mocked(quiesceWorktree).mockClear();
     const slug = "mutation-concurrent";
@@ -2389,6 +2444,96 @@ describe("runShipGate — the report-only mutation step", () => {
     expect(body).toContain("BOUND_REACHED");
     expect(result.verdict).toBe("SHIP");
     expect(result.pr?.requested).toBe(true);
+  });
+
+  it("[behavior:#303:B-12] takes the bounded wait's origin after both guardian results are in hand", async () => {
+    vi.mocked(quiesceWorktree).mockClear();
+    const slug = "mutation-rejoin-origin";
+    const repo = makeChangedRepo(slug);
+    const fixture = makeJournal();
+    const runCommand = ghRunCommand();
+    // Each guardian burns a whole bound, so the pre-fork instant and the
+    // post-fork instant are more than one bound apart. An origin captured
+    // before the fork therefore leaves a negative window and reports
+    // BOUND_REACHED; only the post-fork instant leaves the step its window.
+    const clock = guardianDrivenClock(MUTATION_STEP_BOUND_MS);
+    const invoke = vi.fn(async (options: InvokeOptions) => {
+      const kind = options.role === "architect-review" ? "architect" : "pm";
+      writeReview(options, slug, kind, "SHIP");
+      clock.guardianFinished();
+      return invokeResult();
+    });
+    const args = makeArgs(repo, slug, teeing(fixture), invoke, runCommand);
+    args.mutationReport = CONFIG;
+    args.mutationScope = async () => ["src/cart.ts"];
+    args.mutationRun = async (_command, _files, options) => {
+      writeReportInto(options.cwd);
+      return "";
+    };
+    args.mutationNow = clock.now;
+
+    const spawnInstant = clock.at();
+    const result = await runShipGate(args);
+    const rejoinInstant = clock.at();
+
+    // The guardians really did consume time on this clock, so the two candidate
+    // origins are different numbers and the assertion below discriminates.
+    expect(rejoinInstant).toBeGreaterThan(spawnInstant);
+    // The origin is the first reading the gate takes, and it is the rejoin
+    // instant — not the instant the step was spawned. Moving the capture above
+    // the guardian mode fork makes this reading `spawnInstant` and fails here.
+    expect(clock.readings[0]).toBe(rejoinInstant);
+    expect(clock.readings[0]).not.toBe(spawnInstant);
+    // And the consequence: the step keeps the whole flat bound measured from
+    // that instant, so guardians that ran long do not spend the step's window.
+    expect(loadRunState(repo, slug).mutationStep).toEqual({
+      runSlug: slug,
+      status: "MUTATION_REPORTED",
+      survivors: SURVIVORS,
+    });
+    expect(result.verdict).toBe("SHIP");
+  });
+
+  it("[behavior:#303:B-11] reports the same gate ids and gate results with the declaration as without it", async () => {
+    async function runOnce(declared: boolean) {
+      vi.mocked(quiesceWorktree).mockClear();
+      const slug = `mutation-gate-ids-${declared ? "declared" : "absent"}`;
+      const repo = makeChangedRepo(slug);
+      const fixture = makeJournal();
+      const args = makeArgs(
+        repo,
+        slug,
+        teeing(fixture),
+        shipInvoke(slug),
+        ghRunCommand(),
+      );
+      // Both runs are wired identically; only the declaration differs, which is
+      // exactly what a run with and without `--mutation-report` differ by.
+      args.mutationScope = async () => ["src/cart.ts"];
+      args.mutationRun = async (_command, _files, options) => {
+        writeReportInto(options.cwd);
+        return "";
+      };
+      if (declared) args.mutationReport = CONFIG;
+      const result = await runShipGate(args);
+      return { surface: gateSurface(fixture), fixture, result };
+    }
+
+    const declared = await runOnce(true);
+    const absent = await runOnce(false);
+
+    // The declared run really ran the step, so this compares a run that
+    // reported an outcome against one that had nothing to report.
+    expect(mutationEvents(declared.fixture)).toHaveLength(1);
+    expect(mutationEvents(absent.fixture)).toEqual([]);
+
+    // Set-for-set identical: the step holds no gate id and builds no
+    // `GateDeclaration`, so promoting it to a declared gate — the regression
+    // ADR 0063's "reported, never a gate" rule exists to prevent — fails here.
+    expect(declared.surface.length).toBeGreaterThan(0);
+    expect(declared.surface).toEqual(absent.surface);
+    expect(JSON.stringify(declared.surface)).not.toMatch(/mutation/i);
+    expect(declared.result.verdict).toBe(absent.result.verdict);
   });
 
   it("[behavior:#303:P-01] runs nothing, publishes nothing and terminates nothing without the declaration", async () => {
