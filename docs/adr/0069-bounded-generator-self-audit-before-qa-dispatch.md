@@ -49,8 +49,13 @@ cache and ADR 0012 use — and compares it against the tree the gates released:
   uncertain case takes the branch that cannot loop (ADR 0041), which is the
   branch that proceeds to QA exactly as if the audit had never been dispatched.
 
-One invocation per QA submission, bounded by construction: there is no loop in
-the stage, no retry, and no second challenge for a tree the audit rewrote. That
+One **completed** invocation per QA submission, bounded by construction: the
+bound counts invocations that finished, so a dead invocation whose cause
+classifies as infrastructure under ADR 0025 is re-dispatched under the run's
+`--infrastructure-retries` budget and an exhausted budget records
+`AUDIT_NOT_RUN`, while the loop exits on the first attempt that completes — a
+retry replaces a dead invocation rather than buying a second completed one, and
+there is no second challenge for a tree the audit rewrote (#301). That
 bound is the standing argument against an audit-of-the-audit. A second challenge
 would be asking the same agent the same question with more context, which is how
 a bounded improvement becomes an unbounded one; and the pipeline already has a
@@ -110,5 +115,14 @@ the invocation is not pressured into cosmetic churn to look diligent.
   until the changed rate is known.
 - Because the verdict is a tree comparison, it is auditable after the fact from
   run state alone: the persisted outcome carries the candidate tree the audit was
-  handed and the tree it left behind, and a reader can check the verdict against
-  them without trusting any narrative.
+  handed, the tree it left behind, and the run-ID provenance of the run that
+  spent the invocation, and a reader can check the verdict against them without
+  trusting any narrative.
+- A persisted outcome naming the tree in hand is a **spent** invocation: a
+  resumed run that finds one dispatches nothing and records nothing, because the
+  count of spent invocations is derived from the run-state file rather than
+  re-derived from the tree (#301).
+- The per-verdict totals and the changed rate the run summary reports **report
+  and never gate** (ADR 0063). They are an operator measurement: no gate id, gate
+  declaration, threshold, merge decision or dispatch decision keys on any of
+  them, and the changed rate is compared against nothing.

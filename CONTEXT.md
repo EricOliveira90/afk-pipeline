@@ -271,6 +271,22 @@ The pipeline parses and preserves the field; enforcement belongs to the
 preparation/babysit tooling that owns issue state. See ADR 0034.
 _Avoid_: "pinned issue", "locked issue"
 
+**Self-audit outcome**:
+What one bounded generator self-audit invocation concluded, decided by
+comparing tree ids rather than by asking the agent.
+`AUDIT_UNCHANGED`: the audited tree is identical to the candidate the
+required cheap gates released — the expected outcome, not a wasted call.
+`AUDIT_CHANGED`: the audited tree differs, so exactly those required
+cheap gates run again on it before QA. `AUDIT_NOT_RUN`: the invocation
+could not complete (or left a tree nothing could hash), so the candidate
+proceeds to QA on the released tree, exactly as if no audit had been
+dispatched. Persisted per GH issue in **run state** with run-ID
+provenance; the per-verdict totals and the changed rate are reported in
+`run-summary.md` and gate nothing. See ADR 0069.
+_Avoid_: "audit passed"/"audit failed" (no outcome is a verdict on the
+code — `AUDIT_UNCHANGED` is not a pass and `AUDIT_NOT_RUN` is not a
+failure), "audit skipped" for `AUDIT_NOT_RUN` (an invocation was spent)
+
 **DAG**:
 Directed acyclic graph built from the `issues.md` dependency table.
 Determines which slices can run in parallel.
