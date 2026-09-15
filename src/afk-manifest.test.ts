@@ -183,6 +183,158 @@ describe("afk.json", () => {
     ).toThrow(/protectedChangeWaivers must be an array/);
   });
 
+  it("[behavior:#303:B-02] reads the mutation declaration, normalizing the report path", () => {
+    const manifest = parseAfkManifest({
+      version: 1,
+      selectedSlices: ["01"],
+      mutationReport: {
+        command: "  pnpm run mutate  ",
+        reportPath: "./reports\\mutation\\mutation.json",
+      },
+    });
+    // Same path normalization the waivers get: one repo-relative form, so the
+    // step opens the file the declaration meant on every platform.
+    expect(manifest.mutationReport).toEqual({
+      command: "pnpm run mutate",
+      reportPath: "reports/mutation/mutation.json",
+    });
+  });
+
+  it("[behavior:#303:B-04] reads a manifest with no mutationReport exactly as before", () => {
+    const manifest = parseAfkManifest({
+      version: 1,
+      selectedSlices: ["01"],
+      migrationPrefixes: ["144"],
+      protectedIssues: [758],
+    });
+    // Absent means absent, not an empty declaration: `refuseUndeclaredMutationReport`
+    // reads this member, and a stub would turn the launch refusal into a run
+    // that reported nothing.
+    expect(manifest).toEqual({
+      version: 1,
+      selectedSlices: ["01"],
+      migrationPrefixes: ["144"],
+      protectedIssues: [{ number: 758, state: "OPEN" }],
+      protectedChangeWaivers: [],
+    });
+    expect("mutationReport" in manifest).toBe(false);
+    expect(manifest.version).toBe(1);
+  });
+
+  it.each([
+    [
+      "a blank command",
+      { command: "   ", reportPath: "reports/mutation.json" },
+      /mutationReport requires a non-blank command/,
+    ],
+    [
+      "a missing command",
+      { reportPath: "reports/mutation.json" },
+      /mutationReport requires a non-blank command/,
+    ],
+    [
+      "a blank reportPath",
+      { command: "pnpm run mutate", reportPath: "" },
+      /mutationReport requires a non-blank reportPath/,
+    ],
+    [
+      "a missing reportPath",
+      { command: "pnpm run mutate" },
+      /mutationReport requires a non-blank reportPath/,
+    ],
+    [
+      "a glob reportPath",
+      { command: "pnpm run mutate", reportPath: "reports/*.json" },
+      /mutationReport reportPath "reports\/\*\.json" looks like a glob/,
+    ],
+    [
+      "a character-class reportPath",
+      { command: "pnpm run mutate", reportPath: "reports/mutation-[12].json" },
+      /looks like a glob/,
+    ],
+    [
+      "an absolute reportPath",
+      { command: "pnpm run mutate", reportPath: "/var/tmp/mutation.json" },
+      /must be repo-relative, not absolute/,
+    ],
+    [
+      "a drive-absolute reportPath",
+      { command: "pnpm run mutate", reportPath: "C:\\tmp\\mutation.json" },
+      /must be repo-relative, not absolute/,
+    ],
+    [
+      "a traversing reportPath",
+      { command: "pnpm run mutate", reportPath: "../outside/mutation.json" },
+      /must not traverse outside the worktree/,
+    ],
+    [
+      "a non-object declaration",
+      "pnpm run mutate",
+      /mutationReport must be a JSON object holding command and reportPath/,
+    ],
+  ])(
+    "[behavior:#303:B-03] refuses %s, naming the member at fault",
+    (_label, mutationReport: unknown, expected: RegExp) => {
+      expect(() =>
+        parseAfkManifest({
+          version: 1,
+          selectedSlices: ["01"],
+          mutationReport,
+        }),
+      ).toThrow(expected);
+    },
+  );
+
+  it("[behavior:#303:P-02] still refuses a foreign version and still returns every existing member", () => {
+    expect(() => parseAfkManifest({ version: 2, selectedSlices: ["01"] })).toThrow();
+    expect(() => parseAfkManifest({ selectedSlices: ["01"] })).toThrow();
+    // The new optional member did not loosen anything that was already checked.
+    expect(() =>
+      parseAfkManifest({
+        version: 1,
+        selectedSlices: ["01"],
+        migrationPrefixes: ["144", "144"],
+      }),
+    ).toThrow(/unique numeric prefixes/);
+    expect(
+      parseAfkManifest({
+        version: 1,
+        selectedSlices: ["2"],
+        migrationPrefixes: ["144"],
+        protectedIssues: [{ number: 759, state: "closed" }],
+        protectedChangeWaivers: [
+          {
+            riskClass: "gate-policy",
+            path: "./src\\a.ts",
+            author: "eric",
+            reason: "why",
+          },
+        ],
+        mutationReport: {
+          command: "pnpm run mutate",
+          reportPath: "reports/mutation.json",
+        },
+      }),
+    ).toEqual({
+      version: 1,
+      selectedSlices: ["02"],
+      migrationPrefixes: ["144"],
+      protectedIssues: [{ number: 759, state: "CLOSED" }],
+      protectedChangeWaivers: [
+        {
+          riskClass: "gate-policy",
+          path: "src/a.ts",
+          author: "eric",
+          reason: "why",
+        },
+      ],
+      mutationReport: {
+        command: "pnpm run mutate",
+        reportPath: "reports/mutation.json",
+      },
+    });
+  });
+
   it("rejects duplicate reservations", () => {
     expect(() => parseAfkManifest({
       version: 1,
@@ -240,5 +392,34 @@ describe("afk.json", () => {
       JSON.parse(readFileSync(join(prd, "afk.json"), "utf-8"))
         .protectedChangeWaivers,
     ).toEqual(waivers);
+  });
+
+  it("[behavior:#303:B-05] keeps the mutation declaration when the ship gate rewrites the manifest", () => {
+    const prd = tempPrd();
+    const mutationReport = {
+      command: "pnpm run mutate",
+      reportPath: "reports/mutation.json",
+    };
+    writeFileSync(
+      join(prd, "afk.json"),
+      JSON.stringify({
+        version: 1,
+        selectedSlices: ["01"],
+        migrationPrefixes: ["144", "145"],
+        protectedIssues: [],
+        mutationReport,
+      }),
+    );
+
+    const result = trimUnclaimedMigrationPrefixes(prd, ["145"]);
+
+    expect(result.changed).toBe(true);
+    expect(result.manifest.mutationReport).toEqual(mutationReport);
+    // The trim rewrites the whole file, and the ship gate's own mutation step
+    // reads this declaration on a later run: dropping it here would silently
+    // turn a declared run into `MUTATION_NOT_RUN`.
+    expect(
+      JSON.parse(readFileSync(join(prd, "afk.json"), "utf-8")).mutationReport,
+    ).toEqual(mutationReport);
   });
 });
