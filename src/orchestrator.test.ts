@@ -8346,3 +8346,271 @@ describe("the generator self-audit call site", () => {
     expect(failureBranch).not.toContain("await runQAStage(");
   });
 });
+
+/**
+ * The changed-tree path in the hub (#300 B-05, B-06, B-07, B-09, B-10, P-06).
+ *
+ * A source-order scan for the same reason the #299 scan is one: `--self-audit`
+ * is default off, so no spawned scenario reaches the audited branch, and every
+ * claim here — one call site, which region the failure branch is, and which
+ * binding each pass-path consumer reads — is a fact about this file. Line endings
+ * are normalized so the delimiters are the same tokens on Windows and on CI.
+ */
+describe("the audited-tree gate re-run call site", () => {
+  const source = readFileSync(
+    fileURLToPath(new URL("./orchestrator.ts", import.meta.url)),
+    "utf-8",
+  ).replace(/\r\n/g, "\n");
+  const auditAt = source.indexOf("runSelfAuditStage(");
+  const verifyAt = source.indexOf("verifyAuditedTree(");
+  const qaDispatchAt = source.indexOf("await runQAStage(");
+  const occurrences = (token: string) =>
+    [...source.matchAll(new RegExp(escapeForRegExp(token), "g"))].map(
+      (match) => match.index!,
+    );
+
+  it("[behavior:#300:B-05] verifies the audited tree once, between the audit and the QA dispatch", () => {
+    // Exactly one call site in the hub: the changed-tree orchestration lives in
+    // `src/self-audit.ts` behind injected callbacks (ARCHITECTURE.md "Hubs — do
+    // not grow these").
+    expect(occurrences("verifyAuditedTree(")).toHaveLength(1);
+    expect(auditAt).toBeGreaterThan(-1);
+    expect(auditAt).toBeLessThan(verifyAt);
+    expect(verifyAt).toBeLessThan(qaDispatchAt);
+
+    // Entered only on the verdict the hub used to discard, so an audited
+    // cheap-gate pass falls through to the same deterministic QA dispatch.
+    const guardAt = source.indexOf('"AUDIT_CHANGED"', auditAt);
+    expect(guardAt).toBeGreaterThan(auditAt);
+    expect(guardAt).toBeLessThan(verifyAt);
+  });
+
+  it("[behavior:#300:B-07] spends no generator round between the audit and the QA dispatch", () => {
+    // Neither the audit nor its verification advances a round of its own: an
+    // audited failure spends an ordinary repair round through B-06's existing
+    // mechanism instead.
+    const region = source.slice(auditAt, qaDispatchAt);
+    expect(region).not.toContain("logger.bumpEvalRound(");
+    expect(region).not.toMatch(/\bround\s*(?:\+\+|\+=)/);
+    expect(region).not.toMatch(/\bround\s*=\s*round\s*\+/);
+  });
+
+  it("[behavior:#300:B-06] enters the existing bounded repair loop on an audited failure", () => {
+    const repairAt = source.indexOf('outcome === "REPAIR"');
+    expect(repairAt).toBeGreaterThan(verifyAt);
+    expect(repairAt).toBeLessThan(qaDispatchAt);
+    const region = source.slice(repairAt, qaDispatchAt);
+
+    // The same shape the pre-audit gate failure uses: references onto
+    // `stuckReferences`, a rebuilt `generatorFailureSet`, a same-shaped retry
+    // note, and then either another attempt or the existing terminal exit.
+    for (const token of [
+      "stuckReferences.push(...audited.evidenceReferences);",
+      "generatorFailureSet = {",
+      "findings: generatorFailureSet.findings,",
+      "retryNote =",
+      "if (implementationAttempt < implementationAttemptLimit) continue;",
+      "return finishIntervention(",
+      "candidateLifecycle.exhaustDeterministicGates({",
+      "candidateTreeId: audited.auditedTreeId,",
+      "failedGateIds: audited.failedGateIds,",
+      "attemptTreeIds: implementationCandidateTreeIds,",
+      "supportingEvidence: audited.evidenceReferences,",
+    ]) {
+      expect(region, token).toContain(token);
+    }
+
+    // No second budget: an audited tree's cheap-gate failure is an ordinary
+    // repair round with the usual counters, so this region declares none of its
+    // own.
+    expect(region).not.toMatch(
+      /\b(?:let|const)\s+\w*(?:[Cc]ount|[Cc]ounter|[Aa]ttempt|[Rr]ound|[Bb]udget|[Ll]imit)\w*\s*=/,
+    );
+  });
+
+  it("[behavior:#300:B-10] registers the audited tree as the attempt's candidate on both branches", () => {
+    const repairAt = source.indexOf('outcome === "REPAIR"');
+    // The callback is bound at the call site itself and pushes onto the same
+    // array the pre-audit checkpoint pushes onto, so it cannot be reached only
+    // from the pass branch: `verifyAuditedTree` calls it before running gates.
+    const callSite = source.slice(verifyAt, repairAt);
+    expect(callSite).toContain("onCandidateTree: (treeId) =>");
+    expect(callSite).toContain("implementationCandidateTreeIds.push(treeId),");
+    // Two pushes in the whole file: the pre-audit checkpoint's and this one.
+    expect(occurrences("implementationCandidateTreeIds.push(")).toHaveLength(2);
+    // And no push of the audited id inside the pass-only branch.
+    expect(
+      source.slice(repairAt, qaDispatchAt),
+    ).not.toContain("implementationCandidateTreeIds.push(");
+  });
+
+  it("[behavior:#300:B-09] hands every pass-path consumer the one graded-candidate binding", () => {
+    // The deterministic QA dispatch.
+    expect(source).toContain("gradedCandidate.baseGate,");
+    expect(source).toContain("candidateCommitSha: gradedCandidate.commitSha,");
+    // The dispatch and the shared-preview stage.
+    expect(
+      occurrences("candidateTreeId: gradedCandidate.treeId,"),
+    ).toHaveLength(2);
+    // The post-QA tree-authority guard — the reason this is required rather
+    // than optional (ADR 0012).
+    expect(source).toContain("qaApprovedTreeId: gradedCandidate.treeId,");
+
+    // The approved baseline, bounded to its own argument object so the
+    // `artifact.treeId === input.treeId` evidence filter selects the audited
+    // run's artifacts instead of dropping every one.
+    const baselineAt = source.indexOf("writeApprovedBaseline(ctx, round, {");
+    expect(baselineAt).toBeGreaterThan(-1);
+    const baselineArgs = source.slice(
+      baselineAt,
+      source.indexOf("});", baselineAt) + 3,
+    );
+    expect(baselineArgs).toContain("treeId: gradedCandidate.treeId,");
+    expect(baselineArgs).toContain("commit: gradedCandidate.commitSha,");
+    expect(baselineArgs).not.toContain("treeId: checkpoint.treeId,");
+
+    // No pass-path consumer still reads the pre-audit pair.
+    for (const token of [
+      "qaApprovedTreeId: checkpoint.treeId,",
+      "candidateCommitSha: checkpoint.commitSha,",
+      "commit: checkpoint.commitSha,",
+    ]) {
+      expect(occurrences(token), token).toHaveLength(0);
+    }
+
+    // What survives is not a consumer of the graded candidate: the pre-audit
+    // gate run's own identity (P-06), which both P-06 and the audited base-gate
+    // object rest on.
+    const residualTreeId = occurrences("treeId: checkpoint.treeId,");
+    expect(residualTreeId).toHaveLength(1);
+    expect(residualTreeId[0]!).toBeLessThan(auditAt);
+    // And the two pre-audit `candidateTreeId: checkpoint.treeId,` fragments:
+    // P-02's exhaust argument and P-06's `qaBaseGate` literal.
+    const residualCandidate = occurrences("candidateTreeId: checkpoint.treeId,");
+    expect(residualCandidate).toHaveLength(2);
+    for (const at of residualCandidate) expect(at).toBeLessThan(auditAt);
+  });
+
+  it("[behavior:#300:P-06] leaves the pre-audit release sequence in its present text and order", () => {
+    const preQaGateRunAt = source.indexOf(
+      "const preQaGateRun = await runCandidateGatePhase({",
+    );
+    expect(preQaGateRunAt).toBeGreaterThan(-1);
+    const preQaGateRun = source.slice(
+      preQaGateRunAt,
+      source.indexOf("gateArtifacts.push(...preQaGateRun.artifacts);"),
+    );
+    // The pre-audit gate run still names the pre-audit tree and the pre-audit
+    // declaration set, and is never rebound to the audited tree.
+    expect(preQaGateRun).toContain("treeId: checkpoint.treeId,");
+    expect(preQaGateRun).toContain("declarations: preQaDeclarations,");
+
+    const releaseAt = source.indexOf("assertGateEvidenceReleasesEvaluation(");
+    const verifyLoopAt = source.indexOf(
+      "for (const artifact of gateArtifacts) verifyGateEvidence(artifact);",
+    );
+    const qaBaseGateAt = source.indexOf("const qaBaseGate: QABaseGateEvidence");
+    const baseGateTreeAt = source.indexOf(
+      "candidateTreeId: checkpoint.treeId,",
+      qaBaseGateAt,
+    );
+    for (const [name, at] of [
+      ["pre-audit gate run", preQaGateRunAt],
+      ["gate-release assertion", releaseAt],
+      ["evidence verification loop", verifyLoopAt],
+      ["qaBaseGate literal", qaBaseGateAt],
+      ["qaBaseGate candidate tree id", baseGateTreeAt],
+    ] as const) {
+      expect(at, name).toBeGreaterThan(-1);
+    }
+    // In that order, and all of it before the audit — only a tree the pre-audit
+    // gates released is ever audited, and the audited verification is additive.
+    expect(preQaGateRunAt).toBeLessThan(releaseAt);
+    expect(releaseAt).toBeLessThan(verifyLoopAt);
+    expect(verifyLoopAt).toBeLessThan(qaBaseGateAt);
+    expect(qaBaseGateAt).toBeLessThan(baseGateTreeAt);
+    expect(baseGateTreeAt).toBeLessThan(auditAt);
+  });
+
+  it("[behavior:#300:P-02] leaves the pre-audit required-gate failure exit untouched", () => {
+    // The same span the #299 scan reads: everything between the
+    // `requiredFailures` assignment and the gate-release assertion.
+    const requiredFailuresAt = source.indexOf(
+      "requiredFailures = collectRequiredGateFailures(",
+    );
+    const gateReleaseAt = source.indexOf(
+      "assertGateEvidenceReleasesEvaluation(",
+    );
+    const failureBranch = source.slice(requiredFailuresAt, gateReleaseAt);
+
+    // Today's exit, still: the audit creates no new failure path for a candidate
+    // that never reached it.
+    for (const token of [
+      "const baseGateRepairReferences = [",
+      "stuckReferences.push(...baseGateRepairReferences);",
+      "retryNote =",
+      "return finishIntervention(",
+      "candidateLifecycle.exhaustDeterministicGates({",
+      "candidateTreeId: checkpoint.treeId,",
+      "attemptTreeIds: implementationCandidateTreeIds,",
+      "supportingEvidence: baseGateRepairReferences,",
+    ]) {
+      expect(failureBranch, token).toContain(token);
+    }
+    // No audit, no audited checkpoint and no gate re-run on this path.
+    expect(failureBranch).not.toContain("runSelfAuditStage(");
+    expect(failureBranch).not.toContain("verifyAuditedTree(");
+    expect(failureBranch).not.toContain("await runQAStage(");
+  });
+
+  it("[behavior:#300:P-05] keeps the self-audit call site in its single position", () => {
+    // Capturing the stage's return value moves no call site: still exactly one,
+    // still after the gate-release assertion and the `requiredFailures`
+    // assignment, still before the deterministic QA dispatch.
+    expect(occurrences("runSelfAuditStage(")).toHaveLength(1);
+    const requiredFailuresAt = source.indexOf(
+      "requiredFailures = collectRequiredGateFailures(",
+    );
+    const gateReleaseAt = source.indexOf(
+      "assertGateEvidenceReleasesEvaluation(",
+    );
+    expect(requiredFailuresAt).toBeLessThan(gateReleaseAt);
+    expect(gateReleaseAt).toBeLessThan(auditAt);
+    expect(auditAt).toBeLessThan(qaDispatchAt);
+    // And its injected dispatch keeps its present body and per-invocation
+    // bounds (ADR 0002, ADR 0007).
+    const stageArgs = source.slice(auditAt, verifyAt);
+    expect(stageArgs).toContain('role: "generator",');
+    expect(stageArgs).toContain("longCommandRoleBounds({");
+  });
+
+  it("[behavior:#300:P-04] leaves ADR 0012's tree-authority machinery unedited", () => {
+    // Only *which* tree id the hub hands the existing guard changes. The guard
+    // itself, and the two modules that own it, are outside this slice's file
+    // scope — so this reads them for the refusals they still make.
+    const read = (name: string) =>
+      readFileSync(
+        fileURLToPath(new URL(`./${name}`, import.meta.url)),
+        "utf-8",
+      );
+    expect(read("post-qa-gates.ts")).toContain(
+      "The QA verdict does not authorize ",
+    );
+    expect(read("post-qa-gates.ts")).toContain("this tree (ADR 0012).");
+    expect(read("qa-gate-authorization.ts")).toContain(
+      "export function authorizeBaseGateSkip",
+    );
+    expect(read("gate-runner.ts")).toContain(
+      "export function resolveCandidateTreeId",
+    );
+    // And the changed-tree module reaches none of them: it re-runs gates and
+    // builds evidence, it does not authorize a skip.
+    const selfAudit = read("self-audit.ts");
+    expect(selfAudit).not.toContain("post-qa-gates.js");
+    expect(selfAudit).not.toContain("qa-gate-authorization.js");
+  });
+});
+
+function escapeForRegExp(token: string): string {
+  return token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}

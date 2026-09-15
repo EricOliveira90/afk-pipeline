@@ -183,7 +183,14 @@ import {
   validateFinalReview,
   type PostApprovalWritingStage,
 } from "./final-evaluation.js";
-import { runSelfAuditStage } from "./self-audit.js";
+import {
+  resolveGradedCandidate,
+  runSelfAuditStage,
+  selectAuditedGateDeclarations,
+  verifyAuditedTree,
+  type AuditedBaseGateEvidence,
+  type GradedCandidateIdentity,
+} from "./self-audit.js";
 import { createCleanerOrchestrationSession } from "./cleaner-orchestration.js";
 import { createCleanerContinuation } from "./cleaner-continuation.js";
 import {
@@ -6229,6 +6236,13 @@ export async function runSliceExecute(
             });
       implementationCandidateTreeIds.push(checkpoint.treeId);
       const gateCwd = checkpoint.worktreeDir ?? checkpointDir;
+      /**
+       * The audited checkpoint's worktree, when the changed-tree path minted one
+       * (#300). Declared beside the round's own checkpoint and removed in the
+       * same `finally`, so an audited gate run leaves no registered worktree
+       * behind however the attempt ends.
+       */
+      let auditedCheckpointWorktreeDir: string | undefined;
       const evidenceDir = join(logger.runDir, "gates", `s${slice.number}`);
       // One read of the test-cost policy for this round, shared by the gate
       // cache and the skip gate below (#86 B-01: `resolveTestCostPlan` is the
@@ -6413,10 +6427,10 @@ export async function runSliceExecute(
         // the run was not launched with `--self-audit`, so this costs a
         // default run nothing; it declines rather than throws in every case,
         // because a gate that adds scrutiny may never block a run by its own
-        // failure. Only the unchanged-tree path is orchestrated here — an
-        // `AUDIT_CHANGED` verdict is classified and changes nothing downstream
-        // until #300 wires the audited tree into the dispatch below.
-        await runSelfAuditStage({
+        // failure. Its verdict is captured rather than discarded: a changed tree
+        // has not been through the required cheap gates, so #300's re-run below
+        // decides which tree QA grades.
+        const selfAuditOutcome = await runSelfAuditStage({
           repoRoot: config.repoRoot,
           prdSlug: config.prdSlug,
           ghIssue: slice.ghIssue,
@@ -6461,6 +6475,142 @@ export async function runSliceExecute(
             }
           },
         });
+        /**
+         * The changed-tree path (#300 B-05, ADR 0069). A tree the audit rewrote
+         * has not been through the required cheap gates, so exactly the
+         * catalog-derived required declarations that released the pre-audit tree
+         * run again on the audited one. Entered only on `AUDIT_CHANGED`: every
+         * other verdict, and a declined stage, leaves the pre-audit pair as the
+         * graded candidate, which is what keeps a default run on today's path.
+         */
+        let auditedGraded:
+          | GradedCandidateIdentity<AuditedBaseGateEvidence>
+          | undefined;
+        if (
+          selfAuditOutcome.ran &&
+          selfAuditOutcome.verdict === "AUDIT_CHANGED"
+        ) {
+          const auditedDeclarations = selectAuditedGateDeclarations(
+            preQaDeclarations,
+            resolveCheapGateCatalog(ctx.worktreeDir),
+          );
+          const audited = await verifyAuditedTree({
+            repoRoot: config.repoRoot,
+            // A path of its own: `createCandidateCheckpoint` throws when its
+            // target already exists, and this round's own checkpoint is still
+            // registered until the attempt's `finally` removes it.
+            checkpointDir: `${checkpointDir}-audited`,
+            evidenceDir,
+            declarations: auditedDeclarations,
+            createCheckpoint: (dir) => {
+              const minted = auditedDeclarations.some(
+                (declaration) => declaration.command != null,
+              )
+                ? createCandidateCheckpoint(ctx.worktreeDir, dir)
+                : createCandidateCheckpoint(ctx.worktreeDir, dir, {
+                    materialize: false,
+                  });
+              auditedCheckpointWorktreeDir = minted.worktreeDir;
+              return minted;
+            },
+            // Mirrors the pre-audit checkpoint's own push, and before the gates
+            // run, so the array's last entry is the tree currently under grading
+            // on the pass branch and the failure branch alike (B-10).
+            onCandidateTree: (treeId) =>
+              implementationCandidateTreeIds.push(treeId),
+            runGates: (gateRun) =>
+              runCandidateGatePhase({
+                repoRoot: config.repoRoot,
+                ghIssue: slice.ghIssue,
+                sliceNumber: slice.number,
+                tag: ctx.tag,
+                round,
+                treeId: gateRun.treeId,
+                cwd: gateRun.cwd,
+                evidenceDir,
+                declarations: gateRun.declarations,
+                ...(gatePrepare &&
+                gateRun.declarations.some(
+                  (declaration) => declaration.command != null,
+                )
+                  ? { prepare: gatePrepare }
+                  : {}),
+                cache: gateCache,
+                label: "audited-tree cheap gates",
+                signal,
+                infrastructureRetries:
+                  config.infrastructureRetries ??
+                  DEFAULT_INFRASTRUCTURE_RETRIES,
+                inactivityTimeoutMs:
+                  config.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+                wallClockTimeoutMs: DEFAULT_BASE_GATE_WALL_CLOCK_TIMEOUT_MS,
+                heartbeatIntervalMs:
+                  config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
+                onGateOutcome: (outcome) => {
+                  logger.event({
+                    type: "gate-outcome",
+                    ghIssue: slice.ghIssue,
+                    sliceNumber: slice.number,
+                    round,
+                    ...outcome,
+                  });
+                },
+                onInfrastructureRetry: (message) => {
+                  logger.phase(message, "error", {
+                    type: "warn",
+                    reason: "infrastructure-retry",
+                    ghIssue: slice.ghIssue,
+                    message,
+                  });
+                },
+              }),
+          });
+          gateArtifacts.push(...audited.artifacts);
+          if (audited.outcome === "REPAIR") {
+            // An ordinary repair round with the usual budget — the same bounded
+            // loop a pre-audit gate failure enters, spending no counter of its
+            // own and adding no terminal exit. No `logger.bumpEvalRound` here:
+            // neither the audit nor its verification spends a generator round
+            // (B-07), so the round the audited failure spends is this repair
+            // round and nothing more.
+            stuckReferences.push(...audited.evidenceReferences);
+            generatorFailureSet = {
+              findings: generatorFailureSet.findings,
+              gates: audited.failedGateIds.map((gateId) => ({
+                id: gateId,
+                evidence: audited.evidenceReferences,
+              })),
+            };
+            retryNote =
+              `This is implementation round ${round + 1}. Base gates failed ` +
+              `on the tree your self-audit left behind. Fix every entry in ` +
+              `the current failure set at the end of this prompt without ` +
+              `regressing behavior that already passes.`;
+            if (implementationAttempt < implementationAttemptLimit) continue;
+            return finishIntervention(
+              candidateLifecycle.exhaustDeterministicGates({
+                candidateTreeId: audited.auditedTreeId,
+                revision: Math.max(qaConvergence.revision, round),
+                failedGateIds: audited.failedGateIds,
+                attemptTreeIds: implementationCandidateTreeIds,
+                supportingEvidence: audited.evidenceReferences,
+              }).request,
+            );
+          }
+          auditedGraded = audited.graded;
+        }
+        /**
+         * One value every pass-path consumer of the candidate identity reads
+         * (#300 B-08, B-09). The declared risk is a divergence between those
+         * consumers — the QA dispatch grading one tree while `runPostQAGates`
+         * authorizes another (ADR 0012) — and a single value cannot diverge from
+         * itself. On every path but an audited pass it *is* the pre-audit pair.
+         */
+        const gradedCandidate = resolveGradedCandidate<QABaseGateEvidence>({
+          released: checkpoint,
+          releasedBaseGate: qaBaseGate,
+          ...(auditedGraded === undefined ? {} : { audited: auditedGraded }),
+        });
         logger.phase(
           `${ctx.tag}: deterministic QA (round ${round}/${finalRound})...`,
           "error",
@@ -6478,10 +6628,10 @@ export async function runSliceExecute(
           "deterministic",
           deterministicHistory,
           deterministicUnresolved,
-          qaBaseGate,
+          gradedCandidate.baseGate,
           {
-            candidateTreeId: checkpoint.treeId,
-            candidateCommitSha: checkpoint.commitSha,
+            candidateTreeId: gradedCandidate.treeId,
+            candidateCommitSha: gradedCandidate.commitSha,
             position: {
               implementationAttempt,
               implementationAttemptLimit,
@@ -6506,8 +6656,8 @@ export async function runSliceExecute(
           // (#91 AC5): the tree the gates and the verdict both covered, plus
           // the bytes of the contract it was graded against.
           writeApprovedBaseline(ctx, round, {
-            treeId: checkpoint.treeId,
-            commit: checkpoint.commitSha,
+            treeId: gradedCandidate.treeId,
+            commit: gradedCandidate.commitSha,
             gateArtifacts,
           });
         }
@@ -6566,7 +6716,7 @@ export async function runSliceExecute(
             sharedPreviewUnresolved,
             null,
             {
-              candidateTreeId: checkpoint.treeId,
+              candidateTreeId: gradedCandidate.treeId,
               position: {
                 implementationAttempt,
                 implementationAttemptLimit,
@@ -6710,7 +6860,7 @@ export async function runSliceExecute(
             // exact expected QA-window artifacts, plus the accepted pair
             // at exactly the bytes an audited scope amendment wrote
             // (architect A1, ADR 0012).
-            qaApprovedTreeId: checkpoint.treeId,
+            qaApprovedTreeId: gradedCandidate.treeId,
             reviewArtifactDir: ctx.relSliceDir,
             ...(amendedPairBlobsThisAttempt
               ? {
@@ -7905,12 +8055,16 @@ export async function runSliceExecute(
         );
       }
       } finally {
-        if (checkpoint.worktreeDir) {
+        for (const [label, dir] of [
+          ["checkpoint worktree", checkpoint.worktreeDir],
+          ["audited checkpoint worktree", auditedCheckpointWorktreeDir],
+        ] as const) {
+          if (!dir) continue;
           await git.removeWorktreeOrWarn(
             ctx.worktreeDir,
-            checkpoint.worktreeDir,
+            dir,
             {
-              label: "checkpoint worktree",
+              label,
               warn: (message) => logger.phase(`${ctx.tag}: ${message}`),
             },
             { signal },
