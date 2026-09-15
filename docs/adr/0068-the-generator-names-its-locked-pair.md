@@ -57,6 +57,36 @@ Mechanics are the evaluator's, and nothing else moves:
   planner's. `acceptanceManifest` is still read — it is where the file-scope
   projection comes from — and every caller already passes both.
 
+  > **Amended by #284 (2026-09-14).** `contractView` is gone. The generator
+  > reads the whole locked contract from `{{SLICE_DIR}}/contract.md`; there is
+  > no projected-sections field, no `projectGeneratorContractView`, and no
+  > `GENERATOR_CONTRACT_SECTIONS` / `CONTRACT_SECTION_LEVELS` list of the
+  > sections a generator is allowed to see. Keeping it contradicted this ADR's
+  > own rule below: an envelope must not inline a file the role can open in its
+  > own worktree, and a field carrying a *projection* of that file is the same
+  > copy with sections filed off. Worse, it was inert — written at both
+  > dispatch sites, read at none — and the projection threw on a contract with
+  > duplicated projected headings, so a legal contract could kill an accepted,
+  > locked slice's generator round while computing a string nobody read.
+  >
+  > `acceptanceManifest` stays, unchanged and still read, for the reason above.
+  > The `contract-view` artifact class, its evidence entry and its
+  > `CONTRACT_PAIR_BY_REFERENCE` exemption also stay: they name
+  > `{{SLICE_DIR}}/contract.md`, so the by-reference evidence and the overflow
+  > breakdown's "by reference" line are what this ADR shipped.
+  >
+  > The symmetry claimed above turns out to cut the other way: `proposedContract`
+  > on `ContractEvaluatorEnvelopeCommonInput` and `currentContract` /
+  > `currentAcceptanceManifest` on `PlannerRevisionEnvelopeInput` are write-only
+  > too — `contract-prompt-orchestration.ts` forwards them and no assembler
+  > reads them. #284 does not remove them, and the difference is not cosmetic:
+  > those two are a plain `readFileSync` of a file the round opens anyway, so
+  > they waste a read, whereas the generator's was a parser with a throw path,
+  > so it wasted a read *and* owned a failure mode. Their removal crosses five
+  > input types in `contract-prompt-orchestration.ts` and their orchestrator
+  > callers; it wants its own ticket, and the rule to apply when it is written
+  > is the one below, not the symmetry sentence above.
+
 **The derived `file-scope` block stays inlined.** It is 837 bytes, it is a
 projection of the manifest rather than a copy of a file, and it is the write
 boundary the scope gate holds the generator to. The prompt says so explicitly,
