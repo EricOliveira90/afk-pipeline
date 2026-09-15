@@ -2408,7 +2408,7 @@ describe("runShipGate — the report-only mutation step", () => {
     expect(prAt).toBeGreaterThan(mutationAt);
   });
 
-  it("[behavior:#303:B-12] terminates the step and reports BOUND_REACHED once the bound is spent", async () => {
+  it("[behavior:#303:B-12] [behavior:#304:P-05] terminates the step and reports BOUND_REACHED once the bound is spent", async () => {
     vi.mocked(quiesceWorktree).mockClear();
     const slug = "mutation-bound";
     const repo = makeChangedRepo(slug);
@@ -2446,7 +2446,7 @@ describe("runShipGate — the report-only mutation step", () => {
     expect(result.pr?.requested).toBe(true);
   });
 
-  it("[behavior:#303:B-12] never spawns a step still deriving its scope once the bound is spent", async () => {
+  it("[behavior:#303:B-12] [behavior:#304:P-05] never spawns a step still deriving its scope once the bound is spent", async () => {
     vi.mocked(quiesceWorktree).mockClear();
     const slug = "mutation-bound-unspawned";
     const repo = makeChangedRepo(slug);
@@ -2484,7 +2484,7 @@ describe("runShipGate — the report-only mutation step", () => {
     expect(result.verdict).toBe("SHIP");
   });
 
-  it("[behavior:#303:B-12] takes the bounded wait's origin after both guardian results are in hand", async () => {
+  it("[behavior:#303:B-12] [behavior:#304:P-05] takes the bounded wait's origin after both guardian results are in hand", async () => {
     vi.mocked(quiesceWorktree).mockClear();
     const slug = "mutation-rejoin-origin";
     const repo = makeChangedRepo(slug);
@@ -2574,7 +2574,146 @@ describe("runShipGate — the report-only mutation step", () => {
     expect(declared.result.verdict).toBe(absent.result.verdict);
   });
 
-  it("[behavior:#303:P-01] runs nothing, publishes nothing and terminates nothing without the declaration", async () => {
+  it("[behavior:#304:B-12] reports the same gate ids, gate results, verdict and PR decision with attribution as without it", async () => {
+    // A baseline that holds nothing, so this run's one survivor is new, and a
+    // decisions file that accepts it — the strongest label set attribution can
+    // produce, including the one label a reader might mistake for a suppression.
+    const BASELINE_PATH = "reports/mutation-baseline.json";
+    const DECISIONS_PATH = "docs/mutation-decisions.json";
+    const DECISIONS = {
+      version: 1,
+      decisions: [
+        {
+          id: "42",
+          file: "src/cart.ts",
+          verdict: "ACCEPT",
+          consequence: "a mis-summed cart total the invoice job would catch",
+          containment: "reconciliation runs nightly and reports the delta",
+          reasoning: "the arithmetic is asserted end to end, not per operator",
+        },
+      ],
+    };
+
+    async function runOnce(attributed: boolean) {
+      vi.mocked(quiesceWorktree).mockClear();
+      const slug = `mutation-labels-${attributed ? "declared" : "absent"}`;
+      const repo = makeChangedRepo(slug);
+      const fixture = makeJournal();
+      const runCommand = ghRunCommand();
+      const args = makeArgs(repo, slug, teeing(fixture), shipInvoke(slug), runCommand);
+      // Both runs are wired identically and both really run the step; only the
+      // two attribution paths differ, which is what a project that keeps a
+      // baseline and a decisions file differs from one that does not by.
+      args.mutationReport = attributed
+        ? { ...CONFIG, baselinePath: BASELINE_PATH, decisionsPath: DECISIONS_PATH }
+        : CONFIG;
+      args.mutationScope = async () => ["src/cart.ts"];
+      args.mutationRun = async (_command, _files, options) => {
+        writeReportInto(options.cwd);
+        mkdirSync(join(options.cwd, "docs"), { recursive: true });
+        writeFileSync(
+          join(options.cwd, BASELINE_PATH),
+          JSON.stringify({ files: {} }),
+          "utf-8",
+        );
+        writeFileSync(
+          join(options.cwd, DECISIONS_PATH),
+          JSON.stringify(DECISIONS),
+          "utf-8",
+        );
+        return "";
+      };
+
+      const result = await runShipGate(args);
+      return {
+        surface: gateSurface(fixture),
+        record: loadRunState(repo, slug).mutationStep,
+        body: prBody(runCommand),
+        result,
+      };
+    }
+
+    const attributed = await runOnce(true);
+    const plain = await runOnce(false);
+
+    // The declared run really attributed: the survivor came back `accepted`,
+    // which is the label most likely to be mistaken for a gate input.
+    expect(attributed.record).toEqual({
+      runSlug: "mutation-labels-declared",
+      status: "MUTATION_REPORTED",
+      survivors: [{ ...SURVIVORS[0]!, label: "accepted" }],
+    });
+    expect(plain.record).toEqual({
+      runSlug: "mutation-labels-absent",
+      status: "MUTATION_REPORTED",
+      survivors: SURVIVORS,
+    });
+    // And it reached the reader: marked, never suppressed — the accepted
+    // survivor is still a bullet in the published body.
+    expect(attributed.body).toContain(
+      "- `42` src/cart.ts:3:11 — ArithmeticOperator — accepted",
+    );
+
+    // Set-for-set identical gate surface: no label or note is a gate id, a
+    // `GateDeclaration`, a `GateFindings` field, a threshold or a verdict input,
+    // so an `accepted` survivor changes nothing a gate decides (ADR 0063,
+    // ADR 0071's "no blocking mutation gate").
+    expect(attributed.surface.length).toBeGreaterThan(0);
+    expect(attributed.surface).toEqual(plain.surface);
+    expect(JSON.stringify(attributed.surface)).not.toMatch(
+      /accepted|pre-existing|new-in-this-run|unattributed|UNUSABLE/,
+    );
+    expect(attributed.result.verdict).toBe(plain.result.verdict);
+    expect(attributed.result.verdict).toBe("SHIP");
+    expect(attributed.result.pr).toEqual(plain.result.pr);
+    expect(attributed.result.failureReason).toBe(plain.result.failureReason);
+  });
+
+  it("[behavior:#304:B-12] keeps every label and note out of every gate module", () => {
+    // The mechanical half of the same rule: a gate that read a label would have
+    // to name one, and the modules that declare, run and adjudicate gates never
+    // do. Adding a kill-rate threshold or an `accepted`-count check to any of
+    // them fails here.
+    for (const name of [
+      "acceptance-gate",
+      "base-gates",
+      "candidate-gate-phase",
+      "candidate-gate-policy",
+      "feedback-integrity-gate",
+      "gate-policy",
+      "gate-runner",
+      "post-qa-gates",
+      "preship",
+      "qa-gate-authorization",
+      "scope-gate",
+      "skip-gate",
+      "suppression-gate",
+    ]) {
+      const source = readFileSync(join("src", `${name}.ts`), "utf-8");
+      expect(source).not.toContain("attributionNotes");
+      expect(source).not.toMatch(
+        /"(?:new-in-this-run|pre-existing|unattributed|accepted)"/,
+      );
+      expect(source).not.toContain("BASELINE_UNUSABLE");
+      expect(source).not.toContain("DECISIONS_UNUSABLE");
+    }
+    // The ship gate itself carries the notes into the record it persists and
+    // reads them nowhere else: one mention, in the record, not in a decision.
+    const gate = readFileSync(join("src", "ship-gate.ts"), "utf-8");
+    const mentions = gate
+      .split("\n")
+      .filter((line) => line.includes("attributionNotes"));
+    expect(mentions.length).toBeGreaterThan(0);
+    for (const line of mentions) {
+      expect(line).not.toMatch(/gate|verdict|threshold|blocked|Findings/i);
+    }
+    expect(gate).not.toMatch(/if \([^)]*attributionNotes/);
+    expect(gate).not.toMatch(
+      /"(?:new-in-this-run|pre-existing|unattributed|accepted)"/,
+    );
+  });
+
+  it("[behavior:#303:P-01] [behavior:#304:P-01] runs nothing, publishes nothing and terminates nothing without the declaration", async () => {
     vi.mocked(quiesceWorktree).mockClear();
     const slug = "mutation-flag-absent";
     const repo = makeChangedRepo(slug);

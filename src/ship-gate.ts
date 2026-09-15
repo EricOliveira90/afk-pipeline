@@ -1107,6 +1107,12 @@ export async function runShipGate(
           : {}),
         survivors:
           outcome.status === "MUTATION_REPORTED" ? outcome.survivors : [],
+        // Carried, not re-derived: the step is the one producer of labels and
+        // notes, so the record and the event stream say what it said (#304 B-11).
+        ...(outcome.status === "MUTATION_REPORTED" &&
+        outcome.attributionNotes !== undefined
+          ? { attributionNotes: outcome.attributionNotes }
+          : {}),
       };
       // Run state carries the fact with its provenance; the event stream is what
       // the summary and the PR body both derive their text from (B-13, B-14).
