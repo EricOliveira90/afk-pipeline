@@ -29,7 +29,9 @@ import {
   type ShipCommandRunner,
   type ShipGateJournal,
 } from "./ship-gate.js";
+import { readMutationStepOutcome } from "./logger.js";
 import {
+  formatMutationReportLines,
   MUTATION_REPORT_HEADING,
   MUTATION_STEP_BOUND_MS,
 } from "./mutation-report.js";
@@ -2505,6 +2507,130 @@ describe("runShipGate — the report-only mutation step", () => {
       await expect(runShipGate(args)).rejects.toBe(sentinel);
     });
   });
+});
+
+/**
+ * The draft PR body's mutation section (#303 B-15).
+ *
+ * The body renders no second version of what survived: it takes
+ * `readMutationStepOutcome`'s value through `formatMutationReportLines` — the
+ * same reader and the same formatter `run-summary.md` renders its own section
+ * from (B-14) — and it does so at both `buildPrCreationPlan` sites, the
+ * ordinary one and the guardian cap exit's (src/ship-gate.ts:1461, :1526).
+ * Asserted over hand-written event streams that are really read back, so a
+ * divergence between the two renderings fails here rather than in a spawned run.
+ */
+describe("[behavior:#303:B-15] the draft PR body's mutation section", () => {
+  const base = {
+    prdSlug: "demo",
+    specsDir: ".kiro/specs/demo",
+    architect: "SHIP" as const,
+    pm: "SHIP" as const,
+    openPrOnOverride: false,
+    closesIssues: ["303"],
+  };
+  /**
+   * The cap exit's plan site: a blocked round that spent the cap opens the same
+   * draft PR (ADR 0057 decision 4), so it must publish the same section.
+   */
+  const CAP_EXIT = {
+    architect: "FIX-BEFORE-SHIP" as const,
+    capExit: { cap: 3, unfavorableRounds: 3, filed: [] },
+  };
+  const SURVIVOR = {
+    id: "42",
+    file: "src/cart.ts",
+    mutator: "ArithmeticOperator",
+    position: { startLine: 3, startColumn: 11, endLine: 3, endColumn: 16 },
+  };
+
+  /** A real `events.jsonl` the reader parses, not an outcome handed in directly. */
+  function readerOver(
+    payload: Extract<RunEventPayload, { type: "mutation-step" }>,
+  ) {
+    const runDir = mkdtempSync(join(tmpdir(), "afk-mutation-pr-"));
+    tempDirs.push(runDir);
+    writeFileSync(
+      join(runDir, "events.jsonl"),
+      `${JSON.stringify(payload)}\n`,
+      "utf-8",
+    );
+    return readMutationStepOutcome(runDir);
+  }
+
+  /**
+   * The section's list block: the body's sections are joined by a blank line,
+   * so the third block under the heading is exactly the formatter's lines.
+   */
+  function reportedLinesIn(body: string): string {
+    const section = body.slice(body.indexOf(MUTATION_REPORT_HEADING));
+    return section.split("\n\n")[2]!;
+  }
+
+  it.each([
+    [
+      "survivors",
+      {
+        type: "mutation-step" as const,
+        runSlug: "demo",
+        status: "MUTATION_REPORTED" as const,
+        survivors: [
+          SURVIVOR,
+          {
+            id: "43",
+            file: "src/checkout.ts",
+            mutator: "StringLiteral",
+            position: { startLine: 4, startColumn: 20, endLine: 4, endColumn: 21 },
+          },
+        ],
+      },
+    ],
+    [
+      "no survivors",
+      {
+        type: "mutation-step" as const,
+        runSlug: "demo",
+        status: "MUTATION_REPORTED" as const,
+        survivors: [],
+      },
+    ],
+    [
+      "a not-run reason",
+      {
+        type: "mutation-step" as const,
+        runSlug: "demo",
+        status: "MUTATION_NOT_RUN" as const,
+        reason: "REPORT_MALFORMED" as const,
+        survivors: [],
+      },
+    ],
+  ])(
+    "[behavior:#303:B-15] publishes the reader's own text at both plan sites and still opens the draft PR for %s",
+    (_label, payload) => {
+      const report = readerOver(payload);
+      expect(report).toBeDefined();
+      const expected = formatMutationReportLines(report!).join("\n");
+
+      const plan = buildPrCreationPlan({ ...base, mutationStep: report });
+      const capped = buildPrCreationPlan({
+        ...base,
+        ...CAP_EXIT,
+        mutationStep: report,
+      });
+
+      // The same derivation, not a paraphrase of it: whatever the summary's
+      // reader says is what the body carries, character for character.
+      expect(reportedLinesIn(plan.body)).toBe(expected);
+      expect(reportedLinesIn(capped.body)).toBe(expected);
+      expect(plan.body).toContain(MUTATION_REPORT_HEADING);
+      expect(capped.body).toContain(MUTATION_REPORT_HEADING);
+      // Reported, never a gate (ADR 0063): every case still opens a draft PR,
+      // and the cap exit is still the cap exit.
+      expect(plan.open).toBe(true);
+      expect(capped.open).toBe(true);
+      expect(capped.cappedExit).toBe(true);
+    },
+  );
 });
 
 describe("[behavior:#303:B-16] the mutation outcome decides nothing", () => {

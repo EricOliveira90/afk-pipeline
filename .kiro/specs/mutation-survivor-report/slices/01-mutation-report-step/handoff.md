@@ -16,7 +16,7 @@
 - B-12: `src/mutation-report.ts:MUTATION_STEP_BOUND_MS` / `awaitMutationStepWithinBound`, `src/ship-gate.test.ts`
 - B-13: `src/run-state.ts:recordMutationStepOutcome` / `adaptLoadedState`, `src/run-events.ts:RunEventPayload`, `src/run-state.test.ts`
 - B-14: `src/mutation-report.ts:MUTATION_REPORT_HEADING` / `formatMutationReportLines`, `src/logger.ts:readMutationStepOutcome`, `src/logger.test.ts`
-- B-15: `src/ship-gate.ts:buildPrCreationPlan` (mutation section in the draft body), `src/ship-gate.test.ts`
+- B-15: `src/ship-gate.ts:buildPrCreationPlan` (mutation section in the draft body), `src/ship-gate.test.ts` (`the draft PR body's mutation section`)
 - B-16: `src/ship-gate.ts:buildPrCreationPlan` (decision fields unchanged), `src/ship-gate.test.ts`
 - B-17: `docs/adr/0071-report-only-mutation-survivor-step.md`, `ARCHITECTURE.md` (ship-path internals row), `src/mutation-report.test.ts`
 - P-01: `src/ship-gate.ts:runShipGate` (no declaration, no step), `src/logger.test.ts`, `src/ship-gate.test.ts`
@@ -40,6 +40,12 @@ New migration files: 0
 - Termination is one binding: `() => quiesceWorktree(reviewDir)`. Nothing in
   this slice spawns its own kill path, so a mutation process is torn down by the
   same code every other worktree process is.
+- B-15 gets its own named block rather than riding along inside B-11/B-12/B-16.
+  It reads a hand-written `events.jsonl` through `readMutationStepOutcome` and
+  asserts the plan body's list block equals `formatMutationReportLines`'s output
+  character for character, at both plan sites — the ordinary one and the cap
+  exit's — so "the PR renders the summary's derivation" is checked rather than
+  described.
 - The published text is one derivation. `readMutationStepOutcome(runDir)` reads
   this run's `events.jsonl` and both `run-summary.md` and the draft PR body
   render from it, so the stream, the summary and the PR cannot disagree.
@@ -72,6 +78,16 @@ New migration files: 0
 - `src/ship-gate.test.ts` imports no `beforeEach`; per-test spy state is cleared
   inline. `ARCHITECTURE.md` has a hard 150-line cap that its own assertion in
   `src/mutation-report.test.ts` enforces.
+- The `acceptance:behaviors` gate reads behavior tags out of **test names** only.
+  Asserting a behavior inside another behavior's test and citing it in a `// B-15:`
+  comment proves nothing to the gate: every behavior needs `[behavior:#303:<ID>]`
+  in an `it`/`describe` title of its own. Round 1 failed on exactly this — B-15's
+  assertions all existed and passed, under other behaviors' names.
+- `buildPrCreationPlan` joins its sections with a blank line and each section
+  joins its own lines with a single newline, so
+  `body.slice(body.indexOf(HEADING)).split("\n\n")[2]` is exactly the rendered
+  list block. That makes a strict `toBe` against the formatter possible where a
+  `toContain` sweep would not notice a second, divergent rendering.
 - Do not append large TypeScript blocks to a file with a bash heredoc here —
   backticks and apostrophes in the content break the outer quoting. Write the
   content to a file with the editor tools instead.
