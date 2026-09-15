@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "classification": "NON_CONVERGENCE",
+  "round": 3,
+  "attempt": 1,
+  "findings": [
+    {
+      "id": "F-08",
+      "severity": "BLOCKING",
+      "state": "OPEN",
+      "unresolved": true,
+      "plannerPosition": null,
+      "plannerEvidence": null,
+      "evaluatorEvidence": "\"the same `terminate` binding B-12 declares is invoked and the step promise is awaited to settlement **before** the guardian rejection is rethrown unchanged\" together with \"`terminate` on a `reviewDir` with no mutation process registered yet is a no-op, so the wrap is safe whether or not the command has spawned\", and B-12's \"the bound covers the rejoin exit and the wrap covers the throw exits\"."
+    }
+  ]
+}
