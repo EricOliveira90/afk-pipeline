@@ -688,6 +688,28 @@ describe("[behavior:#303:B-14] the one shared report text", () => {
     expect(lines[0]).toContain("ADR 0063");
     expect(MUTATION_REPORT_HEADING).toContain("never blocking");
   });
+
+  it("[behavior:#303:B-14] states the reason is missing rather than naming one the run never observed", () => {
+    // `reason` is optional on both the `mutation-step` event payload and the
+    // persisted record, so a reasonless not-run report is reachable from disk.
+    // Substituting a concrete reason here would put a diagnosis in the run
+    // summary and the PR body that nothing in the run ever produced.
+    const lines = formatMutationReportLines({
+      status: "MUTATION_NOT_RUN",
+      survivors: [],
+    });
+    expect(lines).toHaveLength(1);
+    for (const reason of [
+      "BOUND_REACHED",
+      "COMMAND_FAILED",
+      "REPORT_UNREADABLE",
+      "REPORT_MALFORMED",
+    ]) {
+      expect(lines[0]).not.toContain(reason);
+    }
+    expect(lines[0]).toContain("not recorded");
+    expect(lines[0]).toContain("ADR 0063");
+  });
 });
 
 describe("[behavior:#303:B-17] ADR 0071", () => {

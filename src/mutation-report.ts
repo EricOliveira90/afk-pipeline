@@ -503,9 +503,16 @@ export function formatMutationReportLines(report: {
   survivors: readonly MutationSurvivor[];
 }): string[] {
   if (report.status === "MUTATION_NOT_RUN") {
+    // A record with no reason is reachable from disk — `reason` is optional on
+    // both the event payload and the state record — and substituting a concrete
+    // one would make the summary and the PR body state a reason the run never
+    // observed. Say the reason is missing instead of inventing one.
     return [
-      `- Not run: \`${report.reason ?? "COMMAND_FAILED"}\` — no survivor list ` +
-        "was produced. Nothing was gated on this (ADR 0063).",
+      report.reason === undefined
+        ? "- Not run: reason not recorded — no survivor list was produced. " +
+          "Nothing was gated on this (ADR 0063)."
+        : `- Not run: \`${report.reason}\` — no survivor list was produced. ` +
+          "Nothing was gated on this (ADR 0063).",
     ];
   }
   if (report.survivors.length === 0) {
