@@ -17,6 +17,7 @@ import {
   type QualityStageOutcome,
 } from "./logger.js";
 import {
+  resolveSanityPlan,
   runPreShipSanity,
   type SanityCommandRunner,
   type SanityGateResult,
@@ -700,7 +701,16 @@ export async function runShipGate(
       phase: "sanity",
       cached: true,
     });
-    sanity = { ok: true, failures: [], failureKind: null };
+    // The cache stores a verdict, not a plan, so the skipped steps are
+    // re-resolved from the same tree the cached PASS was earned on (#238) — a
+    // reused PASS must not be the one verdict that says nothing about what it
+    // never ran.
+    sanity = {
+      ok: true,
+      failures: [],
+      failureKind: null,
+      skipped: resolveSanityPlan(reviewDir).skipped,
+    };
     journal.phase(
       `  ↩️  Reusing cached pre-ship sanity PASS for unchanged tree ${treeShaBefore.slice(0, 12)}.`,
       "log",
@@ -727,6 +737,9 @@ export async function runShipGate(
     verdict: sanity.ok ? "PASS" : "FAIL",
     failureKind: sanity.ok ? undefined : sanity.failureKind ?? undefined,
     terminationKind: sanity.terminationKind,
+    // Recorded on every verdict, PASS included: the event is the machine-readable
+    // half of the same record the summary line carries (#238).
+    skipped: sanity.skipped.length > 0 ? sanity.skipped : undefined,
   });
   journal.setSanityGate(sanity);
   if (!sanity.ok) {

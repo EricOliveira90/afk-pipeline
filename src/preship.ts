@@ -218,23 +218,56 @@ export interface SanityPlan {
    */
   prepare?: SanityCommand;
   steps: SanityCommand[];
+  /**
+   * Steps this project declares no script for, so the gate will not run them
+   * (#238). Skipping stays the intended behaviour — what was missing is the
+   * record. Without it a check that did not run is indistinguishable from one
+   * that passed, and this repo is the live example: it has no `lint` script, so
+   * its `lint` step has never run and every green pre-ship gate in its history
+   * reads as three steps passing when it was two.
+   *
+   * Deliberately beside `steps` rather than inside it: every reader of `steps`
+   * treats a member as something to execute, and a skipped entry carries no
+   * command. The vocabulary is `GateStatus`'s `"SKIPPED"` plus
+   * `gateStatusCell`'s prerequisite annotation — "it cost nothing, and here is
+   * why" — and *not* `skip-gate.ts`'s `tests:skipped`, which despite the name is
+   * a gate that FAILS when a candidate disables tests, not a record of a check
+   * that declined to run.
+   */
+  skipped: readonly SkippedSanityStep[];
+}
+
+/**
+ * One sanity step the project declares no script for, with the script names the
+ * plan looked for — so the record can say what was absent, not merely that
+ * something was.
+ */
+export interface SkippedSanityStep {
+  name: string;
+  scripts: readonly string[];
 }
 
 export function resolveSanityPlan(cwd: string): SanityPlan {
   const scripts = readPackageScripts(cwd);
-  if (!scripts) return { steps: [] };
   const steps: SanityCommand[] = [];
+  const skipped: SkippedSanityStep[] = [];
   for (const step of SANITY_STEPS) {
-    const scriptName = step.scripts.find((s) => scripts[s] != null);
+    const scriptName = scripts
+      ? step.scripts.find((s) => scripts[s] != null)
+      : undefined;
     if (scriptName) {
       steps.push({ name: step.name, command: "pnpm", args: ["run", scriptName] });
+    } else {
+      // An absent or unreadable `package.json` declares no script either, so its
+      // steps are skipped for the same reason and recorded the same way.
+      skipped.push({ name: step.name, scripts: step.scripts });
     }
   }
   // Nothing to run means nothing to prepare — a project without sanity
   // scripts must not pay (or fail) an install.
-  if (steps.length === 0) return { steps: [] };
-  if (!existsSync(join(cwd, "pnpm-lock.yaml"))) return { steps };
-  return { prepare: SANITY_PREPARE_STEP, steps };
+  if (steps.length === 0) return { steps: [], skipped };
+  if (!existsSync(join(cwd, "pnpm-lock.yaml"))) return { steps, skipped };
+  return { prepare: SANITY_PREPARE_STEP, steps, skipped };
 }
 
 /** Renders one plan entry the way an operator (or agent) would type it. */
@@ -412,6 +445,13 @@ export interface SanityGateResult {
    * Single line, so it is safe in both `run.log` and `run-summary.md`.
    */
   detail?: string;
+  /**
+   * The plan's skipped steps, so a gate that ran two checks cannot read as a
+   * gate that ran three (#238). Always present — empty when the project
+   * declares every script — because an absent field would reintroduce exactly
+   * the ambiguity it exists to remove.
+   */
+  skipped: readonly SkippedSanityStep[];
 }
 
 /**
@@ -511,6 +551,7 @@ function readLogTail(path: string, maxBytes = 8192): string {
 function configurationFailure(
   entry: SanityCommand,
   result: SanityCommandOutcome,
+  skipped: readonly SkippedSanityStep[],
 ): SanityGateResult {
   const cause =
     result.outcome === "SPAWN_ERROR"
@@ -522,6 +563,7 @@ function configurationFailure(
     failures: [entry.name],
     failureKind: "CONFIGURATION",
     detail: `${formatSanityCommand(entry)} ${cause}${tail ? `: ${tail}` : ""}`,
+    skipped,
   };
 }
 
@@ -540,6 +582,7 @@ function configurationFailure(
 function abnormalTerminationFailure(
   entry: SanityCommand,
   result: SanityCommandOutcome,
+  skipped: readonly SkippedSanityStep[],
 ): SanityGateResult {
   const how = result.signal
     ? `was killed by ${result.signal}`
@@ -553,6 +596,7 @@ function abnormalTerminationFailure(
       `${formatSanityCommand(entry)} ${how} — the process was killed rather ` +
       `than reporting a verdict, so this is the machine and not the tree; ` +
       `relaunch the run`,
+    skipped,
   };
 }
 
@@ -591,8 +635,8 @@ export interface RunPreShipSanityOptions {
 
 /**
  * Installs dependencies, then runs typecheck, lint, and tests against the
- * merged feature branch. Missing scripts are skipped; step failures are
- * collected so the summary names every failed step.
+ * merged feature branch. Missing scripts are skipped *and recorded as skipped*
+ * (#238); step failures are collected so the summary names every failed step.
  *
  * Three failure classes, because they need three different operator responses:
  * - CONFIGURATION — the commands never really ran (the install failed on a real
@@ -607,8 +651,12 @@ export function runPreShipSanity(
   options: RunPreShipSanityOptions = {},
 ): SanityGateResult {
   const plan = resolveSanityPlan(cwd);
+  const skipped = plan.skipped;
+  // Every return below carries `skipped`, including this one: a project with no
+  // sanity script at all is the extreme case of the gate that says nothing
+  // about what it did not run.
   if (plan.steps.length === 0) {
-    return { ok: true, failures: [], failureKind: null };
+    return { ok: true, failures: [], failureKind: null, skipped };
   }
 
   if (plan.prepare) {
@@ -617,10 +665,10 @@ export function runPreShipSanity(
       capture: true,
     });
     if (isAbnormalTermination(prepared)) {
-      return abnormalTerminationFailure(plan.prepare, prepared);
+      return abnormalTerminationFailure(plan.prepare, prepared, skipped);
     }
     if (prepared.outcome === "SPAWN_ERROR" || prepared.exitCode !== 0) {
-      return configurationFailure(plan.prepare, prepared);
+      return configurationFailure(plan.prepare, prepared, skipped);
     }
   }
 
@@ -637,12 +685,12 @@ export function runPreShipSanity(
     // `pnpm` missing from PATH fails every step for the same environmental
     // reason; report it once, as configuration, instead of blaming the tree.
     if (result.outcome === "SPAWN_ERROR") {
-      return configurationFailure(step, result);
+      return configurationFailure(step, result, skipped);
     }
     // A killed step is not a red step: stop, and say so, rather than letting a
     // crash join the failing-step list as if the suite had reported it.
     if (isAbnormalTermination(result)) {
-      return abnormalTerminationFailure(step, result);
+      return abnormalTerminationFailure(step, result, skipped);
     }
     if (result.exitCode !== 0) {
       failures.push(step.name);
@@ -661,11 +709,12 @@ export function runPreShipSanity(
     }
   }
   return failures.length === 0
-    ? { ok: true, failures: [], failureKind: null }
+    ? { ok: true, failures: [], failureKind: null, skipped }
     : {
         ok: false,
         failures,
         failureKind: "COMMAND",
         detail: details.join("; "),
+        skipped,
       };
 }

@@ -73,14 +73,41 @@ export type { SanityGateResult };
  */
 function sanityGateLabel(gate: SanityGateResult | undefined): string {
   if (!gate) return "N/A";
-  if (gate.ok) return "PASS";
+  const skipped = skippedStepsAnnotation(gate.skipped);
+  if (gate.ok) return skipped ? `PASS (${skipped})` : "PASS";
   const steps = gate.failures.join(", ");
   const detail = gate.detail ? `: ${gate.detail}` : "";
   if (gate.terminationKind === "ABNORMAL_EXIT") {
     return `FAIL (ABNORMAL TERMINATION) — ${steps}${detail}`;
   }
-  if (gate.failureKind !== "CONFIGURATION") return `FAIL (${steps})${detail}`;
-  return `FAIL (CONFIGURATION) — ${steps}${detail}`;
+  if (gate.failureKind === "CONFIGURATION") {
+    return `FAIL (CONFIGURATION) — ${steps}${detail}`;
+  }
+  // Only the classes whose steps actually ran carry the skip annotation: after
+  // a CONFIGURATION or ABNORMAL TERMINATION block nothing ran, so what was not
+  // in the plan is noise on an already long line.
+  return `FAIL (${steps})${skipped ? ` [${skipped}]` : ""}${detail}`;
+}
+
+/**
+ * *Which* checks cost nothing, and why (#238). A sanity step whose script the
+ * project does not declare is skipped by design, but a skip nobody records is
+ * indistinguishable from a pass: this repo has no `lint` script, so its `lint`
+ * step has never run and no gate output ever said so.
+ *
+ * The same shape as {@link gateStatusCell}'s `prerequisiteSkipped` annotation —
+ * status, then the reason it was free — rather than `skip-gate.ts`'s
+ * `tests:skipped`, which is a gate that fails a candidate for disabling tests.
+ */
+function skippedStepsAnnotation(
+  skipped: readonly { name: string; scripts: readonly string[] }[],
+): string {
+  if (skipped.length === 0) return "";
+  const entries = skipped.map(
+    (step) =>
+      `${step.name} — no ${step.scripts.map((s) => `"${s}"`).join("/")} script`,
+  );
+  return `skipped: ${entries.join("; ")}`;
 }
 
 /**

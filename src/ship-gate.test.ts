@@ -908,6 +908,19 @@ describe("runShipGate", () => {
         String(message).includes("Pre-ship sanity gate passed"),
       ),
     ).toBe(true);
+    // #238: the fixture declares only `typecheck`, so a PASS here ran one check
+    // of three — and the event says which two it did not run.
+    expect(fixture.event).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "run-phase-ended",
+        phase: "sanity",
+        verdict: "PASS",
+        skipped: [
+          { name: "lint", scripts: ["lint"] },
+          { name: "tests", scripts: ["test:run", "test"] },
+        ],
+      }),
+    );
   });
 
   it("blocks with a CONFIGURATION failure — not a code failure — when the sanity install fails (#101)", async () => {

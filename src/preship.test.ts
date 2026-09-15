@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   isAbnormalTerminationExit,
+  resolveSanityCommands,
+  resolveSanityPlan,
   runPreShipSanity,
   type SanityCommand,
   type SanityCommandOutcome,
@@ -318,4 +320,126 @@ describe("runPreShipSanity — naming a red step's output (#272)", () => {
     expect(readFileSync(logPath, "utf-8")).toContain("boom-marker");
     expect(result.detail).toContain("boom-marker");
   }, 60_000);
+});
+
+describe("resolveSanityPlan — recording a skipped step (#238)", () => {
+  it("records the step it dropped and the script name it looked for", () => {
+    const plan = resolveSanityPlan(
+      makeProject({ typecheck: "tsc --noEmit", "test:run": "vitest run" }),
+    );
+
+    expect(plan.skipped).toEqual([{ name: "lint", scripts: ["lint"] }]);
+    // `steps` keeps its shape exactly: every reader of it executes its members.
+    expect(plan.steps).toEqual([
+      { name: "typecheck", command: "pnpm", args: ["run", "typecheck"] },
+      { name: "tests", command: "pnpm", args: ["run", "test:run"] },
+    ]);
+  });
+
+  it("records nothing when the project declares every script", () => {
+    const plan = resolveSanityPlan(
+      makeProject({
+        typecheck: "tsc --noEmit",
+        lint: "eslint .",
+        "test:run": "vitest run",
+      }),
+    );
+
+    expect(plan.skipped).toEqual([]);
+    expect(plan.steps).toHaveLength(3);
+  });
+
+  it("names both script names a step accepts", () => {
+    const plan = resolveSanityPlan(makeProject({ typecheck: "tsc --noEmit" }));
+
+    expect(plan.skipped).toEqual([
+      { name: "lint", scripts: ["lint"] },
+      { name: "tests", scripts: ["test:run", "test"] },
+    ]);
+  });
+
+  it("records all three steps when there is no package.json to read", () => {
+    const dir = mkdtempSync(join(tmpdir(), "afk-preship-empty-"));
+    tempDirs.push(dir);
+
+    expect(resolveSanityPlan(dir).skipped).toEqual([
+      { name: "typecheck", scripts: ["typecheck"] },
+      { name: "lint", scripts: ["lint"] },
+      { name: "tests", scripts: ["test:run", "test"] },
+    ]);
+  });
+
+  it("leaves the command set the gate and QA share untouched", () => {
+    // ADR 0012: `resolveSanityCommands` is the one list QA is told to run, so
+    // adding the skip record must not add a command to it.
+    expect(
+      resolveSanityCommands(makeProject({ typecheck: "tsc --noEmit" })),
+    ).toEqual(["pnpm install --frozen-lockfile", "pnpm run typecheck"]);
+  });
+});
+
+describe("runPreShipSanity — carrying the skip record (#238)", () => {
+  it("passes green while naming the step it never ran", () => {
+    const dir = makeProject({
+      typecheck: "tsc --noEmit",
+      "test:run": "vitest run",
+    });
+
+    const { result } = record(dir);
+
+    // A skipped step never fails the gate — that behaviour is documented in
+    // CONTEXT.md and is not what #238 changes.
+    expect(result.ok).toBe(true);
+    expect(result.failures).toEqual([]);
+    expect(result.skipped).toEqual([{ name: "lint", scripts: ["lint"] }]);
+  });
+
+  it("reports an empty record when every script is declared", () => {
+    const dir = makeProject({
+      typecheck: "tsc --noEmit",
+      lint: "eslint .",
+      "test:run": "vitest run",
+    });
+
+    expect(record(dir).result.skipped).toEqual([]);
+  });
+
+  it("carries the record on the early return for a project with no sanity scripts", () => {
+    const dir = makeProject({ build: "tsc" });
+
+    const { ran, result } = record(dir);
+
+    expect(ran).toEqual([]);
+    expect(result.ok).toBe(true);
+    expect(result.skipped).toEqual([
+      { name: "typecheck", scripts: ["typecheck"] },
+      { name: "lint", scripts: ["lint"] },
+      { name: "tests", scripts: ["test:run", "test"] },
+    ]);
+  });
+
+  it("carries the record on every failure path too", () => {
+    const dir = makeProject({ typecheck: "tsc --noEmit" });
+    const expected = [
+      { name: "lint", scripts: ["lint"] },
+      { name: "tests", scripts: ["test:run", "test"] },
+    ];
+
+    const configuration = record(dir, {
+      "pnpm install --frozen-lockfile": { outcome: "EXITED", exitCode: 1 },
+    }).result;
+    const crashed = record(dir, {
+      "pnpm install --frozen-lockfile": {
+        outcome: "EXITED",
+        exitCode: HEAP_CORRUPTION,
+      },
+    }).result;
+    const red = record(dir, {
+      "pnpm run typecheck": { outcome: "EXITED", exitCode: 1 },
+    }).result;
+
+    expect(configuration.skipped).toEqual(expected);
+    expect(crashed.skipped).toEqual(expected);
+    expect(red.skipped).toEqual(expected);
+  });
 });

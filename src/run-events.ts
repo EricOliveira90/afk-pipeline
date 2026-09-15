@@ -397,6 +397,15 @@ export type RunEventPayload =
        * reader for one gate's benefit.
        */
       terminationKind?: "ABNORMAL_EXIT";
+      /**
+       * Checks this phase did not run, and the script names it looked for
+       * (#238). Present only when something was skipped, so absence means "the
+       * phase ran everything it declares" — the pre-ship sanity gate's `lint`
+       * step on a project with no `lint` script is the case this exists for.
+       * Recorded on `PASS` too: a green verdict that ran two of three checks is
+       * exactly the one a reader must not mistake for three.
+       */
+      skipped?: readonly { name: string; scripts: readonly string[] }[];
     }
   | {
       /**

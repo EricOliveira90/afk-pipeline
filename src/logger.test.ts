@@ -706,6 +706,7 @@ PM review: N/A
       failures: ["install"],
       failureKind: "CONFIGURATION",
       detail: "pnpm install --frozen-lockfile failed (exit 1): ERR_PNPM_X",
+      skipped: [],
     });
 
     const md = log.writeSummary();
@@ -734,6 +735,7 @@ PM review: N/A
       detail:
         "pnpm install --frozen-lockfile terminated abnormally (exit 3221226356 " +
         "= 0xC0000374 STATUS_HEAP_CORRUPTION) — relaunch the run",
+      skipped: [],
     });
 
     const md = log.writeSummary();
@@ -764,6 +766,7 @@ PM review: N/A
       detail:
         "tests failed (exit 1) — output: C:\\runs\\sanity-tests.log: " +
         "Test Files 1 failed | 359 passed (360)",
+      skipped: [],
     });
 
     expect(log.writeSummary()).toContain(
@@ -780,10 +783,80 @@ PM review: N/A
       ok: false,
       failures: ["typecheck", "tests"],
       failureKind: "COMMAND",
+      skipped: [],
     });
 
     expect(log.writeSummary()).toContain(
       "Pre-ship sanity gate: FAIL (typecheck, tests)",
+    );
+  });
+
+  // #238: this repo has no `lint` script, so its lint step has never run — and
+  // every green pre-ship gate in its history read as three steps passing.
+  it("names the steps a passing sanity gate never ran (#238)", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "sanity-skipped");
+    recordTerminal(log, id("1", "Pass", "afk/1"), { phase: "PASS" });
+    log.setSanityGate({
+      ok: true,
+      failures: [],
+      failureKind: null,
+      skipped: [{ name: "lint", scripts: ["lint"] }],
+    });
+
+    const md = log.writeSummary();
+
+    expect(md).toContain(
+      'Pre-ship sanity gate: PASS (skipped: lint — no "lint" script)',
+    );
+    expect(log.formatConsoleSummary()).toContain(
+      'Pre-ship sanity gate: PASS (skipped: lint — no "lint" script)',
+    );
+  });
+
+  it("names every absent script of a skipped step, and stays bare when none are (#238)", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "sanity-skipped-many");
+    recordTerminal(log, id("1", "Pass", "afk/1"), { phase: "PASS" });
+    log.setSanityGate({
+      ok: true,
+      failures: [],
+      failureKind: null,
+      skipped: [
+        { name: "lint", scripts: ["lint"] },
+        { name: "tests", scripts: ["test:run", "test"] },
+      ],
+    });
+
+    expect(log.writeSummary()).toContain(
+      "Pre-ship sanity gate: PASS (skipped: " +
+        'lint — no "lint" script; tests — no "test:run"/"test" script)',
+    );
+
+    const clean = new Logger(repo, "sanity-no-skips");
+    recordTerminal(clean, id("1", "Pass", "afk/1"), { phase: "PASS" });
+    clean.setSanityGate({
+      ok: true,
+      failures: [],
+      failureKind: null,
+      skipped: [],
+    });
+    expect(clean.writeSummary()).toContain("Pre-ship sanity gate: PASS\n");
+  });
+
+  it("keeps naming a skipped step beside a red one (#238)", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "sanity-skipped-red");
+    recordTerminal(log, id("1", "Pass", "afk/1"), { phase: "PASS" });
+    log.setSanityGate({
+      ok: false,
+      failures: ["tests"],
+      failureKind: "COMMAND",
+      skipped: [{ name: "lint", scripts: ["lint"] }],
+    });
+
+    expect(log.writeSummary()).toContain(
+      'Pre-ship sanity gate: FAIL (tests) [skipped: lint — no "lint" script]',
     );
   });
 

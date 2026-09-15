@@ -274,16 +274,32 @@ describe("base gate infrastructure retries", () => {
 });
 
 describe("runPreShipSanity", () => {
-  const passed: SanityGateResult = {
+  /**
+   * The script names each sanity step looks for, so a passing expectation can
+   * name what the fixture skipped (#238) — a green gate that ran two of three
+   * checks must not be expressible as one that ran three.
+   */
+  const SKIPPABLE_SCRIPTS: Record<string, string[]> = {
+    typecheck: ["typecheck"],
+    lint: ["lint"],
+    tests: ["test:run", "test"],
+  };
+  const passedSkipping = (...names: string[]): SanityGateResult => ({
     ok: true,
     failures: [],
     failureKind: null,
-  };
+    skipped: names.map((name) => ({
+      name,
+      scripts: SKIPPABLE_SCRIPTS[name]!,
+    })),
+  });
 
   it("returns ok with no failures when no package.json exists", () => {
     const dir = mkdtempSync(join(tmpdir(), "afk-sanity-"));
     tempDirs.push(dir);
-    expect(runPreShipSanity(dir)).toEqual(passed);
+    expect(runPreShipSanity(dir)).toEqual(
+      passedSkipping("typecheck", "lint", "tests"),
+    );
   });
 
   it("skips steps not defined in package.json (lint absent → not a failure)", () => {
@@ -291,7 +307,7 @@ describe("runPreShipSanity", () => {
       typecheck: "node -e \"process.exit(0)\"",
       "test:run": "node -e \"process.exit(0)\"",
     });
-    expect(runPreShipSanity(dir)).toEqual(passed);
+    expect(runPreShipSanity(dir)).toEqual(passedSkipping("lint"));
   });
 
   it("passes when all defined scripts succeed", () => {
@@ -300,7 +316,7 @@ describe("runPreShipSanity", () => {
       lint: "node -e \"process.exit(0)\"",
       "test:run": "node -e \"process.exit(0)\"",
     });
-    expect(runPreShipSanity(dir)).toEqual(passed);
+    expect(runPreShipSanity(dir)).toEqual(passedSkipping());
   });
 
   it("reports the failing step name when lint exits non-zero", () => {
@@ -354,7 +370,7 @@ describe("runPreShipSanity", () => {
       "pnpm run typecheck",
       "pnpm run test:run",
     ]);
-    expect(result).toEqual(passed);
+    expect(result).toEqual(passedSkipping("lint"));
   });
 
   // `existsSync("node_modules")` is not a validity check: a partial tree
@@ -380,7 +396,8 @@ describe("runPreShipSanity", () => {
     const dir = withLockfile(makeProject({ build: "tsc" }));
     const { ran, result } = recordSanityRun(dir);
     expect(ran).toEqual([]);
-    expect(result).toEqual(passed);
+    // Nothing ran, and the verdict says which three checks that was (#238).
+    expect(result).toEqual(passedSkipping("typecheck", "lint", "tests"));
   });
 
   it("classifies a failed dependency install as CONFIGURATION, not a code failure (#101)", () => {

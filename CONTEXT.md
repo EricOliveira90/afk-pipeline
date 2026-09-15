@@ -417,7 +417,11 @@ test scripts against the merged feature branch before the guardian
 reviews and PR creation. Same guard a human's pre-push hook would
 apply — necessary because every AFK commit uses `git commit --no-verify`,
 so husky never runs during the pipeline. Steps not defined in
-`package.json` are skipped, not failed. Failure short-circuits the
+`package.json` are skipped, not failed — and the skip is **recorded**: the
+verdict, the `run-summary.md` line and the `run-phase-ended` event name each
+skipped step and the script names it looked for, so a gate that ran two
+checks cannot read as one that ran three. (This repo declares no `lint`
+script, so its lint step is the standing example.) Failure short-circuits the
 guardians and the PR; the run-summary records the failing step names,
 and the run is a **blocked ship**.
 It classifies a failure into one of three kinds, because they need three
