@@ -47,6 +47,17 @@
  * {@link admitStaleRenegotiation} answers a repeat against a completed
  * renegotiation as an idempotent no-op rather than a second attempt. Reporting and
  * dispatch wiring are #336's.
+ *
+ * #278 adds the one way a run's scope of record can *grow*. `--extend-scope`
+ * selectors become canonical identities through {@link resolveScopeExtensions},
+ * which is pure and never reads run state; an admission records the whole set on
+ * its `PENDING` event as a proposal and touches no scope; and the completion's one
+ * locked write publishes both the `COMPLETED` event and the widened scope in a
+ * single document, revalidating the set under the lock first and ending the attempt
+ * through #333's writer if it no longer resolves. Nothing else on any path writes
+ * scope, and a proposal is invisible to scheduling until it is admitted:
+ * `resolveRunScope` still cannot grow a scope, and its narrow-only refusal is
+ * unchanged.
  */
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -59,7 +70,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, relative } from "node:path";
-import { canonicalSliceNumber } from "./afk-manifest.js";
+import {
+  assertWithinManifestScope,
+  canonicalSliceNumber,
+  type AfkManifest,
+} from "./afk-manifest.js";
 import {
   ACCEPTANCE_MANIFEST_FILENAME,
   parseAcceptanceManifest,
@@ -90,7 +105,12 @@ import {
   type RecoveryLineageState,
   type RunState,
 } from "./run-state.js";
-import type { PersistedRunScope } from "./slice-scope.js";
+import type { Slice } from "./issues-parser.js";
+import {
+  appendScopeExtensions,
+  type PersistedRunScope,
+  type PersistedScopeSlice,
+} from "./slice-scope.js";
 
 /** The contract half of an accepted pair, beside the manifest in a slice dir. */
 export const CONTRACT_FILENAME = "contract.md";
@@ -166,7 +186,32 @@ export type RecoveryRefusalCode =
    * A repeat against a completed renegotiation that names a different target or a
    * different reason than the completed attempt did (#335 B-10).
    */
-  | "replay-conflict";
+  | "replay-conflict"
+  /** An `--extend-scope` selector matches no slice in the current `issues.md` (#278 B-02). */
+  | "extension-slice-unknown"
+  /** An `--extend-scope` selector names a slice declared `HITL` rather than `AFK` (#278 B-02). */
+  | "extension-slice-not-afk"
+  /** An `--extend-scope` selector names a slice outside `afk.json`'s `selectedSlices` (#278 B-02). */
+  | "extension-outside-manifest"
+  /** An `--extend-scope` selector names an identity the run's scope already holds (#278 B-02). */
+  | "extension-already-in-scope"
+  /**
+   * Two `--extend-scope` selectors resolve to one identity, or one selector
+   * matches one slice by number and another by GitHub issue id (#278 B-02).
+   *
+   * Reachable because every accepted selector is bare digits, so a value is a
+   * candidate slice number *and* a candidate issue id at once. Refusing is the
+   * only answer that cannot silently admit a slice the operator did not name.
+   */
+  | "extension-identity-conflict"
+  /**
+   * An `--extend-scope` member declares a `blockedBy` GitHub issue id that is in
+   * neither the scope view nor the same candidate set (#278 B-02).
+   *
+   * Admitting it would put a slice in scope that can never become ready, which
+   * reads as a stalled run rather than as the refused request it is.
+   */
+  | "extension-blocker-unscoped";
 
 /** A resolved recovery target: the canonical pair, never a bare selector. */
 export interface RecoveryTargetIdentity {
@@ -238,6 +283,250 @@ export function canonicalizeRecoveryRequest(
       reason: request.reason.trim(),
     },
   };
+}
+
+/** Every reason a `--extend-scope` set can be refused as identities (#278 B-02). */
+export type ScopeExtensionRefusalCode = Extract<
+  RecoveryRefusalCode,
+  | "extension-slice-unknown"
+  | "extension-slice-not-afk"
+  | "extension-outside-manifest"
+  | "extension-already-in-scope"
+  | "extension-identity-conflict"
+  | "extension-blocker-unscoped"
+>;
+
+export type ResolveScopeExtensionsResult =
+  | {
+      ok: true;
+      /** The canonical, duplicate-free set in canonical order. */
+      extensions: PersistedScopeSlice[];
+    }
+  | { ok: false; code: ScopeExtensionRefusalCode; message: string };
+
+export interface ResolveScopeExtensionsArgs {
+  /** `--extend-scope` selectors as typed, in the order typed (#278 B-01). */
+  selectors: readonly string[];
+  /**
+   * The scope identities "absent from scope" and "blocker already scoped" are
+   * judged against. Which view a call site supplies is B-03's decision, not this
+   * function's: an admission that is not a repeat supplies the persisted scope as
+   * loaded, and a repeat against a completed attempt supplies it minus the
+   * identities that attempt itself added.
+   */
+  view: readonly PersistedScopeSlice[];
+  /** Slices as `issues.md` declares them *now*, not as the run recorded them. */
+  slices: readonly Slice[];
+  /** `null` is the documented legacy mode and restricts nothing. */
+  manifest: AfkManifest | null;
+}
+
+/**
+ * Resolve `--extend-scope` selectors to a canonical identity set (#278 B-02).
+ *
+ * Pure, and deliberately blind to {@link RunState}: every fact it needs is an
+ * argument, so the same selectors resolve the same way whether they are being
+ * admitted, rechecked under the admission lock, or revalidated under the
+ * completion lock. A resolver that read run state would have three different
+ * answers for those three moments and no way to say which was authoritative.
+ *
+ * Identity comes from `issues.md` and is corroborated the way ADR 0065 requires:
+ * a selector resolves only when it matches exactly one declared slice, and the
+ * identity stored is that slice's own `{canonicalSliceNumber(number), ghIssue}`
+ * rather than anything the operator typed. `matchesSliceSelector` is not reused,
+ * for the reason {@link canonicalizeRecoveryRequest} does not reuse it: a second
+ * differently-shaped normalization of one identity is how two callers come to
+ * disagree about which slice was named.
+ *
+ * Every refusal is one stable code per distinguishable cause, per the
+ * code-not-prose rule above. The order they are checked in is per-member and
+ * cheapest-first — unknown, then not-`AFK`, then colliding, then already scoped,
+ * then outside the manifest — with the blocker check last because it is the one
+ * question that cannot be answered until the whole candidate set is known.
+ */
+export function resolveScopeExtensions(
+  args: ResolveScopeExtensionsArgs,
+): ResolveScopeExtensionsResult {
+  if (args.selectors.length === 0) return { ok: true, extensions: [] };
+
+  const scoped = new Set(args.view.map((entry) => entry.ghIssue));
+  const candidates: { selector: string; slice: Slice }[] = [];
+  const claimed = new Map<string, string>();
+  for (const selector of args.selectors) {
+    const wanted = canonicalSliceNumber(selector);
+    const matches = args.slices.filter(
+      (slice) =>
+        canonicalSliceNumber(slice.number) === wanted ||
+        slice.ghIssue === selector,
+    );
+    if (matches.length === 0) {
+      return {
+        ok: false,
+        code: "extension-slice-unknown",
+        message: `--extend-scope names ${selector}, which matches no slice declared in the current issues.md; nothing was admitted`,
+      };
+    }
+    // One bare-numeric selector can match one slice by its number and a second by
+    // its issue id. That names no single slice, so it is a conflict rather than an
+    // ambiguity to resolve by precedence.
+    const distinct = new Set(matches.map((slice) => slice.ghIssue));
+    if (distinct.size > 1) {
+      return {
+        ok: false,
+        code: "extension-identity-conflict",
+        message:
+          `--extend-scope names ${selector}, which matches slice ` +
+          `${matches.map((slice) => `${slice.number} (#${slice.ghIssue})`).join(" and ")}; ` +
+          `one selector naming two slices names neither`,
+      };
+    }
+    const slice = matches[0]!;
+    if (slice.type !== "AFK") {
+      return {
+        ok: false,
+        code: "extension-slice-not-afk",
+        message: `--extend-scope names slice ${slice.number} (#${slice.ghIssue}), which issues.md declares ${slice.type}; only AFK slices can enter a run's scope`,
+      };
+    }
+    const previous = claimed.get(slice.ghIssue);
+    if (previous !== undefined) {
+      return {
+        ok: false,
+        code: "extension-identity-conflict",
+        message:
+          `--extend-scope names slice ${slice.number} (#${slice.ghIssue}) twice, as ` +
+          `${previous} and as ${selector}; each addition is named exactly once`,
+      };
+    }
+    claimed.set(slice.ghIssue, selector);
+    if (scoped.has(slice.ghIssue)) {
+      return {
+        ok: false,
+        code: "extension-already-in-scope",
+        message: `--extend-scope names slice ${slice.number} (#${slice.ghIssue}), which is already in this run's scope of record; there is nothing to add`,
+      };
+    }
+    candidates.push({ selector, slice });
+  }
+
+  // The one fail-closed manifest comparison every scope funnel makes, reused
+  // rather than restated: `afk.json` reserving a slice list is the reservation an
+  // extension is checked against, and a second comparison here could disagree
+  // with the one a launch already makes.
+  if (args.manifest !== null) {
+    try {
+      assertWithinManifestScope({
+        selectedSlices: args.manifest.selectedSlices,
+        candidates,
+        sliceNumberOf: (candidate) => candidate.slice.number,
+        describeConflict: (conflicting) =>
+          `--extend-scope names ${conflicting
+            .map(({ slice }) => `${slice.number} (#${slice.ghIssue})`)
+            .join(", ")}, which afk.json does not reserve for this run`,
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        code: "extension-outside-manifest",
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  // A member whose only blocker is another member of the same set resolves: the
+  // set enters scope together, so the blocker is scoped by the time the DAG asks.
+  const admitting = new Set([
+    ...scoped,
+    ...candidates.map(({ slice }) => slice.ghIssue),
+  ]);
+  for (const { slice } of candidates) {
+    const unscoped = slice.blockedBy.filter((blocker) => !admitting.has(blocker));
+    if (unscoped.length > 0) {
+      return {
+        ok: false,
+        code: "extension-blocker-unscoped",
+        message:
+          `--extend-scope names slice ${slice.number} (#${slice.ghIssue}), which is blocked by ` +
+          `${unscoped.map((blocker) => `#${blocker}`).join(", ")} — in neither this run's scope ` +
+          `nor the same set of additions, so it could never become ready`,
+      };
+    }
+  }
+
+  return {
+    ok: true,
+    extensions: candidates
+      .map(({ slice }) => ({
+        number: canonicalSliceNumber(slice.number),
+        ghIssue: slice.ghIssue,
+      }))
+      .sort(compareScopeExtension),
+  };
+}
+
+/**
+ * Canonical order for an extension set: canonical slice number, then issue id.
+ *
+ * The one order the set is stored, compared and appended in, so the `PENDING`
+ * record, B-09's replay comparison and the persisted scope all read the same way.
+ */
+function compareScopeExtension(
+  left: PersistedScopeSlice,
+  right: PersistedScopeSlice,
+): number {
+  const byNumber = compareGhIssue(left.number, right.number);
+  return byNumber !== 0 ? byNumber : compareGhIssue(left.ghIssue, right.ghIssue);
+}
+
+/** Whether two canonical extension sets hold the same identities (#278 B-07/B-09). */
+function sameScopeExtensions(
+  left: readonly PersistedScopeSlice[],
+  right: readonly PersistedScopeSlice[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every(
+      (entry, index) =>
+        entry.number === right[index]!.number &&
+        entry.ghIssue === right[index]!.ghIssue,
+    )
+  );
+}
+
+/**
+ * The persisted scope identities a completed recovery attempt admitted (#278 B-10).
+ *
+ * Derived from the `extensions` of every trailing `COMPLETED` lineage event, not
+ * from a second persisted field: the event that authorized a widening is already
+ * the record of it, and a per-entry provenance member on
+ * {@link PersistedScopeSlice} would be a second answer to the same question that
+ * a hand-edited scope could contradict. Only *trailing* `COMPLETED` events count,
+ * for the reason every other reader here uses the trailing event: an attempt that
+ * later ended some other way did not add anything, and its earlier `PENDING`
+ * record is a proposal rather than a fact.
+ *
+ * The persisted facts only. Which surface reports them, and in what words, is
+ * #336's.
+ */
+export function recoveryAdmittedScopeExtensions(
+  state: RunState,
+): PersistedScopeSlice[] {
+  const admitted: PersistedScopeSlice[] = [];
+  const seen = new Set<string>();
+  for (const ghIssue of Object.keys(state.recoveryLineage ?? {}).sort(
+    compareGhIssue,
+  )) {
+    const events = recoveryLineageFor(state, ghIssue);
+    const trailing = events[events.length - 1];
+    if (trailing?.state !== "COMPLETED") continue;
+    for (const entry of trailing.extensions) {
+      const key = `${canonicalSliceNumber(entry.number)}#${entry.ghIssue}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      admitted.push({ number: entry.number, ghIssue: entry.ghIssue });
+    }
+  }
+  return admitted.sort(compareScopeExtension);
 }
 
 /**
@@ -664,6 +953,20 @@ export interface AdmitStaleRenegotiationArgs {
   providerName: string;
   sliceDir: string;
   request: { selector: string; reason: string };
+  /**
+   * `--extend-scope` selectors this attempt should additionally admit (#278 B-05).
+   *
+   * The resolver's inputs are arguments and the resolver is called *here*, rather
+   * than a resolved set being passed in: the scope view the selectors are judged
+   * against is computed inside this function, so no caller can widen a scope by
+   * handing over a set that was resolved against a view of its own choosing.
+   * Absent or empty is a request that admits no additions — the pre-#278 path.
+   */
+  extendScope?: readonly string[];
+  /** Slices as the current `issues.md` declares them; the resolver's identity source. */
+  slices?: readonly Slice[];
+  /** `afk.json`, or `null` for the documented legacy mode with no reservation. */
+  afkManifest?: AfkManifest | null;
   /** Supplied by tests; a real run mints a fresh id per attempt. */
   attemptId?: string;
   probes?: RecoveryGitProbes;
@@ -728,7 +1031,32 @@ function completedReplacementFor(
 }
 
 /**
- * Answer a repeat against a completed renegotiation (#335 B-05/B-10).
+ * The scope identities an extension set is judged against (#278 B-03).
+ *
+ * One rule in both branches: the persisted scope *as it stood for this request's
+ * own admission*.
+ *
+ * For an ordinary admission that is the scope as loaded, and it is the only branch
+ * `extension-already-in-scope` can arise in. For a repeat against a completed
+ * attempt, the identities that same attempt added are subtracted, because they are
+ * in scope precisely *because* of the request being repeated — leaving them in
+ * would make every replay of a request that added anything refuse
+ * `extension-already-in-scope` and never reach the replay comparison at all. The
+ * subtraction is reconstructed from the lineage that recorded the additions rather
+ * than from a second stored copy, for the reason B-10's derivation is a derivation.
+ */
+function extensionScopeView(
+  state: RunState,
+  replay: CompletedReplacement | undefined,
+): PersistedScopeSlice[] {
+  const scope = state.scope?.slices ?? [];
+  if (replay === undefined) return [...scope];
+  const added = new Set(replay.event.extensions.map((entry) => entry.ghIssue));
+  return scope.filter((entry) => !added.has(entry.ghIssue));
+}
+
+/**
+ * Answer a repeat against a completed renegotiation (#335 B-05/B-10, #278 B-09).
  *
  * Identity is the whole {@link CanonicalRecoveryRequest} plus the extension set,
  * compared as *values* against what the completed event recorded. An exact repeat
@@ -737,17 +1065,25 @@ function completedReplacementFor(
  * it, and admitting a different request against it would renegotiate a
  * replacement under a reason nobody accepted it for.
  *
- * The extension set is compared as "the completed attempt admitted none", which is
- * all it can be until `--extend-scope` ships (#278) and all this slice's requests
- * can ask for. It is compared rather than assumed so the check does not silently
- * become vacuous when extensions arrive.
+ * The extension set is compared member for member, both sides canonical and in
+ * canonical order, so a partial overlap, a superset and a different set of the
+ * same size are all conflicts rather than near-enough matches: a repeat that asked
+ * for a different set of additions is a different request, and answering it "there
+ * is nothing to do" would silently drop the additions it named.
  */
 function replayOutcome(
   replay: CompletedReplacement,
   facts: RecoveryEligibilityFacts,
   sliceDir: string,
+  resolved: readonly PersistedScopeSlice[],
 ): AdmissionOutcome {
   const completed = replay.event;
+  const describeSet = (set: readonly PersistedScopeSlice[]): string =>
+    set.length === 0
+      ? "no scope additions"
+      : `scope additions ${set
+          .map((entry) => `${entry.number} (#${entry.ghIssue})`)
+          .join(", ")}`;
   const held =
     `Recovery attempt ${completed.attemptId} completed a renegotiation of slice ` +
     `${completed.target.number} (#${completed.target.ghIssue}) and the pair in ` +
@@ -756,7 +1092,7 @@ function replayOutcome(
     completed.target.number === facts.target.number &&
     completed.target.ghIssue === facts.target.ghIssue &&
     completed.reason === facts.reason &&
-    completed.extensions.length === 0
+    sameScopeExtensions(completed.extensions, resolved)
   ) {
     return {
       admitted: false,
@@ -772,9 +1108,10 @@ function replayOutcome(
     admitted: false,
     code: "replay-conflict",
     message:
-      `${held} for reason "${completed.reason}"; this request names slice ` +
-      `${facts.target.number} (#${facts.target.ghIssue}) for reason "${facts.reason}", ` +
-      `which is not the request that completion accepted. Nothing was published or appended`,
+      `${held} for reason "${completed.reason}" with ${describeSet(completed.extensions)}; ` +
+      `this request names slice ${facts.target.number} (#${facts.target.ghIssue}) for reason ` +
+      `"${facts.reason}" with ${describeSet(resolved)}, which is not the request that ` +
+      `completion accepted. Nothing was published or appended`,
   };
 }
 
@@ -789,14 +1126,21 @@ function replayOutcome(
  *     is published (#335 B-05/B-10/B-11). Deciding it here is what makes the
  *     no-op a no-op: one step later a snapshot of the replacement pair would
  *     already be on disk.
- *  3. Resolve both branch tips. These are recorded facts, not eligibility
+ *  3. Resolve `--extend-scope` to a canonical identity set (#278 B-03). Pure, and
+ *     still before anything is published, so an invalid member refuses without
+ *     appending lineage, publishing a snapshot or adding scope. Which scope view
+ *     the resolver is handed follows from this position — see
+ *     {@link extensionScopeView}.
+ *  4. Resolve both branch tips. These are recorded facts, not eligibility
  *     outcomes — an attempt whose tips cannot be named could never be reconciled.
- *  4. Publish the byte-verified snapshot. Outside the lock because it is the slow
+ *  5. Publish the byte-verified snapshot. Outside the lock because it is the slow
  *     part, and safe outside it because an unreferenced snapshot is inert.
- *  5. `beforeLockAcquired` — the interleave seam.
- *  6. Take the run-state lock, reload, and recheck every fact steps 1-4 read.
- *     Any drift is a pre-admission refusal that writes nothing.
- *  7. Append exactly one `PENDING` event. This is the first admitted mutation.
+ *  6. `beforeLockAcquired` — the interleave seam.
+ *  7. Take the run-state lock, reload, and recheck every fact steps 1-5 read,
+ *     the extension set included. Any drift is a pre-admission refusal that
+ *     writes nothing.
+ *  8. Append exactly one `PENDING` event, carrying the whole extension set as a
+ *     proposal. This is the first admitted mutation, and it does not widen scope.
  */
 export function admitStaleRenegotiation(
   args: AdmitStaleRenegotiationArgs,
@@ -835,8 +1179,30 @@ export function admitStaleRenegotiation(
     // here; the guard is what makes that a fact of the code and not a comment.
     readLockedAcceptedPair(args.sliceDir),
   );
+  // The one new step, and this is where it goes (#278 B-03): after eligibility,
+  // `attempt-already-pending` and replay detection, and before the branch-tip
+  // reads, the snapshot and the lock. Because the resolver is pure and runs before
+  // anything is published, an invalid member is a pre-admission refusal that
+  // appends no lineage, publishes no snapshot, rewrites no accepted-pair byte and
+  // adds no scope.
+  const extensions = resolveScopeExtensions({
+    selectors: args.extendScope ?? [],
+    view: extensionScopeView(state, replay),
+    slices: args.slices ?? [],
+    manifest: args.afkManifest ?? null,
+  });
+  if (!extensions.ok) {
+    // A repeat whose members do not resolve as identities is not a repeat of
+    // anything, so it refuses with that member's code rather than a replay answer.
+    return {
+      admitted: false,
+      code: extensions.code,
+      message: extensions.message,
+    };
+  }
+
   if (replay !== undefined) {
-    return replayOutcome(replay, facts, args.sliceDir);
+    return replayOutcome(replay, facts, args.sliceDir, extensions.extensions);
   }
 
   const sliceHead = resolveCommit(args.repoRoot, facts.sliceBranch);
@@ -948,16 +1314,36 @@ export function admitStaleRenegotiation(
           },
         };
       }
+      // The set is rechecked as *values* under the lock, exactly as the target and
+      // the scope fingerprint above are (#278 B-05): a set that no longer resolves
+      // to the same identities is a set the record would misdescribe. Not a replay
+      // in this branch, so the plain view is the right one.
+      const relocked = resolveScopeExtensions({
+        selectors: args.extendScope ?? [],
+        view: extensionScopeView(locked, undefined),
+        slices: args.slices ?? [],
+        manifest: args.afkManifest ?? null,
+      });
+      if (
+        !relocked.ok ||
+        !sameScopeExtensions(relocked.extensions, extensions.extensions)
+      ) {
+        return drift(
+          "The requested scope additions stopped resolving to the same identities " +
+            `under the run-state lock (${relocked.ok ? "a different identity set" : relocked.code})`,
+        );
+      }
 
       const event: PersistedRecoveryLineageEvent = {
         attemptId,
         state: "PENDING",
         target: { ...facts.target },
         reason: facts.reason,
-        // Always empty: `--extend-scope` is #278, so this slice admits no
-        // extension. Recorded rather than omitted so a reader never has to tell
-        // "none" from "not yet a field".
-        extensions: [],
+        // The complete canonical set, here and nowhere else: a `PENDING` record is
+        // a *proposal*, so `state.scope` is not touched until the completion
+        // publishes both halves in one document (#278 B-05/B-08). Empty when the
+        // request named no additions — "none", never "not yet a field".
+        extensions: extensions.extensions.map((entry) => ({ ...entry })),
         provider: args.providerName,
         sliceBranch: facts.sliceBranch,
         sliceHead,
@@ -1516,7 +1902,10 @@ function nextRecoveryEvent(
     ...base,
     ...next,
     target: { ...trailing.target },
-    extensions: [...trailing.extensions],
+    // Copied entry by entry, not just array by array: the terminal event and the
+    // widened scope are published in one document, and a shared pair object would
+    // let a later mutation of either reach the other (#278 B-04).
+    extensions: trailing.extensions.map((entry) => ({ ...entry })),
     recordedAt: new Date().toISOString(),
   };
 }
@@ -1677,6 +2066,18 @@ export interface CompleteRecoveryAttemptArgs {
    */
   provenance: string;
   /**
+   * Slices as the current `issues.md` declares them, for revalidating the
+   * additions the trailing `PENDING` event proposed (#278 B-07).
+   *
+   * The *set* is never a caller argument — it is read from that event — but the
+   * facts it is revalidated against are, for the reason
+   * {@link CompleteRecoveryAttemptArgs.lockGate} is injected: this module does not
+   * read `issues.md` and must not start.
+   */
+  slices?: readonly Slice[];
+  /** `afk.json`, or `null` for the documented legacy mode with no reservation. */
+  afkManifest?: AfkManifest | null;
+  /**
    * Test seam: fires after the preconditions are evaluated and before the
    * completion takes the ADR 0056 lock, mirroring
    * {@link AdmitStaleRenegotiationArgs.beforeLockAcquired} and for the same
@@ -1801,7 +2202,11 @@ function endCompletionThroughRollback(args: {
  *     is *terminal* for the attempt, not a lingering `PENDING`: leaving it open
  *     would hold the target's dispatch on an attempt nobody is still working.
  *  5. Otherwise take the ADR 0056 lock exactly once, reload, recheck the trailing
- *     event and the scope fingerprint, and append exactly one `COMPLETED` event.
+ *     event and the scope fingerprint, revalidate the additions that trailing
+ *     event proposed (#278 B-07), and publish one document that both appends
+ *     exactly one `COMPLETED` event and widens `state.scope` by the whole set
+ *     (#278 B-08). One write, both halves: there is no seam between them to
+ *     interleave, so no document can carry only one side.
  *  6. A recheck that lost the scope fingerprint while this attempt was still
  *     trailing ends through the same writer, called *after* the transaction
  *     returned and released the lock — the way {@link reconcileRecoveryLineage}
@@ -1964,6 +2369,39 @@ export function completeRecoveryAttempt(
         };
       }
 
+      // The additions come from the trailing `PENDING` event, never from a caller
+      // argument (#278 B-07): the record that authorized them is the only thing
+      // entitled to say what they were, and a caller-supplied set would let a
+      // completion widen scope by more than the admission agreed to. Revalidated
+      // against `state.scope.slices` as loaded *under this lock* — the plain view,
+      // not the admission's replay view — because that is the scope the append is
+      // about to change.
+      const additions = current.extensions;
+      const revalidated = resolveScopeExtensions({
+        selectors: additions.map((entry) => entry.ghIssue),
+        view: locked.scope?.slices ?? [],
+        slices: args.slices ?? [],
+        manifest: args.afkManifest ?? null,
+      });
+      if (
+        !revalidated.ok ||
+        !sameScopeExtensions(revalidated.extensions, additions) ||
+        (additions.length > 0 && locked.scope === undefined)
+      ) {
+        return {
+          changed: false,
+          result: {
+            appended: false,
+            casLost: true,
+            message:
+              `The scope additions recovery attempt ${attemptId} was admitted with no longer ` +
+              `resolve to the same identities under the run-state lock ` +
+              `(${revalidated.ok ? "a different identity set" : revalidated.code}); no COMPLETED ` +
+              `event was appended and the run's persisted scope was not widened`,
+          },
+        };
+      }
+
       const event = nextRecoveryEvent(current, {
         state: "COMPLETED",
         replacementContractFingerprint:
@@ -1973,6 +2411,13 @@ export function completeRecoveryAttempt(
         lockProvenance: preconditions.provenance,
       });
       appendRecoveryLineageEvent(locked, args.ghIssue, event);
+      // The second half of the one document this transaction publishes (#278 B-08).
+      // In the same body as the append, through the one pure helper that owns what
+      // a widened scope is, and only when there is something to add — a completion
+      // that admitted no additions leaves `state.scope` the object it loaded.
+      if (additions.length > 0 && locked.scope !== undefined) {
+        locked.scope = appendScopeExtensions(locked.scope, additions);
+      }
       return { changed: true, result: { appended: true, event } };
     },
   );

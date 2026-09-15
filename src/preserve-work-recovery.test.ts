@@ -27,6 +27,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { ACCEPTANCE_MANIFEST_FILENAME } from "./acceptance-manifest.js";
+import type { AfkManifest } from "./afk-manifest.js";
 import {
   parsePipelineRuntimeOptions,
   parseStaleRenegotiationRequest,
@@ -42,6 +43,7 @@ import {
   recordExactStageCheckpoint,
   type ExactStageCheckpoint,
 } from "./exact-stage-resume.js";
+import { buildDAG, type Slice } from "./issues-parser.js";
 import {
   featureBranchForProviderName,
   sliceWorktreeDirForProviderName,
@@ -57,7 +59,11 @@ import {
   type RecoveryLineageState,
   type RunState,
 } from "./run-state.js";
-import type { PersistedRunScope } from "./slice-scope.js";
+import {
+  resolveRunScope,
+  type PersistedRunScope,
+  type PersistedScopeSlice,
+} from "./slice-scope.js";
 import {
   CONTRACT_FILENAME,
   RECOVERY_NEGOTIATION_DIRNAME,
@@ -77,8 +83,10 @@ import {
   publishAcceptedPairSnapshot,
   readLockedAcceptedPair,
   reconcileRecoveryLineage,
+  recoveryAdmittedScopeExtensions,
   recoveryDispatchRefusal,
   recoveryPreDispatchRefusal,
+  resolveScopeExtensions,
   restoreAcceptedPairFromSnapshot,
   rollBackRecoveryAttempt,
   runScopeFingerprint,
@@ -4064,4 +4072,919 @@ describe("what completion and replay must not disturb", () => {
       occurrences(sourceOf("preserve-work-recovery.test.ts"), `spawn${"Sync("}`),
     ).toBe(1);
   });
+});
+
+/*
+ * ---------------------------------------------------------------------------
+ * Additive scope extension (#278)
+ * ---------------------------------------------------------------------------
+ *
+ * `--extend-scope` rides the recovery flags: a renegotiation may name slices to
+ * *add* to the run's scope of record, and the additions become scope only when
+ * the same locked write that appends the terminal `COMPLETED` event publishes
+ * them. Every case below runs on the fixture the rest of this file already
+ * builds, through the exported seams — no new spawned child, and no `issues.md`
+ * on disk, because the declared slices and the launch manifest are arguments
+ * (`AdmitStaleRenegotiationArgs.slices` / `.afkManifest`).
+ */
+
+/** One declared slice, AFK and unblocked unless a case says otherwise. */
+function declaredSlice(
+  number: string,
+  ghIssue: string,
+  overrides: Partial<Slice> = {},
+): Slice {
+  return {
+    number,
+    ghIssue,
+    title: `Slice ${number}`,
+    type: "AFK",
+    blockedBy: [],
+    userStories: "",
+    ...overrides,
+  };
+}
+
+/**
+ * `issues.md` as this slice's cases declare it — the two members the fixture's
+ * persisted scope already holds, plus every candidate addition they name.
+ *
+ * Zero-padded numbers throughout, so `canonicalSliceNumber` is what has to
+ * resolve a selector rather than a string match on the padding.
+ */
+const EXTENSION_SLICES: readonly Slice[] = [
+  declaredSlice(SLICE_NUMBER, GH_ISSUE),
+  declaredSlice("08", "278"),
+  declaredSlice("09", "279"),
+  declaredSlice("10", "280"),
+  /** Declared HITL: never a legal addition. */
+  declaredSlice("11", "281", { type: "HITL" }),
+  /** Blocked by #279, which several cases admit in the same set. */
+  declaredSlice("12", "282", { blockedBy: ["279"] }),
+  /** Blocked by a slice nothing here ever scopes. */
+  declaredSlice("13", "283", { blockedBy: ["999"] }),
+  /** AFK and unblocked, deliberately absent from the reserving manifest. */
+  declaredSlice("14", "284"),
+];
+
+/** The identities the additions resolve to: `{canonicalSliceNumber, ghIssue}`. */
+const ADDITION_A: PersistedScopeSlice = { number: "9", ghIssue: "279" };
+const ADDITION_B: PersistedScopeSlice = { number: "10", ghIssue: "280" };
+/** Slice 12, whose only blocker is {@link ADDITION_A}. */
+const ADDITION_BLOCKED: PersistedScopeSlice = { number: "12", ghIssue: "282" };
+
+/** An `afk.json` reserving every slice above except #283 and #284. */
+const RESERVING_MANIFEST: AfkManifest = {
+  version: 1,
+  selectedSlices: ["07", "08", "09", "10", "11", "12"],
+  migrationPrefixes: [],
+  protectedIssues: [],
+};
+
+/** Every refusal that belongs to the resolver, as identities (B-02). */
+const EXTENSION_REFUSAL_CODES: readonly RecoveryRefusalCode[] = [
+  "extension-slice-unknown",
+  "extension-slice-not-afk",
+  "extension-outside-manifest",
+  "extension-already-in-scope",
+  "extension-identity-conflict",
+  "extension-blocker-unscoped",
+];
+
+/** Admit through the shared helper with a `--extend-scope` set attached. */
+function admitWithExtensions(
+  f: Fixture,
+  extendScope: readonly string[],
+  overrides: Record<string, unknown> = {},
+) {
+  return admit(f, { extendScope, slices: EXTENSION_SLICES, ...overrides });
+}
+
+/** Admit and complete one attempt that adds #279 and #280, widening scope. */
+function completeWithExtensions(
+  f: Fixture,
+  attemptId = COMPLETING_ATTEMPT,
+): void {
+  expect(admitWithExtensions(f, ["279", "280"], { attemptId }).admitted).toBe(
+    true,
+  );
+  writeAcceptedPair(f.sliceDir, REPLACEMENT_CONTRACT);
+  expect(complete(f, { slices: EXTENSION_SLICES }).completed).toBe(true);
+}
+
+/** The persisted scope with the given identities appended. */
+function widenedScope(
+  ...additions: readonly PersistedScopeSlice[]
+): PersistedRunScope {
+  return { mode: SCOPE.mode, slices: [...SCOPE.slices, ...additions] };
+}
+
+describe("resolving one set of scope additions", () => {
+  const CAUSES: {
+    label: string;
+    selectors: string[];
+    manifest?: AfkManifest;
+    code: RecoveryRefusalCode;
+  }[] = [
+    {
+      label: "a selector matching no declared slice",
+      selectors: ["99"],
+      code: "extension-slice-unknown",
+    },
+    {
+      label: "a selector naming a HITL slice",
+      selectors: ["281"],
+      code: "extension-slice-not-afk",
+    },
+    {
+      label: "a selector afk.json does not reserve",
+      selectors: ["284"],
+      manifest: RESERVING_MANIFEST,
+      code: "extension-outside-manifest",
+    },
+    {
+      label: "a selector already in the supplied view",
+      selectors: ["278"],
+      code: "extension-already-in-scope",
+    },
+    {
+      label: "two selectors resolving to one identity",
+      selectors: ["279", "9"],
+      code: "extension-identity-conflict",
+    },
+    {
+      label: "a member blocked by something in neither view nor set",
+      selectors: ["283"],
+      code: "extension-blocker-unscoped",
+    },
+  ];
+
+  it.each(CAUSES)(
+    "[behavior:#278:B-02] refuses $code given $label, touching nothing",
+    (row) => {
+      const before = {
+        state: readFileSync(fixture.statePath),
+        tree: digestTree(fixture.sliceDir),
+        snapshots: listPublishedPairSnapshots(fixture.sliceDir),
+      };
+
+      const result = resolveScopeExtensions({
+        selectors: row.selectors,
+        view: SCOPE.slices,
+        slices: EXTENSION_SLICES,
+        manifest: row.manifest ?? null,
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.ok === false ? result.code : "").toBe(row.code);
+      expect(result.ok === false ? result.message : "").toContain(
+        "--extend-scope",
+      );
+      // Pure, and this is what that buys: the whole slice directory, the run
+      // state file and the published snapshot set are the bytes they were.
+      expect(readFileSync(fixture.statePath).equals(before.state)).toBe(true);
+      expect(digestTree(fixture.sliceDir)).toEqual(before.tree);
+      expect(listPublishedPairSnapshots(fixture.sliceDir)).toEqual(
+        before.snapshots,
+      );
+    },
+  );
+
+  it("[behavior:#278:B-02] gives each cause its own code, and every code a message", () => {
+    const codes = CAUSES.map((row) => row.code);
+
+    expect(new Set(codes).size).toBe(codes.length);
+    // The one selector kind B-01 accepts is bare digits, which is what makes
+    // "one selector matching two slices" reachable at all: the value is a
+    // candidate slice number and a candidate issue id at the same time.
+    const colliding = resolveScopeExtensions({
+      selectors: ["9"],
+      view: [],
+      slices: [declaredSlice("09", "279"), declaredSlice("20", "9")],
+      manifest: null,
+    });
+    expect(colliding.ok === false ? colliding.code : "").toBe(
+      "extension-identity-conflict",
+    );
+    expect(colliding.ok === false ? colliding.message : "").toContain("#279");
+    // And the six named codes are exactly the resolver's own vocabulary.
+    expect([...EXTENSION_REFUSAL_CODES].sort()).toEqual([...codes].sort());
+  });
+
+  it("[behavior:#278:B-02] returns the canonical set sorted by slice number, then issue", () => {
+    const result = resolveScopeExtensions({
+      selectors: ["03", "2"],
+      view: [],
+      slices: [declaredSlice("03", "303"), declaredSlice("02", "302")],
+      manifest: null,
+    });
+
+    // Stored canonically — `"03"` resolves to slice 3 — and never as typed, so
+    // the same addition reads the same way whoever typed it.
+    expect(result.ok === true ? result.extensions : []).toEqual([
+      { number: "2", ghIssue: "302" },
+      { number: "3", ghIssue: "303" },
+    ]);
+  });
+
+  it("[behavior:#278:B-02] resolves a member whose only blocker is another member of the set", () => {
+    const together = resolveScopeExtensions({
+      selectors: ["282", "279"],
+      view: SCOPE.slices,
+      slices: EXTENSION_SLICES,
+      manifest: RESERVING_MANIFEST,
+    });
+
+    // The set enters scope together, so #279 is scoped by the time the DAG asks.
+    expect(together.ok === true ? together.extensions : []).toEqual([
+      ADDITION_A,
+      ADDITION_BLOCKED,
+    ]);
+    // Alone, the same member is refused: nothing would ever unblock it.
+    const alone = resolveScopeExtensions({
+      selectors: ["282"],
+      view: SCOPE.slices,
+      slices: EXTENSION_SLICES,
+      manifest: RESERVING_MANIFEST,
+    });
+    expect(alone.ok === false ? alone.code : "").toBe(
+      "extension-blocker-unscoped",
+    );
+  });
+
+  it("[behavior:#278:B-02] restricts nothing when there is no afk.json, and never reads run state", () => {
+    // The documented legacy mode: #284 is outside `RESERVING_MANIFEST` and a
+    // legal addition without one.
+    expect(
+      resolveScopeExtensions({
+        selectors: ["284"],
+        view: SCOPE.slices,
+        slices: EXTENSION_SLICES,
+        manifest: null,
+      }),
+    ).toEqual({ ok: true, extensions: [{ number: "14", ghIssue: "284" }] });
+    expect(
+      resolveScopeExtensions({
+        selectors: [],
+        view: SCOPE.slices,
+        slices: EXTENSION_SLICES,
+        manifest: RESERVING_MANIFEST,
+      }),
+    ).toEqual({ ok: true, extensions: [] });
+    // Every fact it needs is an argument, so the same selectors resolve the same
+    // way at admission, at the admission recheck and at the completion recheck.
+    const body = declarationBody("export function resolveScopeExtensions(");
+    for (const forbidden of ["RunState", "loadRunState(", "recoveryLineageFor("]) {
+      expect(body).not.toContain(forbidden);
+    }
+    expect(body).not.toContain("matchesSliceSelector");
+  });
+});
+
+describe("where the resolver sits in the admission sequence", () => {
+  it("[behavior:#278:B-03] refuses a whole set for one invalid member, before anything is published", () => {
+    const before = {
+      state: readFileSync(fixture.statePath),
+      contract: readFileSync(join(fixture.sliceDir, CONTRACT_FILENAME)),
+      manifest: readFileSync(join(fixture.sliceDir, ACCEPTANCE_MANIFEST_FILENAME)),
+      tree: digestTree(fixture.sliceDir),
+    };
+
+    const outcome = admitWithExtensions(fixture, ["279", "281"], {
+      attemptId: "attempt-never-published",
+    });
+
+    expect(outcome).toMatchObject({
+      admitted: false,
+      code: "extension-slice-not-afk",
+    });
+    // A pre-admission refusal: no lineage, no snapshot, no accepted-pair byte.
+    expect(stateDocument(fixture).recoveryLineage).toBeUndefined();
+    expect(stateDocument(fixture).scope).toEqual(SCOPE);
+    expect(readFileSync(fixture.statePath).equals(before.state)).toBe(true);
+    expect(listPublishedPairSnapshots(fixture.sliceDir)).toEqual([]);
+    expect(
+      readFileSync(join(fixture.sliceDir, CONTRACT_FILENAME)).equals(
+        before.contract,
+      ),
+    ).toBe(true);
+    expect(
+      readFileSync(join(fixture.sliceDir, ACCEPTANCE_MANIFEST_FILENAME)).equals(
+        before.manifest,
+      ),
+    ).toBe(true);
+    expect(digestTree(fixture.sliceDir)).toEqual(before.tree);
+  }, 30_000);
+
+  it("[behavior:#278:B-03] resolves a repeat's members against the pre-completion view", () => {
+    completeWithExtensions(fixture);
+    // Both additions are in scope now — put there by the very attempt this
+    // request repeats. Judged against the scope as loaded they would draw
+    // `extension-already-in-scope` and never reach the replay comparison.
+    expect(stateDocument(fixture).scope).toEqual(
+      widenedScope(ADDITION_A, ADDITION_B),
+    );
+
+    const outcome = admitWithExtensions(fixture, ["279", "280"], {
+      attemptId: "attempt-never-published",
+    });
+
+    expect(outcome).toMatchObject({
+      admitted: false,
+      replayed: true,
+      code: "replay-completed-no-op",
+      attemptId: COMPLETING_ATTEMPT,
+    });
+    expect(outcome.admitted === false ? outcome.code : "").not.toBe(
+      "extension-already-in-scope",
+    );
+  }, 30_000);
+
+  it("[behavior:#278:B-03] refuses a repeat whose members do not resolve as identities", () => {
+    completeWithExtensions(fixture);
+    const before = readFileSync(fixture.statePath);
+
+    // Same target, same reason, and a set whose extra member #284 was deleted
+    // from `issues.md`: a request that names nothing resolvable repeats nothing.
+    const outcome = admit(fixture, {
+      extendScope: ["279", "280", "284"],
+      slices: EXTENSION_SLICES.filter((slice) => slice.ghIssue !== "284"),
+      attemptId: "attempt-never-published",
+    });
+
+    expect(outcome).toMatchObject({
+      admitted: false,
+      code: "extension-slice-unknown",
+    });
+    expect(outcome.admitted === false ? outcome.replayed : true).toBeUndefined();
+    expect(readFileSync(fixture.statePath).equals(before)).toBe(true);
+  }, 30_000);
+
+  it("[behavior:#278:B-03] calls the resolver after replay detection and before the snapshot", () => {
+    const body = declarationBody("export function admitStaleRenegotiation(");
+    const resolver = body.indexOf("resolveScopeExtensions({");
+
+    expect(resolver).toBeGreaterThan(body.indexOf("completedReplacementFor("));
+    expect(resolver).toBeLessThan(body.indexOf("publishAcceptedPairSnapshot("));
+    expect(resolver).toBeLessThan(body.indexOf("beforeLockAcquired"));
+    // Two call sites on this path — the pre-lock resolve and the locked recheck
+    // — and the replay branch consumes what the first one returned.
+    expect(occurrences(body, "resolveScopeExtensions({")).toBe(2);
+    expect(body.indexOf("replayOutcome(")).toBeGreaterThan(resolver);
+  });
+});
+
+describe("what one admitted set of additions records", () => {
+  it("[behavior:#278:B-05] carries the whole canonical set on the PENDING event and adds no scope", () => {
+    const before = stateDocument(fixture);
+
+    // Typed in the other order, so the canonical sort is what the record shows.
+    const outcome = admitWithExtensions(fixture, ["280", "279"], {
+      attemptId: "attempt-extending",
+    });
+
+    expect(outcome.admitted).toBe(true);
+    const event = trailingEvent(fixture);
+    expect(event.extensions).toEqual([ADDITION_A, ADDITION_B]);
+    for (const entry of event.extensions) {
+      expect(Object.keys(entry).sort()).toEqual(["ghIssue", "number"]);
+    }
+    // A `PENDING` record is a proposal: the scope of record is untouched, and the
+    // whole run-state diff is the one appended event.
+    expect(stateDocument(fixture).scope).toEqual(SCOPE);
+    expect(stateDocument(fixture)).toEqual({
+      ...before,
+      recoveryLineage: { [GH_ISSUE]: [event] },
+    });
+  }, 30_000);
+
+  it("[behavior:#278:B-05] refuses when the set stops resolving to the same identities before the lock", () => {
+    // `issues.md` is an argument, so the interleave is the argument changing:
+    // #279 is deleted between the pre-lock resolve and the locked recheck.
+    const declared = [...EXTENSION_SLICES];
+
+    const outcome = admit(fixture, {
+      attemptId: "attempt-extension-drift",
+      extendScope: ["279"],
+      slices: declared,
+      beforeLockAcquired: () => {
+        declared.splice(
+          declared.findIndex((slice) => slice.ghIssue === "279"),
+          1,
+        );
+      },
+    });
+
+    expect(outcome).toMatchObject({
+      admitted: false,
+      code: "facts-changed-before-lock",
+    });
+    const message = outcome.admitted === false ? outcome.message : "";
+    expect(message).toContain("stopped resolving to the same identities");
+    expect(message).toContain("extension-slice-unknown");
+    // The snapshot was published before the lock and is inert: nothing appended,
+    // and no scope was widened.
+    expect(listPublishedPairSnapshots(fixture.sliceDir)).toEqual([
+      "attempt-extension-drift",
+    ]);
+    expect(stateDocument(fixture).recoveryLineage).toBeUndefined();
+    expect(stateDocument(fixture).scope).toEqual(SCOPE);
+  }, 30_000);
+});
+
+describe("what a PENDING set of additions may not schedule", () => {
+  it("[behavior:#278:B-06] leaves the resolved scope, its skip reasons and the DAG as if no attempt existed", () => {
+    const slices = [...EXTENSION_SLICES];
+    const attemptFree = resolveRunScope(slices, undefined, SCOPE);
+
+    expect(
+      admitWithExtensions(fixture, ["279", "282"], {
+        attemptId: "attempt-pending-only",
+      }).admitted,
+    ).toBe(true);
+
+    const state = loadRunState(fixture.repoRoot, PRD_SLUG);
+    expect(state.scope).toEqual(SCOPE);
+    const resolved = resolveRunScope(slices, undefined, state.scope);
+    expect(resolved.persisted).toEqual(attemptFree.persisted);
+    expect(resolved.members).toEqual(attemptFree.members);
+    expect(resolved.selected).toEqual(attemptFree.selected);
+    expect(resolved.skipped).toEqual(attemptFree.skipped);
+    // Both proposed additions read as `not-selected`, exactly as they did before
+    // the attempt existed — not as a fourth skip reason.
+    expect(
+      resolved.skipped.map(({ slice, reason }) => `${slice.ghIssue}:${reason}`),
+    ).toEqual([
+      "279:not-selected",
+      "280:not-selected",
+      "281:hitl",
+      "282:not-selected",
+      "283:not-selected",
+      "284:not-selected",
+    ]);
+    // And neither addition is schedulable: the DAG is built from the selected
+    // members, which a proposal is not one of.
+    const dag = buildDAG(resolved.selected);
+    expect(dag.ready(new Set())).toEqual([GH_ISSUE, "278"]);
+    expect(dag.slices.has("279")).toBe(false);
+    expect(dag.slices.has("282")).toBe(false);
+  }, 30_000);
+});
+
+describe("revalidating the additions under the completion lock", () => {
+  const REVALIDATION_CASES: {
+    label: string;
+    /** Facts the completion is handed, standing in for a changed world. */
+    args?: Partial<CompleteRecoveryAttemptArgs>;
+    plant?: (f: Fixture) => void;
+    /** The resolver code the message names, when the revalidation is reached. */
+    code?: RecoveryRefusalCode;
+  }[] = [
+    {
+      label: "an addition deleted from issues.md",
+      args: {
+        slices: EXTENSION_SLICES.filter((slice) => slice.ghIssue !== "280"),
+      },
+      code: "extension-slice-unknown",
+    },
+    {
+      label: "an addition afk.json no longer reserves",
+      args: {
+        afkManifest: { ...RESERVING_MANIFEST, selectedSlices: ["07", "08", "09"] },
+      },
+      code: "extension-outside-manifest",
+    },
+    {
+      label: "an addition another process already put in scope",
+      // Answered by the scope-fingerprint recheck one step earlier — putting an
+      // addition in scope is exactly a scope change — so this row asserts the
+      // ending and the untouched scope, not the revalidation's own message.
+      plant: (f) => {
+        const document = stateDocument(f);
+        document.scope = widenedScope(ADDITION_B);
+        writeFileSync(f.statePath, `${JSON.stringify(document, null, 2)}\n`);
+      },
+    },
+  ];
+
+  it.each(REVALIDATION_CASES)(
+    "[behavior:#278:B-07] appends no COMPLETED event and widens no scope given $label",
+    (row) => {
+      expect(
+        admitWithExtensions(fixture, ["279", "280"], {
+          attemptId: "attempt-revalidated",
+        }).admitted,
+      ).toBe(true);
+      writeAcceptedPair(fixture.sliceDir, REPLACEMENT_CONTRACT);
+      row.plant?.(fixture);
+      const scopeBefore = stateDocument(fixture).scope;
+
+      const result = complete(fixture, {
+        slices: EXTENSION_SLICES,
+        ...row.args,
+      });
+
+      expect(result).toMatchObject({
+        completed: false,
+        code: "facts-changed-before-lock",
+        attemptId: "attempt-revalidated",
+      });
+      // Through #333's writer, with #335's trigger: no new lineage state and no
+      // new transition are introduced by the revalidation.
+      expect(
+        result.completed === false ? result.failure?.trigger : undefined,
+      ).toBe("completion-cas-lost");
+      const events = eventsOf(fixture);
+      expect(events.map((event) => event.state)).toEqual([
+        "PENDING",
+        "ROLLED_BACK",
+      ]);
+      expect(events[1]!.extensions).toEqual([ADDITION_A, ADDITION_B]);
+      expect(stateDocument(fixture).scope).toEqual(scopeBefore);
+      if (row.code !== undefined) {
+        const message = result.completed === false ? result.message : "";
+        expect(message).toContain("no longer resolve to the same identities");
+        expect(message).toContain(row.code);
+        expect(message).toContain("was not widened");
+      }
+    },
+    30_000,
+  );
+
+  it("[behavior:#278:B-07] reads the set from the trailing event, never from a caller argument", () => {
+    const body = declarationBody("export function completeRecoveryAttempt(");
+
+    expect(body).toContain("const additions = current.extensions;");
+    // The caller supplies the facts the set is revalidated *against* — the
+    // declared slices and the manifest — and never the set itself.
+    expect(body).not.toContain("args.extendScope");
+    expect(occurrences(body, "resolveScopeExtensions({")).toBe(1);
+  });
+});
+
+describe("the one document a completion publishes", () => {
+  it("[behavior:#278:B-08] holds the COMPLETED event and both additions, and carries every other field forward", () => {
+    // Unrelated run-state facts a completion has no business touching.
+    const seeded = stateDocument(fixture);
+    seeded.resume = { [GH_ISSUE]: { attempts: 2, lastDecision: "resumed" } };
+    seeded.migrations = { pool: ["0042", "0043"], claims: { [GH_ISSUE]: ["0042"] } };
+    seeded.reviewPhase = { sanity: { treeSha: "ca".repeat(20), ok: true } };
+    writeFileSync(fixture.statePath, `${JSON.stringify(seeded, null, 2)}\n`);
+    const before = stateDocument(fixture);
+
+    expect(
+      admitWithExtensions(fixture, ["282", "279"], {
+        attemptId: COMPLETING_ATTEMPT,
+      }).admitted,
+    ).toBe(true);
+    writeAcceptedPair(fixture.sliceDir, REPLACEMENT_CONTRACT);
+    expect(complete(fixture, { slices: EXTENSION_SLICES }).completed).toBe(true);
+
+    const publishedDocument = stateDocument(fixture);
+    const events = eventsOf(fixture);
+    expect(events.map((event) => event.state)).toEqual(["PENDING", "COMPLETED"]);
+    expect(events[1]!.extensions).toEqual([ADDITION_A, ADDITION_BLOCKED]);
+    // Both halves in the one reloaded document: the terminal event, and the
+    // additions appended after every existing entry in canonical order.
+    expect(publishedDocument.scope).toEqual(
+      widenedScope(ADDITION_A, ADDITION_BLOCKED),
+    );
+    // Exactly two fields moved. `resume`, `slices`, `migrations` and
+    // `reviewPhase` are carried forward as bytes.
+    const differing = Object.keys({ ...before, ...publishedDocument }).filter(
+      (key) =>
+        JSON.stringify(before[key]) !== JSON.stringify(publishedDocument[key]),
+    );
+    expect(differing.sort()).toEqual(["recoveryLineage", "scope"]);
+    // The additions became schedulable work, each held until its own blockers
+    // complete — which is what putting them in scope was for.
+    const resolved = resolveRunScope(
+      [...EXTENSION_SLICES],
+      undefined,
+      publishedDocument.scope as PersistedRunScope,
+    );
+    expect(resolved.selected.map((slice) => slice.ghIssue)).toEqual([
+      GH_ISSUE,
+      "278",
+      "279",
+      "282",
+    ]);
+    const dag = buildDAG(resolved.selected);
+    expect(dag.ready(new Set([GH_ISSUE, "278"]))).toEqual(["279"]);
+    expect(dag.ready(new Set([GH_ISSUE, "278", "279"]))).toEqual(["282"]);
+  }, 30_000);
+
+  it("[behavior:#278:B-08] declares exactly one run-state write on the completion path", () => {
+    const body = declarationBody("export function completeRecoveryAttempt(");
+
+    expect(occurrences(body, "transactRunState<")).toBe(1);
+    // One `changed: true` on the path, so one document is published at most once.
+    expect(occurrences(body, "changed: true")).toBe(1);
+    expect(body).not.toContain("saveRunState");
+    expect(MODULE_CODE).not.toContain("saveRunState");
+    // One scope writer in the whole module, and it is inside that transaction
+    // body beside the append — there is no seam between the two halves.
+    expect(MODULE_CODE.match(/\.scope = /g)).toHaveLength(1);
+    expect(occurrences(MODULE_CODE, "appendScopeExtensions(")).toBe(1);
+    const locked = body.slice(body.indexOf("transactRunState<"));
+    expect(locked).toContain("appendRecoveryLineageEvent(");
+    expect(locked).toContain("appendScopeExtensions(");
+    expect(locked.indexOf("appendRecoveryLineageEvent(")).toBeLessThan(
+      locked.indexOf("appendScopeExtensions("),
+    );
+  });
+
+  it("[behavior:#278:B-08] leaves neither half on disk when the attempt stops trailing before the lock", () => {
+    expect(
+      admitWithExtensions(fixture, ["279", "282"], {
+        attemptId: "attempt-interleaved",
+      }).admitted,
+    ).toBe(true);
+    writeAcceptedPair(fixture.sliceDir, REPLACEMENT_CONTRACT);
+
+    const result = complete(fixture, {
+      slices: EXTENSION_SLICES,
+      // The attempt is resolved by another process inside the seam, so the
+      // locked body finds a lineage that is no longer this attempt's.
+      beforeLockAcquired: () => plantRolledBack(fixture),
+    });
+
+    expect(result).toMatchObject({
+      completed: false,
+      code: "facts-changed-before-lock",
+    });
+    expect(eventsOf(fixture).some((event) => event.state === "COMPLETED")).toBe(
+      false,
+    );
+    expect(stateDocument(fixture).scope).toEqual(SCOPE);
+  }, 30_000);
+});
+
+describe("a repeat that names a set of additions", () => {
+  const REPLAY_SETS: {
+    label: string;
+    selectors: string[];
+    code: "replay-completed-no-op" | "replay-conflict";
+  }[] = [
+    {
+      label: "the same two identities",
+      selectors: ["280", "279"],
+      code: "replay-completed-no-op",
+    },
+    { label: "one of the two", selectors: ["279"], code: "replay-conflict" },
+    {
+      label: "a superset",
+      selectors: ["279", "280", "282"],
+      code: "replay-conflict",
+    },
+    {
+      label: "an overlapping set of the same size",
+      selectors: ["279", "282"],
+      code: "replay-conflict",
+    },
+  ];
+
+  it.each(REPLAY_SETS)(
+    "[behavior:#278:B-09] answers $code for a repeat naming $label",
+    (row) => {
+      completeWithExtensions(fixture);
+      const before = {
+        state: readFileSync(fixture.statePath),
+        tree: digestTree(fixture.sliceDir),
+        snapshots: listPublishedPairSnapshots(fixture.sliceDir),
+      };
+
+      const outcome = admitWithExtensions(fixture, row.selectors, {
+        attemptId: "attempt-never-published",
+      });
+
+      expect(outcome.admitted).toBe(false);
+      const code = outcome.admitted === false ? outcome.code : undefined;
+      expect(code).toBe(row.code);
+      // The reached replay answer is one of the two replay codes, never a
+      // resolver refusal: the members resolved, they just are not the same set.
+      expect(EXTENSION_REFUSAL_CODES).not.toContain(code);
+      const message = outcome.admitted === false ? outcome.message : "";
+      expect(message).toContain(COMPLETING_ATTEMPT);
+      if (row.code === "replay-conflict") {
+        // The conflict names both sets, so an operator can see which member
+        // differs, and is an ordinary refusal rather than the replay member.
+        expect(message).toContain("9 (#279)");
+        expect(outcome.admitted === false ? outcome.replayed : true).toBe(
+          undefined,
+        );
+      } else {
+        expect(outcome).toMatchObject({
+          replayed: true,
+          attemptId: COMPLETING_ATTEMPT,
+        });
+      }
+      // Nothing published, appended or rewritten on any of these endings.
+      expect(readFileSync(fixture.statePath).equals(before.state)).toBe(true);
+      expect(digestTree(fixture.sliceDir)).toEqual(before.tree);
+      expect(listPublishedPairSnapshots(fixture.sliceDir)).toEqual(
+        before.snapshots,
+      );
+    },
+    30_000,
+  );
+
+  it("[behavior:#278:B-09] refuses a repeat that names the same set for a different reason", () => {
+    completeWithExtensions(fixture);
+    const before = readFileSync(fixture.statePath);
+
+    const outcome = admitWithExtensions(fixture, ["279", "280"], {
+      request: request(SLICE_NUMBER, "a different reason entirely"),
+      attemptId: "attempt-never-published",
+    });
+
+    expect(outcome).toMatchObject({ admitted: false, code: "replay-conflict" });
+    const message = outcome.admitted === false ? outcome.message : "";
+    expect(message).toContain("a different reason entirely");
+    expect(message).toContain("scope additions 9 (#279), 10 (#280)");
+    expect(readFileSync(fixture.statePath).equals(before)).toBe(true);
+  }, 30_000);
+
+  it("[behavior:#278:B-09] refuses a repeat whose canonical target is another slice", () => {
+    // A real completion, re-keyed onto slice 08 (#278): the pair in slice 07's
+    // directory is still the replacement that completion accepted and the
+    // additions are the same, so the target is the only thing that differs.
+    completeWithExtensions(fixture, "attempt-other-slice");
+    const document = stateDocument(fixture);
+    const lineage = document.recoveryLineage as Record<
+      string,
+      PersistedRecoveryLineageEvent[]
+    >;
+    const completed = lineage[GH_ISSUE]!.at(-1)!;
+    document.recoveryLineage = {
+      "278": [{ ...completed, target: { number: "8", ghIssue: "278" } }],
+    };
+    // The widening that completion published stays, so the repeat's own view
+    // subtracts exactly the identities the re-keyed event recorded.
+    writeFileSync(fixture.statePath, `${JSON.stringify(document, null, 2)}\n`);
+    const before = readFileSync(fixture.statePath);
+
+    const outcome = admitWithExtensions(fixture, ["279", "280"], {
+      attemptId: "attempt-never-published",
+    });
+
+    expect(outcome).toMatchObject({ admitted: false, code: "replay-conflict" });
+    const message = outcome.admitted === false ? outcome.message : "";
+    expect(message).toContain("attempt-other-slice");
+    expect(message).toContain("8 (#278)");
+    expect(message).toContain(`#${GH_ISSUE}`);
+    expect(readFileSync(fixture.statePath).equals(before)).toBe(true);
+  }, 30_000);
+
+  it("[behavior:#278:B-09] compares the sets as values, both sides canonical", () => {
+    const body = declarationBody("function replayOutcome(");
+
+    // The placeholder "the completed attempt added nothing" comparison is gone.
+    expect(body).not.toContain("extensions.length === 0");
+    expect(body).toContain("sameScopeExtensions(completed.extensions, resolved)");
+  });
+});
+
+describe("which scope identities a recovery attempt admitted", () => {
+  it("[behavior:#278:B-10] reports the completed attempt's identities and not a rolled-back proposal", () => {
+    completeWithExtensions(fixture);
+    // A second target whose attempt only ever *proposed* a third identity.
+    const document = stateDocument(fixture);
+    const lineage = document.recoveryLineage as Record<
+      string,
+      PersistedRecoveryLineageEvent[]
+    >;
+    lineage["278"] = [
+      {
+        ...lineage[GH_ISSUE]![1]!,
+        attemptId: "attempt-proposed",
+        target: { number: "8", ghIssue: "278" },
+        state: "ROLLED_BACK",
+        extensions: [ADDITION_BLOCKED],
+      },
+    ];
+    writeFileSync(fixture.statePath, `${JSON.stringify(document, null, 2)}\n`);
+
+    const state = loadRunState(fixture.repoRoot, PRD_SLUG);
+
+    expect(recoveryAdmittedScopeExtensions(state)).toEqual([
+      ADDITION_A,
+      ADDITION_B,
+    ]);
+    // Derived from the events that recorded the widening — no second persisted
+    // field, and `PersistedScopeSlice` still holds exactly its two members.
+    const identity: Record<keyof PersistedScopeSlice, string> = {
+      number: "9",
+      ghIssue: "279",
+    };
+    expect(Object.keys(identity).sort()).toEqual(["ghIssue", "number"]);
+    for (const entry of state.scope?.slices ?? []) {
+      expect(Object.keys(entry).sort()).toEqual(["ghIssue", "number"]);
+    }
+    expect(MODULE_CODE).not.toContain("addedBy");
+  }, 30_000);
+
+  it("[behavior:#278:B-10] reports nothing for a run whose attempts added nothing", () => {
+    expect(
+      recoveryAdmittedScopeExtensions(loadRunState(fixture.repoRoot, PRD_SLUG)),
+    ).toEqual([]);
+    admitPending(fixture, "attempt-no-additions");
+    expect(
+      recoveryAdmittedScopeExtensions(loadRunState(fixture.repoRoot, PRD_SLUG)),
+    ).toEqual([]);
+  }, 30_000);
+});
+
+describe("what the extension paths must not disturb", () => {
+  it("[behavior:#278:P-03] moves no ref across the extension paths and keeps one scope encoder", () => {
+    const before = {
+      tips: tips(fixture),
+      graph: git(fixture.repoRoot, "log", "--oneline", "--all"),
+      status: git(fixture.repoRoot, "status", "--porcelain"),
+      branches: git(fixture.repoRoot, "branch", "--list"),
+      worktree: digestTree(fixture.worktreeDir),
+    };
+
+    // A resolver refusal, an admission, a completion that widens scope, and the
+    // replay that follows it.
+    expect(
+      admitWithExtensions(fixture, ["281"], { attemptId: "attempt-p03-refused" }),
+    ).toMatchObject({ admitted: false, code: "extension-slice-not-afk" });
+    completeWithExtensions(fixture, "attempt-p03-completed");
+    expect(admitWithExtensions(fixture, ["279", "280"])).toMatchObject({
+      replayed: true,
+    });
+
+    expect(tips(fixture)).toEqual(before.tips);
+    expect(git(fixture.repoRoot, "log", "--oneline", "--all")).toBe(before.graph);
+    expect(git(fixture.repoRoot, "status", "--porcelain")).toBe(before.status);
+    expect(git(fixture.repoRoot, "branch", "--list")).toBe(before.branches);
+    expect(digestTree(fixture.worktreeDir)).toEqual(before.worktree);
+    expect(MODULE_CODE).not.toMatch(/\b(?:merge|reset|rebase)\b/i);
+    // One encoder, one digest over it, shared by admission and completion: the
+    // widened scope changes what is encoded, never how.
+    expect(
+      occurrences(MODULE_CODE, "function encodeRunScopeFingerprintPayload("),
+    ).toBe(1);
+    expect(occurrences(MODULE_CODE, "function runScopeFingerprint(")).toBe(1);
+    expect(occurrences(MODULE_CODE, "runScopeFingerprint(")).toBe(3);
+    expect(encodeRunScopeFingerprintPayload(widenedScope(ADDITION_A))).toBe(
+      '{"mode":"explicit","slices":[{"number":"7","ghIssue":"277"},' +
+        '{"number":"8","ghIssue":"278"},{"number":"9","ghIssue":"279"}]}',
+    );
+  }, 60_000);
+
+  it("[behavior:#278:P-04] leaves #335's preconditions, single lock and stamped event exactly as shipped", () => {
+    expect(
+      admitWithExtensions(fixture, ["279"], { attemptId: "attempt-p04" })
+        .admitted,
+    ).toBe(true);
+    writeAcceptedPair(fixture.sliceDir, REPLACEMENT_CONTRACT);
+    const gate = recordingGate();
+
+    const result = complete(fixture, {
+      lockGate: gate.gate,
+      slices: EXTENSION_SLICES,
+    });
+
+    expect(result.completed).toBe(true);
+    // The gate is still reached exactly once, with the replacement contract's own
+    // path, and the event still carries #335's two fingerprints and the stamp.
+    expect(gate.calls).toEqual([join(fixture.sliceDir, CONTRACT_FILENAME)]);
+    const completed = trailingEvent(fixture);
+    expect(completed.replacementContractFingerprint).toBe(
+      sha256Of(REPLACEMENT_CONTRACT),
+    );
+    expect(completed.replacementManifestFingerprint).toBe(
+      sha256Of(ACCEPTED_MANIFEST),
+    );
+    expect(completed.lockProvenance).toBe(PROVENANCE);
+    const widened = widenedScope(ADDITION_A);
+    expect(stateDocument(fixture).scope).toEqual(widened);
+
+    // A second attempt against a pair nobody completed on, refused by the gate:
+    // the three preconditions still end it through #333's writer, and an ending
+    // that never held the lock widens nothing.
+    writeAcceptedPair(fixture.sliceDir, SECOND_REPLACEMENT_CONTRACT);
+    expect(
+      admitWithExtensions(fixture, ["280"], { attemptId: "attempt-p04-refused" })
+        .admitted,
+    ).toBe(true);
+    expect(
+      complete(fixture, {
+        lockGate: () => "migration prefix 0042 is already taken",
+        slices: EXTENSION_SLICES,
+      }),
+    ).toMatchObject({
+      completed: false,
+      code: "lock-gate-refused",
+      attemptId: "attempt-p04-refused",
+    });
+    expect(trailingEvent(fixture).state).toBe("ROLLED_BACK");
+    expect(stateDocument(fixture).scope).toEqual(widened);
+    // And the scope write really is inside the one lock this path takes.
+    const body = declarationBody("export function completeRecoveryAttempt(");
+    expect(occurrences(body, "transactRunState<")).toBe(1);
+    expect(occurrences(body, "args.lockGate(")).toBe(1);
+  }, 60_000);
 });
