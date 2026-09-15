@@ -22,7 +22,6 @@ import {
   buildExplorerRepositoryContext,
   projectContractEvaluatorEvidence,
   projectGeneratorRepairSituation,
-  projectGeneratorContractView,
   projectGeneratorPatternsAndHarness,
   mergeResolutionBlockRoom,
   withMergeResolutionSituation,
@@ -1527,7 +1526,6 @@ describe("generator context envelope", () => {
     const input: Parameters<typeof assembleGeneratorEnvelope>[0] = {
       mode: "repair",
       sliceDir: ".kiro/specs/demo/slices/01-focused",
-      contractView: "checkpointId: CHECKPOINT-07",
       acceptanceManifest,
       patternsAndHarness: "PATTERNS-AND-HARNESS",
       testCommand: "pnpm test:focused",
@@ -1610,7 +1608,6 @@ describe("generator context envelope", () => {
     const result = assembleGeneratorEnvelope({
       mode: "initial",
       sliceDir: ".kiro/specs/demo/slices/01-focused",
-      contractView: "LOCKED-CONTRACT-VIEW",
       acceptanceManifest,
       patternsAndHarness: "PATTERNS-AND-HARNESS",
       testCommand: "pnpm test:focused",
@@ -1695,8 +1692,9 @@ describe("generator context envelope", () => {
     ]);
     // #269: reference, not omission. The pair's classes stay declared and both
     // files stay in the evidence above; what changes is that neither is copied
-    // into the prompt, and the prompt says so.
-    expect(result.prompt).not.toContain("LOCKED-CONTRACT-VIEW");
+    // into the prompt, and the prompt says so. #284 removed the contract half
+    // from the input entirely — there is no longer a value that *could* be
+    // copied — so the manifest is what this pair of assertions can still guard.
     expect(result.prompt).not.toContain('"id": "B-01"');
     expect(result.prompt).toMatch(/read both files in\s+full before you write/);
     // The derived file-scope projection is still inlined: the generator is held
@@ -1704,63 +1702,10 @@ describe("generator context envelope", () => {
     expect(result.prompt).toContain("- `src/feature.ts`");
   });
 
-  it("B-02 projects the six complete contract section bodies byte-for-byte", () => {
-    const contract = [
-      "# Contract\r\n",
-      "\r\n",
-      "OUTSIDE-MARKER\r\n",
-      "\r\n",
-      "## Scope lock\r\n",
-      "scope body\r\n",
-      "\r\n",
-      "### In scope\r\n",
-      "in-scope body\r\n",
-      "\r\n",
-      "#### Nested detail\r\n",
-      "NESTED-IN-SCOPE-MARKER\r\n",
-      "\r\n",
-      "#### In scope\r\n",
-      "NESTED-RESERVED-IN-SCOPE-MARKER\r\n",
-      "\r\n",
-      "#### Test plan\r\n",
-      "NESTED-RESERVED-TEST-PLAN-MARKER\r\n",
-      "\r\n",
-      "### Non-goals (explicit out-of-scope)\r\n",
-      "non-goals body\r\n",
-      "\r\n",
-      "### Existing behavior to preserve\r\n",
-      "preservation body\r\n",
-      "\r\n",
-      "### Changes to existing behavior (only if the issue asks for it)\r\n",
-      "changes body\r\n",
-      "\r\n",
-      "## Files expected to change\r\n",
-      "EXCLUDED-FILES-MARKER\r\n",
-      "\r\n",
-      "## New patterns / deps / schema (if any)\r\n",
-      "patterns body\r\n",
-      "\r\n",
-      "## Test plan\r\n",
-      "EXCLUDED-TEST-MARKER\r\n",
-    ].join("");
-
-    expect(projectGeneratorContractView(contract)).toBe(
-      [
-        "\r\nscope body\r\n\r\n",
-        "\r\nin-scope body\r\n\r\n#### Nested detail\r\nNESTED-IN-SCOPE-MARKER\r\n\r\n#### In scope\r\nNESTED-RESERVED-IN-SCOPE-MARKER\r\n\r\n#### Test plan\r\nNESTED-RESERVED-TEST-PLAN-MARKER\r\n\r\n",
-        "\r\nnon-goals body\r\n\r\n",
-        "\r\npreservation body\r\n\r\n",
-        "\r\nchanges body\r\n\r\n",
-        "\r\npatterns body\r\n\r\n",
-      ].join(""),
-    );
-  });
-
   it("B-03 QA-01 records exact repair generator evidence in prompt order", () => {
     const input = {
       mode: "repair" as const,
       sliceDir: ".kiro/specs/demo/slices/01-focused",
-      contractView: "LOCKED-CONTRACT-VIEW",
       acceptanceManifest,
       patternsAndHarness: "PATTERNS-AND-HARNESS",
       testCommand: "pnpm test:focused",
@@ -1863,7 +1808,6 @@ describe("generator context envelope", () => {
     const input = {
       mode: "initial" as const,
       sliceDir: ".kiro/specs/demo/slices/01-focused",
-      contractView: "LOCKED-CONTRACT-VIEW",
       acceptanceManifest,
       patternsAndHarness: "PATTERNS-AND-HARNESS",
       testCommand: "pnpm test:focused",
@@ -1887,7 +1831,6 @@ describe("generator context envelope", () => {
     const result = assembleGeneratorEnvelope({
       mode: "initial",
       sliceDir: ".kiro/specs/demo/slices/01-focused",
-      contractView: "LOCKED-CONTRACT-VIEW",
       acceptanceManifest,
       patternsAndHarness: "PATTERNS-AND-HARNESS",
       testCommand: "pnpm test:focused",
@@ -1909,7 +1852,6 @@ describe("generator context envelope", () => {
     const input = {
       mode: "repair" as const,
       sliceDir: ".kiro/specs/demo/slices/01-focused",
-      contractView: "LOCKED-CONTRACT-VIEW",
       acceptanceManifest,
       patternsAndHarness: "PATTERNS-AND-HARNESS",
       testCommand: "pnpm test:focused",
@@ -1950,7 +1892,6 @@ describe("generator context envelope", () => {
     const result = assembleGeneratorEnvelope({
       mode: "initial",
       sliceDir: ".kiro/specs/demo/slices/01-focused",
-      contractView: "LOCKED-CONTRACT-VIEW",
       acceptanceManifest,
       patternsAndHarness: legacyContext,
       testCommand: "pnpm test:focused",
@@ -1991,8 +1932,11 @@ describe("generator context envelope", () => {
  */
 describe("generator locked pair size (#269)", () => {
   const sliceDir = ".kiro/specs/afk-v2-quality-loops/slices/01-cleaner-loop";
-  // 34,593 bytes of contract view, the measured weight of #87's.
-  const contractView = `LOCKED-CONTRACT-VIEW\n${"cleaner-loop contract detail line\n".repeat(
+  // 34,593 bytes of contract, the measured weight of #87's. Since #284 the
+  // contract is not an envelope input at all — the generator opens the file —
+  // so this is a fixture for the *file on disk*, kept because the arithmetic
+  // below is what makes the by-reference decision worth its two tool calls.
+  const contractFileBytes = `LOCKED-CONTRACT-VIEW\n${"cleaner-loop contract detail line\n".repeat(
     1_016,
   )}`;
   // A manifest whose rendered JSON is ~29,377 bytes, from behaviors rather
@@ -2015,7 +1959,6 @@ describe("generator locked pair size (#269)", () => {
     assembleGeneratorEnvelope({
       mode: "initial",
       sliceDir,
-      contractView,
       acceptanceManifest: fatManifest,
       patternsAndHarness: "PATTERNS-AND-HARNESS",
       testCommand: "pnpm run typecheck && pnpm test:fast",
@@ -2025,7 +1968,7 @@ describe("generator locked pair size (#269)", () => {
 
   it("is a pair the old envelope could not carry", () => {
     const pairBytes =
-      Buffer.byteLength(contractView, "utf-8") +
+      Buffer.byteLength(contractFileBytes, "utf-8") +
       Buffer.byteLength(JSON.stringify(fatManifest, null, 2), "utf-8");
     // The measured pair: 63,970 of #87's 72,040-byte prompt. Under the budget
     // by itself — which is why inlining it looks affordable right up to the
@@ -2044,12 +1987,13 @@ describe("generator locked pair size (#269)", () => {
     expect(result.evidence.assembledByteSize).toBeLessThanOrEqual(
       GENERATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes,
     );
-    // The pair is named, not copied.
+    // The pair is named, not copied. The contract half has no fixture to
+    // assert against since #284 — it is not an input, so nothing can leak it —
+    // and the manifest half is still handed over and still must not be copied.
     expect(result.prompt).toContain(`- \`${sliceDir}/contract.md\``);
     expect(result.prompt).toContain(
       `- \`${sliceDir}/acceptance-manifest.json\``,
     );
-    expect(result.prompt).not.toContain("LOCKED-CONTRACT-VIEW");
     expect(result.prompt).not.toContain("MANIFEST-BEHAVIOR-BODY");
     expect(result.prompt).toMatch(/read both files in\s+full before you write/);
     // Reference, not omission: both classes stay declared and both files stay
@@ -2081,7 +2025,6 @@ describe("generator locked pair size (#269)", () => {
       assembleGeneratorEnvelope({
         mode: "initial",
         sliceDir,
-        contractView,
         acceptanceManifest: fatManifest,
         patternsAndHarness: "P".repeat(70_000),
         testCommand: "pnpm test:fast",
@@ -2096,21 +2039,19 @@ describe("generator locked pair size (#269)", () => {
 
 describe("generator repair situation size (#230)", () => {
   const sliceDir = ".kiro/specs/demo/slices/07-focused";
-  // #193's measured byte weights, so the fixture is refused for the same reason
-  // the live round was rather than an invented one: stuck.md 16,327 and
-  // handoff.md 6,766 quoted inside the situation, against a round whose other
-  // blocks came to 73,607 - 33,745 = 39,862. #193's 39,862 was mostly a
-  // contract view (14,297) plus an acceptance manifest (18,492); this file's
-  // manifest fixture is deliberately tiny, so the contract view carries the
-  // difference.
+  // #193's measured byte weights for the two bodies that still travel inside
+  // the situation, so the fixture is refused for the same reason the live round
+  // was rather than an invented one: stuck.md 16,327 and handoff.md 6,766
+  // quoted inside the situation while both were already carried by reference.
+  // #193's other 39,862 bytes were mostly its contract (14,297) plus its
+  // acceptance manifest (18,492); neither is an inlined block any more (#269),
+  // and since #284 the contract is not an envelope input at all, so this
+  // describe measures the situation's own de-duplication and nothing else.
   const stuckBody = `STUCK-DIAGNOSIS-BODY\n${"unresolved finding detail line\n".repeat(
     525,
   )}`;
   const handoffBody = `HANDOFF-BODY\n${"what shipped detail line\n".repeat(
     270,
-  )}`;
-  const contractView = `LOCKED-CONTRACT-VIEW\n${"contract detail line\n".repeat(
-    1_780,
   )}`;
 
   const commitLogOf = (commits: number): string =>
@@ -2179,7 +2120,6 @@ describe("generator repair situation size (#230)", () => {
     assembleGeneratorEnvelope({
       mode: "repair",
       sliceDir,
-      contractView,
       acceptanceManifest,
       patternsAndHarness: "PATTERNS-AND-HARNESS",
       testCommand: "pnpm test:fast",
@@ -2226,9 +2166,8 @@ describe("generator repair situation size (#230)", () => {
     // keeps its whole commit log.
     expect(result.prompt).not.toContain("omitted to fit the inline-size budget");
     expect(result.prompt).toContain(`commit ${"0".repeat(39)}9`);
-    // #269 inside repair mode: the locked pair is named, never copied, so a
-    // 37 KB contract view cannot spend the repair round's budget.
-    expect(result.prompt).not.toContain("LOCKED-CONTRACT-VIEW");
+    // #269 inside repair mode: the locked pair is named, never copied, so no
+    // contract of any size can spend the repair round's budget.
     expect(result.prompt).toContain(`- \`${sliceDir}/contract.md\``);
     expect(result.prompt).toContain(
       `- \`${sliceDir}/acceptance-manifest.json\``,
@@ -2286,7 +2225,6 @@ describe("generator repair situation size (#230)", () => {
     const stricter = assembleGeneratorEnvelope({
       mode: "repair",
       sliceDir,
-      contractView: "LOCKED-CONTRACT-VIEW",
       acceptanceManifest,
       patternsAndHarness: "PATTERNS-AND-HARNESS",
       testCommand: "pnpm test:fast",
@@ -2952,7 +2890,6 @@ describe("rendered block order validation", () => {
     const input = {
       mode: "initial" as const,
       sliceDir: ".kiro/specs/demo/slices/01-focused",
-      contractView: "LOCKED-CONTRACT-VIEW",
       acceptanceManifest,
       patternsAndHarness: "PATTERNS-AND-HARNESS",
       testCommand: "pnpm test:focused",
@@ -2960,8 +2897,13 @@ describe("rendered block order validation", () => {
       failureSet: { findings: [], gates: [] },
     };
     const assembled = assembleGeneratorEnvelope(input);
-    // The genuine template renders blocks in manifest order.
-    expect(assembled.prompt.indexOf("LOCKED-CONTRACT-VIEW")).toBeLessThan(
+    // The genuine template renders blocks in manifest order. Compare two blocks
+    // the template actually inlines: `file-scope` precedes
+    // `patterns-and-harness` in the manifest's initial order. This used to
+    // compare the contract view, which #269 stopped rendering, so both operands
+    // were -1 and the assertion held for the wrong reason (#284).
+    expect(assembled.prompt.indexOf("- `src/feature.ts`")).toBeGreaterThan(-1);
+    expect(assembled.prompt.indexOf("- `src/feature.ts`")).toBeLessThan(
       assembled.prompt.indexOf("PATTERNS-AND-HARNESS"),
     );
     // Feeding the same locators a reversed rendering through the generic
@@ -3040,7 +2982,6 @@ describe("the merge-resolution data block in the repair situation (#132)", () =>
     assembleGeneratorEnvelope({
       mode: "repair",
       sliceDir,
-      contractView: "LOCKED-CONTRACT-VIEW",
       acceptanceManifest,
       patternsAndHarness: "PATTERNS-AND-HARNESS",
       testCommand: "pnpm typecheck && pnpm test:fast",
@@ -3112,7 +3053,6 @@ describe("the merge-resolution data block in the repair situation (#132)", () =>
     const room = mergeResolutionBlockRoom({
       mode: "repair",
       sliceDir,
-      contractView: "LOCKED-CONTRACT-VIEW",
       acceptanceManifest,
       patternsAndHarness: "PATTERNS-AND-HARNESS",
       testCommand: "pnpm typecheck && pnpm test:fast",
@@ -3151,7 +3091,6 @@ describe("the merge-resolution data block in the repair situation (#132)", () =>
     const input = {
       mode: "repair" as const,
       sliceDir,
-      contractView: "LOCKED-CONTRACT-VIEW",
       acceptanceManifest,
       patternsAndHarness: "PATTERNS-AND-HARNESS",
       testCommand: "pnpm typecheck && pnpm test:fast",

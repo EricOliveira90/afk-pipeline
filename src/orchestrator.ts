@@ -36,7 +36,6 @@ import {
   assembleExplorerEnvelope,
   assembleGeneratorEnvelope,
   mergeResolutionBlockRoom,
-  projectGeneratorContractView,
   projectGeneratorPatternsAndHarness,
   validateExplorerEvidenceMap,
   withMergeResolutionSituation,
@@ -5777,10 +5776,6 @@ export async function runSliceExecute(
           },
         );
         const genLog = logger.agentLog(slice.number, "generator", round);
-        const contract = readFileSync(
-          join(ctx.absSliceDir, "contract.md"),
-          "utf-8",
-        );
         const acceptanceManifest = loadAcceptanceManifest(ctx.absSliceDir);
         if (acceptanceManifest.version !== 2) {
           throw new Error(
@@ -5838,7 +5833,6 @@ export async function runSliceExecute(
         const assembled = assembleGeneratorEnvelope({
           mode,
           sliceDir: ctx.relSliceDir,
-          contractView: projectGeneratorContractView(contract),
           acceptanceManifest,
           patternsAndHarness: projectGeneratorPatternsAndHarness(context),
           ...(!hasExplorerContext
@@ -7926,10 +7920,6 @@ export async function runSliceMergeResolution(args: {
     // the merge the round performs must name the same commit (B-07), and under
     // the held mutex this sha cannot move for the rest of the round.
     const featureTip = resolveRef(ctx.worktreeDir, featBranch);
-    const contract = readFileSync(
-      join(ctx.absSliceDir, "contract.md"),
-      "utf-8",
-    );
     const acceptanceManifest = loadAcceptanceManifest(ctx.absSliceDir);
     if (acceptanceManifest.version !== 2) {
       throw new Error(
@@ -7954,7 +7944,6 @@ export async function runSliceMergeResolution(args: {
     const envelopeInput: GeneratorEnvelopeInput & { repairSituation: string } = {
       mode: "repair",
       sliceDir: ctx.relSliceDir,
-      contractView: projectGeneratorContractView(contract),
       acceptanceManifest,
       patternsAndHarness: projectGeneratorPatternsAndHarness(
         hasExplorerContext

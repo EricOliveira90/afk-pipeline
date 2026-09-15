@@ -447,7 +447,6 @@ function renderRepairEnvelope(
   return assembleGeneratorEnvelope({
     mode: "repair",
     sliceDir: ".kiro/specs/demo/slices/01-x",
-    contractView: "LOCKED-CONTRACT",
     acceptanceManifest: resumeAcceptanceManifest,
     patternsAndHarness: "PATTERNS",
     testCommand: "pnpm test:run",

@@ -93,28 +93,6 @@ export interface ExplorerEnvelopeResult {
   evidence: RoleEnvelopeEvidence & { role: "explorer" };
 }
 
-const GENERATOR_CONTRACT_SECTIONS = new Set([
-  "Scope lock",
-  "In scope",
-  "Non-goals (explicit out-of-scope)",
-  "Existing behavior to preserve",
-  "Changes to existing behavior (only if the issue asks for it)",
-  "New patterns / deps / schema (if any)",
-]);
-
-const CONTRACT_SECTION_LEVELS = new Map([
-  ["Scope lock", 2],
-  ["In scope", 3],
-  ["Non-goals (explicit out-of-scope)", 3],
-  ["Existing behavior to preserve", 3],
-  ["Changes to existing behavior (only if the issue asks for it)", 3],
-  ["Files expected to change", 2],
-  ["Migration requirements", 2],
-  ["New patterns / deps / schema (if any)", 2],
-  ["Test plan", 2],
-  ["Definition of done", 2],
-]);
-
 export const GENERATOR_CONTEXT_MANIFEST = {
   version: 1,
   role: "generator",
@@ -204,7 +182,12 @@ export interface GeneratorFailureSet {
 export interface GeneratorEnvelopeInput {
   mode: "initial" | "repair";
   sliceDir: string;
-  contractView: string;
+  /**
+   * The locked contract is deliberately not an input: the generator opens
+   * `{{SLICE_DIR}}/contract.md` in its own worktree (#269, ADR 0068), so no
+   * caller has to read, project, or size it. `acceptanceManifest` stays
+   * because the `file-scope` projection is derived from it (#284).
+   */
   acceptanceManifest: AcceptanceManifestV2;
   patternsAndHarness: string;
   /** Null when a legacy direct-execution caller has no explorer artifact. */
@@ -1744,45 +1727,6 @@ export function assembleContractEvaluatorRevisionEnvelope(
   );
 }
 
-export function projectGeneratorContractView(contract: string): string {
-  const headings = [
-    ...contract.matchAll(/^(#{1,6})[ \t]+(.+?)(\r?\n|$)/gm),
-  ].map((match) => ({
-    title: match[2]!,
-    level: match[1]!.length,
-    headingStart: match.index,
-    bodyStart: match.index + match[0].length - match[3]!.length,
-  }));
-
-  const standardSections = headings.filter(
-    (heading) =>
-      CONTRACT_SECTION_LEVELS.get(heading.title) === heading.level,
-  );
-  const selected = standardSections
-    .map((heading, index) => ({
-      ...heading,
-      bodyEnd: standardSections[index + 1]?.headingStart ?? contract.length,
-    }))
-    .filter((heading) => GENERATOR_CONTRACT_SECTIONS.has(heading.title));
-  const counts = new Map<string, number>();
-  for (const heading of selected) {
-    counts.set(heading.title, (counts.get(heading.title) ?? 0) + 1);
-  }
-  const duplicated = [...GENERATOR_CONTRACT_SECTIONS].filter(
-    (title) => (counts.get(title) ?? 0) > 1,
-  );
-  if (duplicated.length > 0) {
-    throw new Error(
-      `Generator contract view requires unique projected sections; duplicated: ${duplicated.join(", ")}`,
-    );
-  }
-  if (selected.length !== GENERATOR_CONTRACT_SECTIONS.size) return contract;
-
-  return selected
-    .map(({ bodyStart, bodyEnd }) => contract.slice(bodyStart, bodyEnd))
-    .join("");
-}
-
 export function projectGeneratorPatternsAndHarness(context: string): string {
   const section = explorerEvidenceSections(context).find(
     (heading) => heading.title === "Patterns and test harness",
@@ -2100,11 +2044,11 @@ export function assembleGeneratorEnvelope(
       : "(no repository changes)";
   const failureSet = formatGeneratorFailureSet(input.failureSet);
   /**
-   * `contractView` and `acceptanceManifest` are deliberately absent: the pair
-   * travels by reference to its worktree path (#269, ADR 0068), the way it
-   * already does for the contract evaluator (#196) and the planner revision
-   * round (#265). `FILE_SCOPE` stays — it is a projection of the manifest the
-   * generator is held to, not a copy of a file.
+   * The locked contract and the acceptance manifest are deliberately absent
+   * from the rendered args: the pair travels by reference to its worktree path
+   * (#269, ADR 0068), the way it already does for the contract evaluator
+   * (#196) and the planner revision round (#265). `FILE_SCOPE` stays — it is a
+   * projection of the manifest the generator is held to, not a copy of a file.
    */
   const commonArgs = {
     SLICE_DIR: input.sliceDir,
