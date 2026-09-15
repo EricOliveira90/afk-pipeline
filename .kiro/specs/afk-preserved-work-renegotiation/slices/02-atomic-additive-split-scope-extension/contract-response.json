@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "round": 2,
+  "responses": [
+    {
+      "findingId": "F-01",
+      "position": "CONDITION_MET",
+      "evidence": "B-03 now states the order explicitly and names the scope view each branch supplies: the resolver is called at one place in the shipped admission sequence (src/preserve-work-recovery.ts:781-800), after completedReplacementFor (:709-728) and before the branch-tip reads, the snapshot and the lock. A non-replay request resolves against state.scope.slices as loaded, and extension-already-in-scope can only arise in that branch; a replay resolves against state.scope.slices minus the identities the trailing COMPLETED event records in its extensions, so every member that attempt added is absent from the view and cannot draw that refusal. B-02 is restated to take a persisted-scope *view* argument, never RunState, so the already-in-scope check is scoped by the view B-03 hands it. B-09 now states that {2,3} reaches the no-op and {2}, {2,3,4}, {2,4} reach replay-conflict on set inequality, and names the distinguisher: the replayed:true AdmissionOutcome member with code replay-completed-no-op (:620-656) or code replay-conflict, never an extension-* code. The test plan asserts per case that the returned code is one of the two replay codes and no extension-* code, and adds the malformed-replay case that does return extension-slice-unknown. B-07 pins the completion-time revalidation to the plain locked view so the two call sites cannot be confused. The alternative ordering was considered and the rejection recorded in B-03."
+    },
+    {
+      "findingId": "F-02",
+      "position": "CONDITION_MET",
+      "evidence": "B-01 now declares the digits-only rule to be the whole accepted selector language and states that it already covers both selector kinds the PRD names: a canonical slice number with zero padding preserved, and a bare GitHub-issue id, because issues.md parsing stores Slice.ghIssue with the '#' already stripped (cells[1].trim().replace(\"#\", \"\"), src/issues-parser.ts:80). It records the mechanical decision that '#278' and every other non-digit spelling is refused by that same message rather than normalized, so one selector string has one meaning and the resolver never sees two spellings of one identity (the ADR 0065 reason B-02 cites). B-02's extension-identity-conflict code now says both spellings are bare numerics, which is what makes the number-vs-issue-id collision reachable. The test plan adds the newly accepted case -- --extend-scope 03,278 returning both parts as typed -- alongside the rejected --extend-scope 12,x and the new --extend-scope 12,#278 part."
+    },
+    {
+      "findingId": "F-03",
+      "position": "CONDITION_MET",
+      "evidence": "There is no seam inside the transaction body to name, so B-08 is restated as the evidence its observation actually produces: the completion path performs exactly one run-state write -- one transactRunState call returning changed: true once, with no second transactRunState, no saveRunState and no other scope writer on the path -- and the single document it publishes carries both halves; 'no document carries only one side' is proven structurally rather than by observing an intermediate document. The beforeLockAcquired interleave is relabelled as the adjacent fact it can witness (a change landing before the lock publishes neither half) in both B-08 and the test plan, and a new test-plan line declares the writer count as its own observation. The matching definition-of-done line now reads 'a test proves the completion path makes exactly one changed: true run-state write and that the one document it publishes holds both halves'."
+    },
+    {
+      "findingId": "F-04",
+      "position": "CONDITION_MET",
+      "evidence": "Both halves of the clear condition are taken. Every behavior row in acceptance-manifest.json now declares gateIds [\"typecheck\", \"tests\", \"acceptance:behaviors\"], so the behavior-scoped gate from the catalog is bound on all fifteen behaviors alongside typecheck and the tests gate the rows already carried. The definition of done's last line is rewritten to name the same three gate ids as this slice's evidence, and attributes who runs which: the slice agent runs typecheck plus the test files in this slice's file scope, while the tests gate is the pipeline's own evaluator-qa and pre-ship run rather than a third full-suite run inside the slice (CLAUDE.md 'Test loop discipline'). The gate ids the manifest declares and the bar the definition of done sets are now the same list."
+    }
+  ]
+}

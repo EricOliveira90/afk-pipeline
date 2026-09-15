@@ -7,8 +7,9 @@
   `parsePipelineRuntimeOptions`)
 - B-02: `src/preserve-work-recovery.ts:resolveScopeExtensions` (with
   `ResolveScopeExtensionsArgs`, `ResolveScopeExtensionsResult`,
-  `ScopeExtensionRefusalCode` and the six `extension-*` members of
-  `RecoveryRefusalCode`)
+  `ScopeExtensionMember`, `matchScopeExtensionMember`,
+  `describeScopeExtensionMember`, `ScopeExtensionRefusalCode` and the six
+  `extension-*` members of `RecoveryRefusalCode`)
 - B-03: `src/preserve-work-recovery.ts:admitStaleRenegotiation` (the resolver
   call after replay detection and before the snapshot) and
   `src/preserve-work-recovery.ts:extensionScopeView`
@@ -51,6 +52,26 @@
   `extension-already-in-scope` and never reach the replay comparison at all.
   The subtraction is reconstructed from the lineage, not from a second stored
   copy, for the same reason B-10 is a derivation.
+- The resolver's member type is `ScopeExtensionMember = string |
+  PersistedScopeSlice`, so one resolver serves both moments without one of them
+  translating into the other's vocabulary. A selector is matched on *either*
+  half, because bare digits are the whole of B-01's language and the operator
+  cannot say which half they meant; a stored identity is matched on *both*
+  halves, because it was resolved from a slice that declared both. The
+  alternative — respelling a stored pair as one of its halves and re-resolving
+  that — is what made a completion refuse
+  `extension-identity-conflict` with nothing in the world changed, because an
+  addition's issue id is itself a legal spelling of another slice's number. A
+  second resolver for identities was rejected: B-07 asks for revalidation
+  through B-02's resolver, and two resolvers is exactly the disagreement
+  `matchesSliceSelector` is not reused to avoid.
+- The completion's revalidation refusal distinguishes its three causes in the
+  *message*, not the code: B-07 fixes the code as `facts-changed-before-lock`
+  for all of them, so an unresolvable member, a resolved-but-different set and
+  an absent `state.scope` each name themselves in prose while sharing the one
+  code the contract allows. The absent-scope disjunct was kept rather than
+  deleted as unreachable, because the failure it prevents is a `COMPLETED`
+  event whose additions silently reached no scope at all.
 - The completion reads the addition set from the trailing `PENDING` event
   (`const additions = current.extensions;`) and takes no set from the caller.
   The caller supplies only the facts the set is revalidated *against*
@@ -107,7 +128,30 @@
   and a second by its issue id (`"9"` matching slice 09 and issue #9). That
   names no single slice, so it is `extension-identity-conflict` rather than an
   ambiguity resolved by precedence — worth knowing before adding a precedence
-  rule that looks like a simplification.
+  rule that looks like a simplification. The corollary bit once: *never* turn a
+  stored `{number, ghIssue}` back into a selector. A pair is unambiguous and one
+  of its halves is not, so the round trip loses information the storage existed
+  to keep.
+- `EXTENSION_SLICES` in `src/preserve-work-recovery.test.ts` has every issue id
+  (`277`-`284`) above every slice number (`07`-`14`), which is the one
+  arrangement in which an addition's issue id *cannot* collide with another
+  slice's number. `COLLIDING_SLICES` adds slice `15`/`#9` beside slice `09` to
+  reach it. Any new case about identity spelling belongs on that list, not the
+  other one — a real PRD's issue ids are offset from its slice numbers by a
+  constant, so the colliding arrangement is the ordinary case and the fixture's
+  is the lucky one.
+- A completion can only meet `additions.length > 0 && locked.scope ===
+  undefined` on a run-state file edited from outside the module: eligibility
+  refuses `scope-absent` before any attempt exists, and a scope that
+  disappeared after admission trips the earlier fingerprint recheck instead. The
+  test plants it by deleting `scope` and setting the `PENDING` event's
+  `scopeFingerprint` to `RECOVERY_FINGERPRINT_ABSENT`, which is the only way to
+  get past that recheck.
+- These test files are written with LF endings and `core.autocrlf` rewrites them
+  on checkout, so an editor that appends without a trailing newline leaves
+  `\ No newline at end of file` in the diff. Check
+  `[System.IO.File]::ReadAllBytes(path)[-1] -eq 10` before handing off; every
+  other file in `src/` ends with a newline.
 - `matchesSliceSelector` is deliberately not reused, for the same reason
   `canonicalizeRecoveryRequest` does not reuse it: a second differently-shaped
   normalization of one identity is how two callers come to disagree about

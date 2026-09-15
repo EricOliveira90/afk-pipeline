@@ -304,9 +304,31 @@ export type ResolveScopeExtensionsResult =
     }
   | { ok: false; code: ScopeExtensionRefusalCode; message: string };
 
+/**
+ * What one member of an extension set can be named by.
+ *
+ * A `string` is a `--extend-scope` selector as an operator typed it. B-01 makes
+ * bare digits the whole accepted language, so a selector names a slice by *either*
+ * its canonical number or its issue id and cannot say which it meant — that
+ * ambiguity is the reason `extension-identity-conflict` exists.
+ *
+ * A pair is an identity this module already resolved and persisted. It names both
+ * halves at once, so it matches only the slice that still declares both, and a
+ * stored identity therefore never has to be spelled back into the ambiguous
+ * language to be checked again. Re-deriving a selector from one half of a stored
+ * identity would re-open the ambiguity the storage closed: that half is a legal
+ * spelling of *another* slice's number, so an unchanged world could answer
+ * `extension-identity-conflict` for a set nothing had touched.
+ */
+export type ScopeExtensionMember = string | PersistedScopeSlice;
+
 export interface ResolveScopeExtensionsArgs {
-  /** `--extend-scope` selectors as typed, in the order typed (#278 B-01). */
-  selectors: readonly string[];
+  /**
+   * The set's members in request order: `--extend-scope` selectors as typed at
+   * admission (#278 B-01), or the identities the `PENDING` event stored when the
+   * same set is revalidated under the completion lock (#278 B-07).
+   */
+  selectors: readonly ScopeExtensionMember[];
   /**
    * The scope identities "absent from scope" and "blocker already scoped" are
    * judged against. Which view a call site supplies is B-03's decision, not this
@@ -331,12 +353,14 @@ export interface ResolveScopeExtensionsArgs {
  * answers for those three moments and no way to say which was authoritative.
  *
  * Identity comes from `issues.md` and is corroborated the way ADR 0065 requires:
- * a selector resolves only when it matches exactly one declared slice, and the
+ * a member resolves only when it matches exactly one declared slice, and the
  * identity stored is that slice's own `{canonicalSliceNumber(number), ghIssue}`
  * rather than anything the operator typed. `matchesSliceSelector` is not reused,
  * for the reason {@link canonicalizeRecoveryRequest} does not reuse it: a second
  * differently-shaped normalization of one identity is how two callers come to
- * disagree about which slice was named.
+ * disagree about which slice was named. A member may itself already *be* one of
+ * those identities — see {@link ScopeExtensionMember} for why a revalidation hands
+ * the pair back rather than a selector re-derived from half of it.
  *
  * Every refusal is one stable code per distinguishable cause, per the
  * code-not-prose rule above. The order they are checked in is per-member and
@@ -350,32 +374,29 @@ export function resolveScopeExtensions(
   if (args.selectors.length === 0) return { ok: true, extensions: [] };
 
   const scoped = new Set(args.view.map((entry) => entry.ghIssue));
-  const candidates: { selector: string; slice: Slice }[] = [];
+  const candidates: { named: string; slice: Slice }[] = [];
   const claimed = new Map<string, string>();
-  for (const selector of args.selectors) {
-    const wanted = canonicalSliceNumber(selector);
-    const matches = args.slices.filter(
-      (slice) =>
-        canonicalSliceNumber(slice.number) === wanted ||
-        slice.ghIssue === selector,
-    );
+  for (const member of args.selectors) {
+    const named = describeScopeExtensionMember(member);
+    const matches = matchScopeExtensionMember(member, args.slices);
     if (matches.length === 0) {
       return {
         ok: false,
         code: "extension-slice-unknown",
-        message: `--extend-scope names ${selector}, which matches no slice declared in the current issues.md; nothing was admitted`,
+        message: `--extend-scope names ${named}, which matches no slice declared in the current issues.md; nothing was admitted`,
       };
     }
     // One bare-numeric selector can match one slice by its number and a second by
     // its issue id. That names no single slice, so it is a conflict rather than an
-    // ambiguity to resolve by precedence.
+    // ambiguity to resolve by precedence. A stored identity cannot land here: it
+    // agrees with a slice on both halves or on neither.
     const distinct = new Set(matches.map((slice) => slice.ghIssue));
     if (distinct.size > 1) {
       return {
         ok: false,
         code: "extension-identity-conflict",
         message:
-          `--extend-scope names ${selector}, which matches slice ` +
+          `--extend-scope names ${named}, which matches slice ` +
           `${matches.map((slice) => `${slice.number} (#${slice.ghIssue})`).join(" and ")}; ` +
           `one selector naming two slices names neither`,
       };
@@ -395,10 +416,10 @@ export function resolveScopeExtensions(
         code: "extension-identity-conflict",
         message:
           `--extend-scope names slice ${slice.number} (#${slice.ghIssue}) twice, as ` +
-          `${previous} and as ${selector}; each addition is named exactly once`,
+          `${previous} and as ${named}; each addition is named exactly once`,
       };
     }
-    claimed.set(slice.ghIssue, selector);
+    claimed.set(slice.ghIssue, named);
     if (scoped.has(slice.ghIssue)) {
       return {
         ok: false,
@@ -406,7 +427,7 @@ export function resolveScopeExtensions(
         message: `--extend-scope names slice ${slice.number} (#${slice.ghIssue}), which is already in this run's scope of record; there is nothing to add`,
       };
     }
-    candidates.push({ selector, slice });
+    candidates.push({ named, slice });
   }
 
   // The one fail-closed manifest comparison every scope funnel makes, reused
@@ -462,6 +483,41 @@ export function resolveScopeExtensions(
       }))
       .sort(compareScopeExtension),
   };
+}
+
+/** How one extension member reads in a refusal message. */
+function describeScopeExtensionMember(member: ScopeExtensionMember): string {
+  return typeof member === "string"
+    ? member
+    : `slice ${member.number} (#${member.ghIssue})`;
+}
+
+/**
+ * The declared slices one extension member names, ambiguity and all.
+ *
+ * A selector is matched on either half, because that is the whole of the language
+ * B-01 accepts and the operator cannot say which half they meant. An identity is
+ * matched on both halves at once, because it was resolved from a slice that
+ * declared both — so it corroborates itself the way ADR 0065 asks, and a world
+ * that has not changed returns exactly the slice the identity came from.
+ */
+function matchScopeExtensionMember(
+  member: ScopeExtensionMember,
+  slices: readonly Slice[],
+): Slice[] {
+  if (typeof member !== "string") {
+    const wanted = canonicalSliceNumber(member.number);
+    return slices.filter(
+      (slice) =>
+        canonicalSliceNumber(slice.number) === wanted &&
+        slice.ghIssue === member.ghIssue,
+    );
+  }
+  const wanted = canonicalSliceNumber(member);
+  return slices.filter(
+    (slice) =>
+      canonicalSliceNumber(slice.number) === wanted || slice.ghIssue === member,
+  );
 }
 
 /**
@@ -2376,28 +2432,50 @@ export function completeRecoveryAttempt(
       // against `state.scope.slices` as loaded *under this lock* — the plain view,
       // not the admission's replay view — because that is the scope the append is
       // about to change.
+      //
+      // The stored identities are handed back as identities, never respelled as
+      // selectors: `--extend-scope`'s language is bare digits, so an addition's own
+      // issue id is also a legal spelling of some *other* slice's number, and
+      // re-deriving a selector from half of a stored pair would answer
+      // `extension-identity-conflict` for a set nothing in the world had touched
+      // (see {@link ScopeExtensionMember}).
       const additions = current.extensions;
       const revalidated = resolveScopeExtensions({
-        selectors: additions.map((entry) => entry.ghIssue),
+        selectors: additions,
         view: locked.scope?.slices ?? [],
         slices: args.slices ?? [],
         manifest: args.afkManifest ?? null,
       });
-      if (
-        !revalidated.ok ||
-        !sameScopeExtensions(revalidated.extensions, additions) ||
-        (additions.length > 0 && locked.scope === undefined)
-      ) {
+      // Three distinguishable causes, each said as itself rather than folded into
+      // one wording (the code-not-prose rule above). B-07 fixes the refusal *code*
+      // for all three as `facts-changed-before-lock`, so the message is the only
+      // place they can be told apart — and the absent-scope one is not identity
+      // drift at all: there is no scope of record for the append to widen. It is
+      // unreachable through this module's own admission, which refuses `scope-absent`
+      // before any attempt exists, and kept fail-closed because the alternative is
+      // publishing a `COMPLETED` event whose additions silently reached no scope.
+      const identityDrift = (cause: string): string =>
+        "additions that no longer resolve to the same identities under the " +
+        `run-state lock (${cause})`;
+      const drift =
+        additions.length === 0
+          ? undefined
+          : locked.scope === undefined
+            ? "no persisted slice scope for the additions to widen"
+            : !revalidated.ok
+              ? identityDrift(revalidated.code)
+              : !sameScopeExtensions(revalidated.extensions, additions)
+                ? identityDrift("a different identity set")
+                : undefined;
+      if (drift !== undefined) {
         return {
           changed: false,
           result: {
             appended: false,
             casLost: true,
             message:
-              `The scope additions recovery attempt ${attemptId} was admitted with no longer ` +
-              `resolve to the same identities under the run-state lock ` +
-              `(${revalidated.ok ? "a different identity set" : revalidated.code}); no COMPLETED ` +
-              `event was appended and the run's persisted scope was not widened`,
+              `The completion of recovery attempt ${attemptId} found ${drift}; no ` +
+              `COMPLETED event was appended and the run's persisted scope was not widened`,
           },
         };
       }

@@ -4127,6 +4127,22 @@ const EXTENSION_SLICES: readonly Slice[] = [
   declaredSlice("14", "284"),
 ];
 
+/**
+ * `issues.md` in the arrangement that makes a stored identity's *issue id* a legal
+ * spelling of a different slice's *number*: slice `15` is issue `#9`, and slice
+ * `09`'s canonical number is `9`. Offsetting issue ids from slice numbers by a
+ * constant is the ordinary shape of a freshly filed PRD, so this is the common case
+ * rather than a contrived one — {@link EXTENSION_SLICES} alone cannot reach it,
+ * because every issue id there (`277`-`284`) is larger than every slice number.
+ */
+const COLLIDING_SLICES: readonly Slice[] = [
+  ...EXTENSION_SLICES,
+  declaredSlice("15", "9"),
+];
+
+/** Slice 15, whose issue id collides with slice `09`'s canonical number. */
+const ADDITION_COLLIDING: PersistedScopeSlice = { number: "15", ghIssue: "9" };
+
 /** The identities the additions resolve to: `{canonicalSliceNumber, ghIssue}`. */
 const ADDITION_A: PersistedScopeSlice = { number: "9", ghIssue: "279" };
 const ADDITION_B: PersistedScopeSlice = { number: "10", ghIssue: "280" };
@@ -4285,6 +4301,45 @@ describe("resolving one set of scope additions", () => {
       { number: "2", ghIssue: "302" },
       { number: "3", ghIssue: "303" },
     ]);
+  });
+
+  it("[behavior:#278:B-02] matches a stored identity on both halves, where its issue id alone would collide", () => {
+    // The selector language is bare digits and therefore ambiguous by design: `"9"`
+    // is slice 09's number and slice 15's issue id at once, so it names neither.
+    const spelled = resolveScopeExtensions({
+      selectors: ["9"],
+      view: [],
+      slices: COLLIDING_SLICES,
+      manifest: null,
+    });
+    expect(spelled.ok === false ? spelled.code : "").toBe(
+      "extension-identity-conflict",
+    );
+
+    // An identity is not a spelling: it carries both halves, so it resolves to the
+    // one slice that still declares both and cannot inherit that ambiguity. This is
+    // what lets the completion revalidate what the admission stored (B-07) instead
+    // of re-deriving a selector from half of it.
+    const stored = resolveScopeExtensions({
+      selectors: [ADDITION_COLLIDING],
+      view: [],
+      slices: COLLIDING_SLICES,
+      manifest: null,
+    });
+    expect(stored.ok === true ? stored.extensions : []).toEqual([
+      ADDITION_COLLIDING,
+    ]);
+    // And an identity whose halves disagree with every declared slice is unknown,
+    // not a conflict: half a match is no match.
+    const halved = resolveScopeExtensions({
+      selectors: [{ number: "15", ghIssue: "279" }],
+      view: [],
+      slices: COLLIDING_SLICES,
+      manifest: null,
+    });
+    expect(halved.ok === false ? halved.code : "").toBe(
+      "extension-slice-unknown",
+    );
   });
 
   it("[behavior:#278:B-02] resolves a member whose only blocker is another member of the set", () => {
@@ -4611,6 +4666,118 @@ describe("revalidating the additions under the completion lock", () => {
     30_000,
   );
 
+  it("[behavior:#278:B-08] completes an addition whose issue id is another slice's number", () => {
+    // The arrangement QA-01 named: nothing about the world changes between the
+    // admission and the completion, and the addition's issue id (`9`) is also slice
+    // `09`'s canonical number. A revalidation that respelled the stored identity as
+    // a selector would answer `extension-identity-conflict` here and roll the
+    // attempt back, which would make `--extend-scope` unable to complete at all in
+    // any repository whose issue ids are offset from its slice numbers.
+    expect(
+      admitWithExtensions(fixture, ["15"], {
+        attemptId: "attempt-colliding",
+        slices: COLLIDING_SLICES,
+      }).admitted,
+    ).toBe(true);
+    expect(trailingEvent(fixture).extensions).toEqual([ADDITION_COLLIDING]);
+    writeAcceptedPair(fixture.sliceDir, REPLACEMENT_CONTRACT);
+
+    const result = complete(fixture, { slices: COLLIDING_SLICES });
+
+    expect(result).toMatchObject({
+      completed: true,
+      attemptId: "attempt-colliding",
+    });
+    expect(eventsOf(fixture).map((event) => event.state)).toEqual([
+      "PENDING",
+      "COMPLETED",
+    ]);
+    expect(stateDocument(fixture).scope).toEqual(
+      widenedScope(ADDITION_COLLIDING),
+    );
+  }, 30_000);
+
+  it("[behavior:#278:B-07] still refuses that same addition once issues.md drops it", () => {
+    // The other half of the same arrangement: the revalidation is not weaker for
+    // taking identities, it is only unambiguous. A member the world really lost is
+    // still `extension-slice-unknown`, and the attempt still ends through #333's
+    // writer with persisted scope untouched.
+    expect(
+      admitWithExtensions(fixture, ["15"], {
+        attemptId: "attempt-colliding-lost",
+        slices: COLLIDING_SLICES,
+      }).admitted,
+    ).toBe(true);
+    writeAcceptedPair(fixture.sliceDir, REPLACEMENT_CONTRACT);
+
+    const result = complete(fixture, {
+      slices: COLLIDING_SLICES.filter((slice) => slice.ghIssue !== "9"),
+    });
+
+    expect(result).toMatchObject({
+      completed: false,
+      code: "facts-changed-before-lock",
+      attemptId: "attempt-colliding-lost",
+    });
+    expect(
+      result.completed === false ? result.failure?.trigger : undefined,
+    ).toBe("completion-cas-lost");
+    expect(result.completed === false ? result.message : "").toContain(
+      "extension-slice-unknown",
+    );
+    expect(eventsOf(fixture).map((event) => event.state)).toEqual([
+      "PENDING",
+      "ROLLED_BACK",
+    ]);
+    expect(stateDocument(fixture).scope).toEqual(SCOPE);
+  }, 30_000);
+
+  it("[behavior:#278:B-07] names the absent scope, not identity drift, when there is none to widen", () => {
+    expect(
+      admitWithExtensions(fixture, ["279"], {
+        attemptId: "attempt-scopeless",
+      }).admitted,
+    ).toBe(true);
+    writeAcceptedPair(fixture.sliceDir, REPLACEMENT_CONTRACT);
+    // Planted, because this module's own admission cannot produce it: eligibility
+    // refuses `scope-absent` before any attempt exists, so the only way a PENDING
+    // attempt can meet an absent scope under the lock is a run-state file edited
+    // from outside. The guard is kept anyway — dropping it would publish a
+    // `COMPLETED` event whose additions silently reached no scope at all.
+    const document = stateDocument(fixture);
+    delete document.scope;
+    const lineage = document.recoveryLineage as Record<
+      string,
+      PersistedRecoveryLineageEvent[]
+    >;
+    lineage[GH_ISSUE] = lineage[GH_ISSUE]!.map((event) => ({
+      ...event,
+      scopeFingerprint: RECOVERY_FINGERPRINT_ABSENT,
+    }));
+    writeFileSync(fixture.statePath, `${JSON.stringify(document, null, 2)}\n`);
+
+    const result = complete(fixture, { slices: EXTENSION_SLICES });
+
+    expect(result).toMatchObject({
+      completed: false,
+      code: "facts-changed-before-lock",
+      attemptId: "attempt-scopeless",
+    });
+    expect(
+      result.completed === false ? result.failure?.trigger : undefined,
+    ).toBe("completion-cas-lost");
+    // The cause it observed, said as itself: the earlier fingerprint recheck passed,
+    // so no identity drifted — there is simply no scope of record to append to.
+    const message = result.completed === false ? result.message : "";
+    expect(message).toContain("no persisted slice scope for the additions to widen");
+    expect(message).not.toContain("a different identity set");
+    expect(eventsOf(fixture).map((event) => event.state)).toEqual([
+      "PENDING",
+      "ROLLED_BACK",
+    ]);
+    expect(stateDocument(fixture).scope).toBeUndefined();
+  }, 30_000);
+
   it("[behavior:#278:B-07] reads the set from the trailing event, never from a caller argument", () => {
     const body = declarationBody("export function completeRecoveryAttempt(");
 
@@ -4619,6 +4786,9 @@ describe("revalidating the additions under the completion lock", () => {
     // declared slices and the manifest — and never the set itself.
     expect(body).not.toContain("args.extendScope");
     expect(occurrences(body, "resolveScopeExtensions({")).toBe(1);
+    // And the stored identities go in whole, not respelled: a selector derived from
+    // one half of a pair re-opens the ambiguity storing the pair closed.
+    expect(body).toContain("selectors: additions,");
   });
 });
 
