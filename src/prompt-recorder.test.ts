@@ -170,6 +170,31 @@ describe("withPromptRecording", () => {
     expect(await wrappedSilent.invoke(invokeOptions("no stream"))).toBe(RESULT);
   });
 
+  it("B-04 forwards every member the inner owns, so a new AgentProvider member cannot be dropped (#286)", async () => {
+    // The wrapper hand-enumerated `AgentProvider`'s three members until #286,
+    // which made it a second place the interface had to be edited: a fourth
+    // member would have been dropped in silence. Own enumerable keys are the
+    // observable — with `parseStreamLine` and without, since the optional
+    // member is the one an enumeration is most likely to mishandle.
+    for (const inner of [makeInner(), makeInner({ parses: true })]) {
+      const wrapped = withPromptRecording(inner);
+      expect(Object.keys(wrapped).sort()).toEqual(Object.keys(inner).sort());
+    }
+
+    // A member no version of this wrapper has heard of — the stand-in for a
+    // future `AgentProvider` addition — arrives on the wrapper unchanged, and
+    // recording still happens over it.
+    const inner = makeInner({ parses: true });
+    const future = { ...inner, cancel: () => "cancelled" };
+    const wrapped = withPromptRecording(future) as typeof future;
+
+    expect(Object.keys(wrapped).sort()).toEqual(Object.keys(future).sort());
+    expect(wrapped.cancel()).toBe("cancelled");
+    expect(wrapped.parseStreamLine?.("hi")).toEqual([{ type: "text", text: "hi" }]);
+    expect(await wrapped.invoke(invokeOptions("forwarded"))).toBe(RESULT);
+    expect(inner.calls).toHaveLength(1);
+  });
+
   it("B-05 writes nothing for an invocation with no log stream", async () => {
     const dir = makeTempDir();
     const inner = makeInner();

@@ -79,25 +79,36 @@ function recordPrompt(options: InvokeOptions): void {
 }
 
 /**
- * Wrap a provider so every invocation records its prompt. Transparent
- * otherwise: `name` is the inner's (it drives branch and run-slug
- * namespacing — ADR 0002), `parseStreamLine` is forwarded when the inner
- * defines one and absent when it does not (ADR 0004: stream parsing is
- * provider-optional), and `invoke` resolves to the inner provider's result
- * unchanged.
+ * Wrap a provider so every invocation records its prompt. `invoke` resolves
+ * to the inner provider's result unchanged; every other member is the
+ * inner's own.
+ *
+ * Spread rather than a member-by-member copy (#286). Hand-enumerating
+ * `AgentProvider` made this decorator a second place the interface had to be
+ * edited: a fourth member added to `src/agent-provider.ts` would have been
+ * dropped here in silence, and nothing would have failed. Spreading forwards
+ * whatever the inner carries, so a new member passes through by
+ * construction. Two properties it preserves rather than changes:
+ *
+ * - `name` is the inner's, because it drives branch and run-slug namespacing
+ *   (ADR 0002).
+ * - `parseStreamLine` stays *absent* — not undefined-valued — when the inner
+ *   omits it, because a spread copies no key that is not there, and stream
+ *   parsing is provider-optional (ADR 0004): a present member would claim a
+ *   parser that isn't there.
+ *
+ * Safe because a provider is an object literal (`claudeProvider`,
+ * `codexProvider`, `kiroProvider`), so there are no prototype members for a
+ * spread to miss.
  */
 export function withPromptRecording(inner: AgentProvider): AgentProvider {
-  const wrapped: AgentProvider = {
-    name: inner.name,
+  return {
+    ...inner,
     invoke: (options) => {
       recordPrompt(options);
       return inner.invoke(options);
     },
   };
-  if (inner.parseStreamLine) {
-    wrapped.parseStreamLine = (line) => inner.parseStreamLine!(line);
-  }
-  return wrapped;
 }
 
 /**
