@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "verdict": "PASS",
+  "failureClass": "NONE",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-01",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-05", "B-07"],
+      "summary": "samePath folds backslashes but not a leading \"./\", so a decisions entry or a baseline survivor spelled \"./src/cart.ts\" silently fails to match the bare spelling; still open, and the divergence is still unrecorded at samePath.",
+      "evidence": "Re-probed on this candidate tree (src/qa-probe.test.ts, added and removed in this disposable worktree; `pnpm vitest run src/qa-probe.test.ts`).\n\nDecisions side — one survivor id \"1\" file \"src/cart.ts\", one ACCEPT entry with the same id and the file spelled four ways:\n  \"src/cart.ts\"     -> accepted\n  \"./src/cart.ts\"   -> unattributed\n  \"  src/cart.ts  \" -> accepted\n  \"src\\\\cart.ts\"     -> accepted\n\nBaseline side — same defect through the other key: a parsed baseline holding the same location under file \"./src/cart.ts\":\n  baseline \"./src/cart.ts\" vs survivor \"src/cart.ts\" -> new-in-this-run (expected pre-existing)\n\nRoot cause is one function, shared by both keys: src/mutation-report.ts:445-447 `samePath` is `file.replace(/\\\\/g, \"/\")` — the backslash half of the already-exported `normalizeWaiverPath` (src/afk-manifest.ts:146-148, `value.trim().replace(/\\\\/g, \"/\").replace(/^(?:\\.\\/)+/, \"\")`), with the `./` strip dropped. `baselineKey` (:465) and `decisionKey` (:490) both call it. The whitespace half of round 1's clear condition is now met, but by the decisions parser rather than by `samePath`: `parseMutationDecisions` trims every string field (src/mutation-report.ts:374), which is why \"  src/cart.ts  \" resolves. The `./` half is unmet on both keys.\n\nNeither alternative in the clear condition holds on this tree: `git log -p` since 2a7c983 shows no change to `samePath` since round 1, its doc comment (\"One spelling for a path, so a baseline and a report compare the same bytes\") records no deliberate divergence, and no test asserts the `./` spelling — `grep -n '\\./' src/mutation-report.test.ts` returns only import specifiers.",
+      "expected": "The contract fixes the two match keys (B-05 location-and-mutator, B-07 id-corroborated-by-file) and mandates no path normalization, so partial tolerance is inside the contract. But `samePath` exists precisely to fold one path-spelling difference, which sets the expectation that path shape is tolerated — and `afk.json`'s own baselinePath and decisionsPath do go through `normalizeWaiverPath`, so the manifest tolerates `./` where the artifacts' own file members do not.",
+      "observed": "A `./`-prefixed `file` resolves nothing on either key: the ACCEPT entry keeps its survivor at the baseline label, or a genuinely pre-existing survivor is reported new-in-this-run, and no note is produced, so the operator gets no signal that their spelling matched nothing. Harm stays bounded exactly as B-07 and B-12 describe and as the ship-gate test at src/ship-gate.test.ts:2577 proves: one report bullet, read by no gate, verdict or PR-open condition, with the survivor still in the list at full detail.",
+      "clearCondition": "A decisions entry or baseline survivor whose `file` differs from the survivor's only by a leading `./` resolves to the same identity as the bare spelling, with a test asserting the resulting label for that spelling — or the divergence is recorded at `samePath` as a deliberate choice.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    }
+  ]
+}
