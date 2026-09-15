@@ -65,6 +65,7 @@ import {
   RECOVERY_SNAPSHOT_DIRNAME,
   admitStaleRenegotiation,
   canonicalizeRecoveryRequest,
+  describeRecoveryReconciliation,
   encodeRunScopeFingerprintPayload,
   evaluateRecoveryEligibility,
   executeRecoveryAttempt,
@@ -74,6 +75,7 @@ import {
   listPublishedPairSnapshots,
   publishAcceptedPairSnapshot,
   readLockedAcceptedPair,
+  reconcileRecoveryLineage,
   recoveryDispatchRefusal,
   restoreAcceptedPairFromSnapshot,
   rollBackRecoveryAttempt,
@@ -2367,4 +2369,657 @@ describe("what the rollback outcomes must not disturb", () => {
       hasOpenRecoveryAttempt(loadRunState(fixture.repoRoot, PRD_SLUG), GH_ISSUE),
     ).toBe(true);
   }, 30_000);
+});
+
+/*
+ * ---------------------------------------------------------------------------
+ * Launch-time reconciliation of unresolved attempts (#334)
+ * ---------------------------------------------------------------------------
+ * Every claim below is about what `reconcileRecoveryLineage` reads off one
+ * run-state file and writes back, so it is asserted as a unit test on the
+ * fixture repository already built for this file. The one claim that cannot be
+ * made here — that the call happens *before* run-scope resolution, resume and
+ * dispatch — is about ordering at the orchestrator seam, which no written state
+ * can show, so it lives on a single `runPipeline` in
+ * `src/resume-integration.test.ts` (`AGENTS.md` assertion ladder, ADR 0063).
+ *
+ * Targets are planted with their own artifact directories rather than reusing
+ * the fixture's, because reconciliation's subject is a *set* of targets and the
+ * order it reports them in is part of the contract.
+ */
+
+/** The artifact directory a planted reconciliation target owns. */
+function targetSliceDir(f: Fixture, ghIssue: string): string {
+  return join(f.repoRoot, ".kiro", "specs", PRD_SLUG, "slices", `${ghIssue}-target`);
+}
+
+/** Overwrite an arbitrary directory's pair the way a reopened negotiation would. */
+function reopenPairAt(dir: string): void {
+  writeFileSync(join(dir, CONTRACT_FILENAME), REOPENED_CONTRACT);
+  writeFileSync(join(dir, ACCEPTANCE_MANIFEST_FILENAME), REOPENED_MANIFEST);
+}
+
+/** A complete lineage event, valid enough to survive a run-state round trip. */
+function plantedEvent(opts: {
+  ghIssue: string;
+  attemptId: string;
+  snapshotPath: string;
+  state: RecoveryLineageState;
+}): PersistedRecoveryLineageEvent {
+  return {
+    attemptId: opts.attemptId,
+    state: opts.state,
+    target: { number: CANONICAL_SLICE_NUMBER, ghIssue: opts.ghIssue },
+    reason: "the accepted pair went stale before the process died",
+    extensions: [],
+    provider: PROVIDER,
+    sliceBranch: SLICE_BRANCH,
+    sliceHead: "a".repeat(40),
+    featureHead: "b".repeat(40),
+    scopeFingerprint: "c".repeat(64),
+    snapshotPath: opts.snapshotPath,
+    contractFingerprint: sha256Of(LOCKED_CONTRACT),
+    manifestFingerprint: sha256Of(ACCEPTED_MANIFEST),
+    recordedAt: "2026-09-14T00:00:00.000Z",
+    // Required on `ROLLBACK_FAILED` and forbidden everywhere else, so they are
+    // added by state rather than always (`sanitizeRecoveryLineage`).
+    ...(opts.state === "ROLLBACK_FAILED"
+      ? {
+          rollbackError: "an earlier rollback could not read the snapshot",
+          observedContractFingerprint: sha256Of(REOPENED_CONTRACT),
+          observedManifestFingerprint: RECOVERY_FINGERPRINT_ABSENT,
+        }
+      : {}),
+  };
+}
+
+interface PlantedTarget {
+  ghIssue: string;
+  attemptId: string;
+  sliceDir: string;
+  snapshotDir: string;
+  events: PersistedRecoveryLineageEvent[];
+}
+
+/**
+ * One target with its own artifact directory, a real published snapshot and a
+ * lineage ending on `trailing`. `snapshotPath` overrides the recorded locator so
+ * a malformed one can be planted without publishing anything malformed.
+ */
+function plantTarget(
+  f: Fixture,
+  opts: {
+    ghIssue: string;
+    attemptId: string;
+    trailing?: RecoveryLineageState;
+    snapshotPath?: string;
+  },
+): PlantedTarget {
+  const sliceDir = targetSliceDir(f, opts.ghIssue);
+  rmSync(sliceDir, { recursive: true, force: true });
+  writeAcceptedPair(sliceDir);
+  const published = publishAcceptedPairSnapshot({
+    repoRoot: f.repoRoot,
+    sliceDir,
+    attemptId: opts.attemptId,
+  });
+  expect(published.ok).toBe(true);
+  const snapshotPath =
+    opts.snapshotPath ?? (published.ok ? published.snapshot.locator : "");
+  const events = [
+    plantedEvent({
+      ghIssue: opts.ghIssue,
+      attemptId: opts.attemptId,
+      snapshotPath,
+      state: "PENDING",
+    }),
+  ];
+  const trailing = opts.trailing ?? "PENDING";
+  if (trailing !== "PENDING") {
+    events.push(
+      plantedEvent({
+        ghIssue: opts.ghIssue,
+        attemptId: opts.attemptId,
+        snapshotPath,
+        state: trailing,
+      }),
+    );
+  }
+  return {
+    ghIssue: opts.ghIssue,
+    attemptId: opts.attemptId,
+    sliceDir,
+    snapshotDir: join(sliceDir, RECOVERY_SNAPSHOT_DIRNAME, opts.attemptId),
+    events,
+  };
+}
+
+/** Replace the run-state file's whole lineage map, in the given key order. */
+function writeLineage(f: Fixture, targets: PlantedTarget[]): void {
+  const document = stateDocument(f);
+  const lineage: Record<string, PersistedRecoveryLineageEvent[]> = {};
+  for (const target of targets) lineage[target.ghIssue] = target.events;
+  document.recoveryLineage = lineage;
+  writeFileSync(f.statePath, `${JSON.stringify(document, null, 2)}\n`);
+}
+
+function reconcile(f: Fixture) {
+  return reconcileRecoveryLineage({ repoRoot: f.repoRoot, prdSlug: PRD_SLUG });
+}
+
+function lineageOfTarget(
+  f: Fixture,
+  ghIssue: string,
+): readonly PersistedRecoveryLineageEvent[] {
+  return recoveryLineageFor(loadRunState(f.repoRoot, PRD_SLUG), ghIssue);
+}
+
+/** One target's lineage as it sits in the file, so a round trip can be measured. */
+function persistedLineageOf(f: Fixture, ghIssue: string): unknown {
+  return (
+    stateDocument(f).recoveryLineage as Record<string, unknown> | undefined
+  )?.[ghIssue];
+}
+
+describe("which targets a launch reconciles", () => {
+  it("[behavior:#334:B-01] reports only the unresolved targets, ordered by ghIssue", () => {
+    const pending = plantTarget(fixture, {
+      ghIssue: "9",
+      attemptId: "attempt-nine",
+    });
+    const held = plantTarget(fixture, {
+      ghIssue: "88",
+      attemptId: "attempt-eighty-eight",
+      trailing: "ROLLBACK_FAILED",
+    });
+    const terminal = plantTarget(fixture, {
+      ghIssue: "1001",
+      attemptId: "attempt-thousand",
+      trailing: "ROLLED_BACK",
+    });
+    // Written in reverse, though the keys are integer-like so the object
+    // enumerates them ascending regardless. That is exactly why the routine
+    // sorts explicitly: "1001" < "88" < "9" lexicographically, so a plain
+    // `.sort()` over the keys would invert the order the log lines promise.
+    writeLineage(fixture, [terminal, held, pending]);
+    expect(["1001", "88", "9"].sort()).toEqual(["1001", "88", "9"]);
+    for (const target of [pending, held, terminal]) reopenPairAt(target.sliceDir);
+    const terminalBefore = [...lineageOfTarget(fixture, "1001")];
+
+    const outcomes = reconcile(fixture);
+
+    expect(outcomes.map((o) => o.ghIssue)).toEqual(["9", "88"]);
+    expect(outcomes.map((o) => o.trailingState)).toEqual([
+      "PENDING",
+      "ROLLBACK_FAILED",
+    ]);
+    expect(outcomes[0]).toMatchObject({
+      ghIssue: "9",
+      attemptId: "attempt-nine",
+      appended: "ROLLED_BACK",
+      snapshotPath: pending.events[0]!.snapshotPath,
+      snapshotDir: pending.snapshotDir,
+      sliceDir: pending.sliceDir,
+      locatorRejected: false,
+      runStateFile: fixture.statePath,
+    });
+    expect(outcomes[1]).toMatchObject({
+      ghIssue: "88",
+      attemptId: "attempt-eighty-eight",
+      appended: "ROLLED_BACK",
+    });
+    // The terminal target was not touched at all: no event, and its reopened
+    // pair is still reopened because no restore ran for it.
+    expect(lineageOfTarget(fixture, "1001")).toEqual(terminalBefore);
+    expect(readFileSync(join(terminal.sliceDir, CONTRACT_FILENAME), "utf-8")).toBe(
+      REOPENED_CONTRACT,
+    );
+    // A trailing ROLLBACK_FAILED whose snapshot now verifies clears the hold.
+    expect(
+      recoveryDispatchRefusal(loadRunState(fixture.repoRoot, PRD_SLUG), "88"),
+    ).toBeUndefined();
+  }, 30_000);
+});
+
+describe("what a reconciled target appends", () => {
+  it("[behavior:#334:B-02] appends ROLLED_BACK on a verified restore and ROLLBACK_FAILED with both observations otherwise", () => {
+    const verified = plantTarget(fixture, {
+      ghIssue: "101",
+      attemptId: "attempt-verified",
+    });
+    const failing = plantTarget(fixture, {
+      ghIssue: "102",
+      attemptId: "attempt-failing",
+    });
+    const refailing = plantTarget(fixture, {
+      ghIssue: "103",
+      attemptId: "attempt-refailing",
+      trailing: "ROLLBACK_FAILED",
+    });
+    writeLineage(fixture, [verified, failing, refailing]);
+    const snapshot = {
+      contract: readFileSync(join(verified.snapshotDir, CONTRACT_FILENAME)),
+      manifest: readFileSync(
+        join(verified.snapshotDir, ACCEPTANCE_MANIFEST_FILENAME),
+      ),
+    };
+    for (const target of [verified, failing, refailing]) {
+      reopenPairAt(target.sliceDir);
+    }
+    // Two obstacles for #102: an unreadable snapshot half and an absent
+    // destination half, which is what the explicit absent marker is for.
+    rmSync(join(failing.snapshotDir, CONTRACT_FILENAME));
+    rmSync(join(failing.sliceDir, ACCEPTANCE_MANIFEST_FILENAME));
+    rmSync(join(refailing.snapshotDir, CONTRACT_FILENAME));
+    // The direct restore first: it writes nothing when the snapshot cannot be
+    // read, so reconciliation below meets the identical bytes on disk.
+    const direct = restoreAcceptedPairFromSnapshot({
+      repoRoot: fixture.repoRoot,
+      sliceDir: failing.sliceDir,
+      attempt: failing.events[0]!,
+    });
+    expect(direct.ok).toBe(false);
+
+    const outcomes = reconcile(fixture);
+
+    expect(outcomes.map((o) => o.appended)).toEqual([
+      "ROLLED_BACK",
+      "ROLLBACK_FAILED",
+      "none",
+    ]);
+
+    // #101 — one ROLLED_BACK for the same attempt, pair byte-restored.
+    const restored = lineageOfTarget(fixture, "101");
+    expect(restored.map((e) => e.state)).toEqual(["PENDING", "ROLLED_BACK"]);
+    expect(restored[1]!.attemptId).toBe("attempt-verified");
+    expect(restored[0]).toEqual(verified.events[0]);
+    expect(restored[1]!.rollbackError).toBeUndefined();
+    expect(
+      readFileSync(join(verified.sliceDir, CONTRACT_FILENAME)).equals(
+        snapshot.contract,
+      ),
+    ).toBe(true);
+    expect(
+      readFileSync(join(verified.sliceDir, ACCEPTANCE_MANIFEST_FILENAME)).equals(
+        snapshot.manifest,
+      ),
+    ).toBe(true);
+    expect(persistedLineageOf(fixture, "101")).toEqual([...restored]);
+
+    // #102 — exactly one ROLLBACK_FAILED carrying the failure and both
+    // observations, the absent half as the marker rather than as a blank.
+    const failed = lineageOfTarget(fixture, "102");
+    expect(failed.map((e) => e.state)).toEqual(["PENDING", "ROLLBACK_FAILED"]);
+    expect(failed[1]!.attemptId).toBe("attempt-failing");
+    expect(failed[1]!.rollbackError).toBe(direct.ok === false ? direct.message : "");
+    expect(failed[1]!.observedContractFingerprint).toBe(
+      sha256Of(REOPENED_CONTRACT),
+    );
+    expect(failed[1]!.observedManifestFingerprint).toBe(
+      RECOVERY_FINGERPRINT_ABSENT,
+    );
+    expect(outcomes[1]!.message).toBe(failed[1]!.rollbackError);
+    // The destination pair is left as it was: the reopened contract survived and
+    // the absent manifest was not invented.
+    expect(readFileSync(join(failing.sliceDir, CONTRACT_FILENAME), "utf-8")).toBe(
+      REOPENED_CONTRACT,
+    );
+    expect(
+      existsSync(join(failing.sliceDir, ACCEPTANCE_MANIFEST_FILENAME)),
+    ).toBe(false);
+    expect(persistedLineageOf(fixture, "102")).toEqual([...failed]);
+
+    // #103 — a retry that failed again appends nothing at all.
+    expect(lineageOfTarget(fixture, "103")).toEqual(refailing.events);
+    expect(outcomes[2]!.message).toContain("not a legal recovery transition");
+  }, 30_000);
+
+  it("[behavior:#334:B-02] reuses #333's restore and append rather than adding a second of either", () => {
+    // Behavioural evidence that one sequence runs is #333 B-09's; this is the
+    // structural half: the module still holds exactly one restore call site
+    // inside one rollback writer, and reconciliation calls that writer.
+    expect(occurrences(MODULE_CODE, "restoreAcceptedPairFromSnapshot(")).toBe(2);
+    expect(occurrences(MODULE_CODE, "appendRecoveryLineageEvent(")).toBe(2);
+    expect(occurrences(MODULE_CODE, "transactRunState<")).toBe(2);
+    expect(occurrences(MODULE_CODE, "isLegalRecoveryTransition(")).toBe(2);
+    // One rollback writer, called from exactly one place in this module — the
+    // reconciliation added the call, not a second writer.
+    expect(MODULE_CODE).toContain(
+      "export function rollBackRecoveryAttempt<F extends RecoveryFailure>(",
+    );
+    expect(occurrences(MODULE_CODE, "rollBackRecoveryAttempt(")).toBe(1);
+  });
+});
+
+describe("the snapshot locator shapes reconciliation accepts", () => {
+  it("[behavior:#334:B-03] restores only from <sliceDir>/recovery-snapshots/<attemptId> and never at the repository root", () => {
+    const rootContract = "# repository-root contract, planted\n";
+    const rootManifest = '{"version":2,"planted":true}\n';
+    writeFileSync(join(fixture.repoRoot, CONTRACT_FILENAME), rootContract);
+    writeFileSync(
+      join(fixture.repoRoot, ACCEPTANCE_MANIFEST_FILENAME),
+      rootManifest,
+    );
+    const wellFormed = plantTarget(fixture, {
+      ghIssue: "201",
+      attemptId: "attempt-well-formed",
+    });
+    const twoSegment = plantTarget(fixture, {
+      ghIssue: "202",
+      attemptId: "attempt-two-segment",
+      snapshotPath: `${RECOVERY_SNAPSHOT_DIRNAME}/attempt-two-segment`,
+    });
+    const wrongDirname = plantTarget(fixture, {
+      ghIssue: "203",
+      attemptId: "attempt-wrong-dirname",
+      snapshotPath: `.kiro/specs/${PRD_SLUG}/slices/203-target/snapshots/attempt-wrong-dirname`,
+    });
+    const singleSegment = plantTarget(fixture, {
+      ghIssue: "204",
+      attemptId: "attempt-single-segment",
+      snapshotPath: "attempt-single-segment",
+    });
+    const rejected = [twoSegment, wrongDirname, singleSegment];
+    writeLineage(fixture, [wellFormed, ...rejected]);
+    for (const target of [wellFormed, ...rejected]) reopenPairAt(target.sliceDir);
+    const rootEntriesBefore = readdirSync(fixture.repoRoot).sort();
+
+    const outcomes = reconcile(fixture);
+
+    // The well-formed locator resolved to the grandparent of the snapshot
+    // directory, which is the target's artifact directory, and restored there.
+    expect(outcomes[0]).toMatchObject({
+      ghIssue: "201",
+      appended: "ROLLED_BACK",
+      locatorRejected: false,
+    });
+    expect(outcomes[0]!.sliceDir).toBe(
+      dirname(
+        dirname(
+          join(
+            fixture.repoRoot,
+            ...wellFormed.events[0]!.snapshotPath.split("/"),
+          ),
+        ),
+      ),
+    );
+    expect(outcomes[0]!.sliceDir).toBe(wellFormed.sliceDir);
+    expect(readLockedAcceptedPair(wellFormed.sliceDir)?.contract).toBe(
+      LOCKED_CONTRACT,
+    );
+
+    // Every other locator: no restore, no append, and a report naming both the
+    // locator and the destination it would have derived.
+    for (const target of rejected) {
+      const outcome = outcomes.find((o) => o.ghIssue === target.ghIssue)!;
+      const locator = target.events[0]!.snapshotPath;
+      expect(outcome).toMatchObject({
+        appended: "none",
+        locatorRejected: true,
+        snapshotPath: locator,
+      });
+      expect(outcome.sliceDir).toBe(
+        dirname(dirname(join(fixture.repoRoot, ...locator.split("/")))),
+      );
+      expect(outcome.message).toContain(locator);
+      expect(outcome.message).toContain(outcome.sliceDir);
+      expect(lineageOfTarget(fixture, target.ghIssue)).toEqual(target.events);
+      // Nothing was read or written at the destination either: the reopened pair
+      // planted in the target's own directory is untouched.
+      expect(readFileSync(join(target.sliceDir, CONTRACT_FILENAME), "utf-8")).toBe(
+        REOPENED_CONTRACT,
+      );
+    }
+    // The two-segment case is the one B-07 cannot catch: its derived destination
+    // is the repository root, where two accepted-pair files really do live.
+    const collapsed = outcomes.find((o) => o.ghIssue === "202")!;
+    expect(collapsed.sliceDir).toBe(fixture.repoRoot);
+    expect(collapsed.message).toContain("the empty string");
+    expect(readFileSync(join(fixture.repoRoot, CONTRACT_FILENAME), "utf-8")).toBe(
+      rootContract,
+    );
+    expect(
+      readFileSync(join(fixture.repoRoot, ACCEPTANCE_MANIFEST_FILENAME), "utf-8"),
+    ).toBe(rootManifest);
+    expect(readdirSync(fixture.repoRoot).sort()).toEqual(rootEntriesBefore);
+
+    rmSync(join(fixture.repoRoot, CONTRACT_FILENAME));
+    rmSync(join(fixture.repoRoot, ACCEPTANCE_MANIFEST_FILENAME));
+  }, 30_000);
+});
+
+describe("the operator line each reconciled outcome needs", () => {
+  it("[behavior:#334:B-05] names the target, the outcome and the retry fixed for that outcome", () => {
+    const base = {
+      ghIssue: "301",
+      attemptId: "attempt-line",
+      trailingState: "PENDING" as const,
+      snapshotPath: `.kiro/specs/${PRD_SLUG}/slices/301-target/${RECOVERY_SNAPSHOT_DIRNAME}/attempt-line`,
+      snapshotDir: join(targetSliceDir(fixture, "301"), RECOVERY_SNAPSHOT_DIRNAME, "attempt-line"),
+      sliceDir: targetSliceDir(fixture, "301"),
+      locatorRejected: false,
+      runStateFile: fixture.statePath,
+    };
+
+    const rolledBack = describeRecoveryReconciliation({
+      ...base,
+      appended: "ROLLED_BACK",
+    });
+    const failed = describeRecoveryReconciliation({
+      ...base,
+      appended: "ROLLBACK_FAILED",
+      message: "the snapshot contract.md could not be read",
+    });
+    const refailed = describeRecoveryReconciliation({
+      ...base,
+      trailingState: "ROLLBACK_FAILED",
+      appended: "none",
+      message: "the retry hit the same unreadable snapshot",
+    });
+    const unusable = describeRecoveryReconciliation({
+      ...base,
+      appended: "none",
+      locatorRejected: true,
+      message: 'the locator "recovery-snapshots/attempt-line" is not of the form',
+    });
+
+    // One line each, so one `logger.phase` call is one operator-facing line.
+    for (const line of [rolledBack, failed, refailed, unusable]) {
+      expect(line).not.toContain("\n");
+      expect(line).toContain("attempt-line");
+      expect(line).toContain("#301");
+    }
+    expect(rolledBack).toContain("ROLLED_BACK");
+    expect(rolledBack).toContain("relaunch the same command");
+    expect(failed).toContain("ROLLBACK_FAILED");
+    expect(failed).toContain(`repair the snapshot directory ${base.snapshotDir}`);
+    expect(failed).toContain(CONTRACT_FILENAME);
+    expect(failed).toContain(ACCEPTANCE_MANIFEST_FILENAME);
+    expect(failed).toContain("then relaunch");
+    // Both append-nothing families say the hold is terminal until #335 and name
+    // the run-state file and the attempt, because no relaunch can move them.
+    for (const line of [refailed, unusable]) {
+      expect(line).toContain("nothing was appended");
+      expect(line).toContain("terminal until #335");
+      expect(line).toContain(fixture.statePath);
+      expect(line).toContain("report the same target and stop again");
+    }
+    expect(refailed).toContain("the retry failed again");
+    expect(refailed).toContain(`repair the snapshot directory ${base.snapshotDir}`);
+    expect(unusable).toContain("unusable");
+    expect(unusable).toContain("attempt-state reporting");
+  });
+});
+
+describe("what reconciliation may not disturb", () => {
+  it("[behavior:#334:B-06] appends nothing for a re-failed retry and never writes inside a snapshot", () => {
+    const refailing = plantTarget(fixture, {
+      ghIssue: "601",
+      attemptId: "attempt-refailed-again",
+      trailing: "ROLLBACK_FAILED",
+    });
+    writeLineage(fixture, [refailing]);
+    reopenPairAt(refailing.sliceDir);
+    rmSync(join(refailing.snapshotDir, CONTRACT_FILENAME));
+    const snapshotBefore = digestTree(refailing.snapshotDir);
+    const lineageBefore = [...lineageOfTarget(fixture, "601")];
+
+    const outcomes = reconcile(fixture);
+
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]).toMatchObject({
+      appended: "none",
+      trailingState: "ROLLBACK_FAILED",
+      attemptId: "attempt-refailed-again",
+    });
+    // ROLLBACK_FAILED -> ROLLBACK_FAILED is illegal, so the hold already
+    // recorded stays the record — event for event, at its original index.
+    expect(isLegalRecoveryTransition("ROLLBACK_FAILED", "ROLLBACK_FAILED")).toBe(
+      false,
+    );
+    const after = lineageOfTarget(fixture, "601");
+    expect(after).toEqual(lineageBefore);
+    expect(after[after.length - 1]!.attemptId).toBe("attempt-refailed-again");
+    expect(digestTree(refailing.snapshotDir)).toEqual(snapshotBefore);
+    expect(
+      recoveryDispatchRefusal(loadRunState(fixture.repoRoot, PRD_SLUG), "601")
+        ?.code,
+    ).toBe("rollback-failed-hold");
+  }, 30_000);
+
+  it("[behavior:#334:B-06] leaves a ROLLED_BACK target free to admit a brand-new attempt", () => {
+    const snapshotDir = admitPending(fixture, "attempt-before-reconcile");
+    reopenAcceptedPair(fixture);
+    const snapshotBefore = digestTree(snapshotDir);
+
+    expect(reconcile(fixture)[0]).toMatchObject({
+      ghIssue: GH_ISSUE,
+      appended: "ROLLED_BACK",
+    });
+
+    expect(eventsOf(fixture).map((e) => e.state)).toEqual([
+      "PENDING",
+      "ROLLED_BACK",
+    ]);
+    expect(hasOpenRecoveryAttempt(loadRunState(fixture.repoRoot, PRD_SLUG), GH_ISSUE)).toBe(
+      false,
+    );
+
+    const admission = admit(fixture);
+    expect(admission.admitted).toBe(true);
+    const minted = admission.admitted ? admission.attemptId : "";
+    expect(minted).not.toBe("attempt-before-reconcile");
+    expect(
+      existsSync(join(fixture.sliceDir, RECOVERY_SNAPSHOT_DIRNAME, minted)),
+    ).toBe(true);
+    // The prior attempt's snapshot is still exactly what it was.
+    expect(digestTree(snapshotDir)).toEqual(snapshotBefore);
+    expect(eventsOf(fixture).map((e) => e.attemptId)).toEqual([
+      "attempt-before-reconcile",
+      "attempt-before-reconcile",
+      minted,
+    ]);
+  }, 30_000);
+
+  it("[behavior:#334:B-07] runs no git command: every ref, commit and worktree file survives", () => {
+    admitPending(fixture, "attempt-no-git");
+    reopenAcceptedPair(fixture);
+    const before = {
+      tips: tips(fixture),
+      graph: git(fixture.repoRoot, "log", "--oneline", "--all"),
+      status: git(fixture.repoRoot, "status", "--porcelain"),
+      branches: git(fixture.repoRoot, "branch", "--list"),
+      worktree: digestTree(fixture.worktreeDir),
+    };
+
+    expect(reconcile(fixture)[0]!.appended).toBe("ROLLED_BACK");
+
+    expect(tips(fixture)).toEqual(before.tips);
+    expect(git(fixture.repoRoot, "log", "--oneline", "--all")).toBe(before.graph);
+    expect(git(fixture.repoRoot, "status", "--porcelain")).toBe(before.status);
+    expect(git(fixture.repoRoot, "branch", "--list")).toBe(before.branches);
+    expect(digestTree(fixture.worktreeDir)).toEqual(before.worktree);
+    // The slice branch still carries the preserved work it was admitted with.
+    expect(
+      git(fixture.repoRoot, "show", `${SLICE_BRANCH}:slice.txt`),
+    ).toBe("preserved work");
+  }, 30_000);
+});
+
+describe("what a launch with nothing to reconcile does", () => {
+  it("[behavior:#334:P-01] still refuses --renegotiate-stale on the one shared parse path", () => {
+    // Re-pinned from this slice's own file so `src/cli-options.test.ts` and
+    // `src/cli-entries.test.ts` stay untouched and out of scope; #277's and
+    // #332's pins there are unchanged. This slice removes no refusal, so the
+    // flag the completion path (#335) will enable is still refused here.
+    expect(() =>
+      parsePipelineRuntimeOptions([
+        "--renegotiate-stale",
+        SLICE_NUMBER,
+        "--recovery-reason",
+        "the pair went stale",
+      ]),
+    ).toThrow(/--renegotiate-stale is refused until #335 lands/);
+    expect(
+      parseStaleRenegotiationRequest([
+        "--renegotiate-stale",
+        SLICE_NUMBER,
+        "--recovery-reason",
+        "  stale  ",
+      ]),
+    ).toEqual({ selector: SLICE_NUMBER, reason: "stale" });
+  });
+
+  it("[behavior:#334:P-02] keeps the five reused exports callable at their current signatures", () => {
+    const snapshotDir = admitPending(fixture, "attempt-p02");
+    const event = trailingEvent(fixture);
+
+    // Same five seams, same shapes, reached the way reconciliation reaches them.
+    expect(restoreFrom(fixture, event).ok).toBe(true);
+    expect(isLegalRecoveryTransition("PENDING", "ROLLED_BACK")).toBe(true);
+    expect(
+      recoveryDispatchRefusal(loadRunState(fixture.repoRoot, PRD_SLUG), GH_ISSUE),
+    ).toBeUndefined();
+    const state = stateWithLineage(fixture, [event]);
+    appendRecoveryLineageEvent(state, GH_ISSUE, {
+      ...event,
+      state: "ROLLED_BACK",
+    });
+    expect(recoveryLineageFor(state, GH_ISSUE)).toHaveLength(2);
+    expect(rollback(fixture).rolledBack).toBe(true);
+    expect(existsSync(snapshotDir)).toBe(true);
+  }, 30_000);
+
+  it.each([
+    ["no recoveryLineage at all", false],
+    ["a lineage whose every trailing event is terminal", true],
+  ])(
+    "[behavior:#334:P-03] reports nothing and leaves the run-state bytes alone given %s",
+    (_label, terminal) => {
+      if (terminal) {
+        writeLineage(fixture, [
+          plantTarget(fixture, {
+            ghIssue: "701",
+            attemptId: "attempt-done",
+            trailing: "ROLLED_BACK",
+          }),
+          plantTarget(fixture, {
+            ghIssue: "702",
+            attemptId: "attempt-completed",
+            trailing: "COMPLETED",
+          }),
+        ]);
+      }
+      expect(
+        (stateDocument(fixture).recoveryLineage as object | undefined) !==
+          undefined,
+      ).toBe(terminal);
+      const before = readFileSync(fixture.statePath);
+
+      expect(reconcile(fixture)).toEqual([]);
+
+      expect(readFileSync(fixture.statePath).equals(before)).toBe(true);
+    },
+    30_000,
+  );
 });

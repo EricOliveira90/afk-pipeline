@@ -27,13 +27,13 @@
  *    {@link admitStaleRenegotiation} recheck re-reads it all under the lock and
  *    refuses on any drift (#277 B-08).
  *
- * The completion half arrives in slices. #332 added attempt execution. #333 adds
+ * The completion half arrives in slices. #332 added attempt execution. #333 added
  * the two *unsuccessful* terminal outcomes — one restore-and-verify routine
  * ({@link restoreAcceptedPairFromSnapshot}), one rollback writer that appends
  * `ROLLED_BACK` or `ROLLBACK_FAILED` ({@link rollBackRecoveryAttempt}), and one
- * fail-closed dispatch hold ({@link recoveryDispatchRefusal}) — and wires none of
- * them into a run: the launch-time reconciliation that calls them is #334, and
- * the `COMPLETED` outcome is #335.
+ * fail-closed dispatch hold ({@link recoveryDispatchRefusal}). #334 wires the
+ * first two into a launch through {@link reconcileRecoveryLineage}, which every
+ * run calls before it dispatches anything; the `COMPLETED` outcome is #335.
  */
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -45,7 +45,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { canonicalSliceNumber } from "./afk-manifest.js";
 import {
   ACCEPTANCE_MANIFEST_FILENAME,
@@ -1483,4 +1483,289 @@ export function recoveryDispatchRefusal(
     attemptId: last.attemptId,
     snapshotPath: last.snapshotPath,
   };
+}
+
+/** What launch-time reconciliation did to one target (#334 B-01). */
+export interface RecoveryReconciliationOutcome {
+  ghIssue: string;
+  /** Copied from the trailing event; reconciliation never mints an id. */
+  attemptId: string;
+  /** The unresolved state reconciliation found the lineage on. */
+  trailingState: Extract<RecoveryLineageState, "PENDING" | "ROLLBACK_FAILED">;
+  /**
+   * The state of the event appended, or `"none"` when nothing was appended —
+   * a retry that failed again, or a locator that never resolved.
+   */
+  appended:
+    | Extract<RecoveryLineageState, "ROLLED_BACK" | "ROLLBACK_FAILED">
+    | "none";
+  /** The locator as recorded, verbatim. */
+  snapshotPath: string;
+  /** `snapshotPath` resolved against the repo root, accepted or not. */
+  snapshotDir: string;
+  /** The artifact directory the restore wrote to, or would have. */
+  sliceDir: string;
+  /** Whether the locator was refused before any file was read or written. */
+  locatorRejected: boolean;
+  /** The run-state file this reconciliation read and appended to. */
+  runStateFile: string;
+  /** Why the attempt is not resolved; absent only on a verified `ROLLED_BACK`. */
+  message?: string;
+}
+
+/** The restore destination a locator resolves to, or why it does not. */
+interface DerivedRestoreDestination {
+  snapshotDir: string;
+  /** The grandparent of {@link snapshotDir} — reported even when rejected. */
+  sliceDir: string;
+  /** Present when the locator is not of the accepted form. */
+  rejection?: string;
+}
+
+/**
+ * Resolve `<sliceDir>/recovery-snapshots/<attemptId>` and nothing else (#334 B-03).
+ *
+ * The destination is the *grandparent* of the resolved snapshot directory,
+ * because that is what {@link publishAcceptedPairSnapshot} built the locator
+ * from — `relative(repoRoot, join(sliceDir, RECOVERY_SNAPSHOT_DIRNAME,
+ * attemptId))`. Deriving it back out is only sound if the locator really has
+ * that shape, so the shape is checked rather than assumed.
+ *
+ * The check that earns its keep is the segment count. A two-segment
+ * `recovery-snapshots/<attemptId>` has the empty string for a grandparent, so
+ * its derived destination collapses onto `repoRoot` and a restore would rewrite
+ * `contract.md` and `acceptance-manifest.json` at the repository root — which no
+ * "only the two accepted-pair files changed" assertion can catch, because those
+ * *are* two accepted-pair files.
+ *
+ * Purely computational: nothing here touches the filesystem, so a rejected
+ * locator has read and written nothing by the time it is reported.
+ */
+function deriveRestoreDestination(
+  repoRoot: string,
+  snapshotPath: string,
+): DerivedRestoreDestination {
+  const segments = snapshotPath.split("/");
+  const snapshotDir = join(repoRoot, ...segments);
+  const sliceDir = dirname(dirname(snapshotDir));
+  const reject = (rejection: string): DerivedRestoreDestination => ({
+    snapshotDir,
+    sliceDir,
+    rejection,
+  });
+
+  const unusable = segments.find(
+    (segment) => segment === "" || segment === "." || segment === "..",
+  );
+  if (unusable !== undefined) {
+    return reject(`the segment "${unusable}" is empty, "." or ".."`);
+  }
+  if (segments.length < 3) {
+    const derived = segments.slice(0, -2).join("/");
+    return reject(
+      `it has ${segments.length} "/"-separated segment(s), so the <sliceDir> it ` +
+        `derives is ${derived === "" ? "the empty string" : `"${derived}"`} rather ` +
+        `than the target's artifact directory`,
+    );
+  }
+  if (segments[segments.length - 2] !== RECOVERY_SNAPSHOT_DIRNAME) {
+    return reject(
+      `its penultimate segment is "${segments[segments.length - 2]}" rather than ` +
+        `"${RECOVERY_SNAPSHOT_DIRNAME}"`,
+    );
+  }
+  return { snapshotDir, sliceDir };
+}
+
+/**
+ * GitHub issue ids ascending, numerically where both are numbers.
+ *
+ * Numeric first because these are issue numbers: `#9` sorts before `#10` for a
+ * human reading the log lines, and a lexicographic sort would put it after.
+ */
+function compareGhIssue(a: string, b: string): number {
+  const left = Number(a);
+  const right = Number(b);
+  if (Number.isInteger(left) && Number.isInteger(right) && left !== right) {
+    return left - right;
+  }
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * Resolve every unresolved recovery attempt in one run's lineage (#334 B-01/B-02).
+ *
+ * The routine a launch calls before it does anything else. A process that
+ * admitted a `PENDING` attempt and then died left the accepted pair reopened
+ * with no process intending to finish the renegotiation; until that is put back,
+ * every later reader of the pair is reading something no one accepted. So the
+ * first thing a launch establishes is that no target is in that state.
+ *
+ * Unresolved is the same predicate a rollback already applies — a trailing
+ * `PENDING`, or a trailing `ROLLBACK_FAILED` whose obstacle may since have been
+ * cleared ({@link rollbackableEvent}). Every other target is left alone, and a
+ * target with a terminal trailing event is reported not at all: a launch that
+ * reconciles nothing must be indistinguishable from a launch before this
+ * existed (#334 P-03).
+ *
+ * Each target is handed to {@link rollBackRecoveryAttempt} rather than restored
+ * and appended here. That is the deliberate reading of "adds no second restore
+ * implementation and no second verification rule": the two-phase sequence
+ * — restore outside the ADR 0056 lock, then reread, recheck the trailing
+ * `attemptId` and state, admit the transition and append exactly one event
+ * inside it — already exists there, and a copy of it here would be a second
+ * answer to "was the pair put back" the moment either drifted. The `trigger` is
+ * `cancellation` because that is what an abrupt process death is from the
+ * attempt's point of view; the rollback writer never branches on it, and the
+ * value is returned to this caller rather than persisted.
+ *
+ * Ordered by `ghIssue` so the caller's operator lines are deterministic, which
+ * is the only reason the order is specified at all.
+ */
+export function reconcileRecoveryLineage(args: {
+  repoRoot: string;
+  prdSlug: string;
+  /** Which run-state file to reconcile; the bare PRD slug by default (ADR 0002). */
+  runSlug?: string;
+}): RecoveryReconciliationOutcome[] {
+  const runSlug = args.runSlug ?? args.prdSlug;
+  // Named rather than derived from run-state, which keeps its path private. The
+  // operator line has to say which file holds the hold, so the path is a fact
+  // this module reports; it is the one place here that knows the layout.
+  const runStateFile = join(
+    args.repoRoot,
+    ".afk",
+    "state",
+    `${runSlug}.json`,
+  );
+  const state = loadRunState(args.repoRoot, runSlug);
+  const outcomes: RecoveryReconciliationOutcome[] = [];
+
+  for (const ghIssue of Object.keys(state.recoveryLineage ?? {}).sort(
+    compareGhIssue,
+  )) {
+    const trailing = rollbackableEvent(state, ghIssue);
+    if (trailing === undefined) continue;
+    const trailingState = trailing.state as Extract<
+      RecoveryLineageState,
+      "PENDING" | "ROLLBACK_FAILED"
+    >;
+    const derived = deriveRestoreDestination(
+      args.repoRoot,
+      trailing.snapshotPath,
+    );
+    const record = (
+      fields: Pick<
+        RecoveryReconciliationOutcome,
+        "appended" | "locatorRejected" | "message"
+      >,
+    ): void => {
+      outcomes.push({
+        ghIssue,
+        attemptId: trailing.attemptId,
+        trailingState,
+        snapshotPath: trailing.snapshotPath,
+        snapshotDir: derived.snapshotDir,
+        sliceDir: derived.sliceDir,
+        runStateFile,
+        ...fields,
+      });
+    };
+
+    if (derived.rejection !== undefined) {
+      record({
+        appended: "none",
+        locatorRejected: true,
+        message:
+          `The recovery snapshot locator "${trailing.snapshotPath}" recorded for ` +
+          `attempt ${trailing.attemptId} is not of the form ` +
+          `<sliceDir>/${RECOVERY_SNAPSHOT_DIRNAME}/<attemptId> (${derived.rejection}); ` +
+          `it would have restored the accepted pair into ${derived.sliceDir}, so ` +
+          `nothing was read, written or appended`,
+      });
+      continue;
+    }
+
+    const result = rollBackRecoveryAttempt({
+      repoRoot: args.repoRoot,
+      prdSlug: args.prdSlug,
+      runSlug,
+      sliceDir: derived.sliceDir,
+      ghIssue,
+      failure: {
+        trigger: "cancellation",
+        message:
+          `The process that admitted recovery attempt ${trailing.attemptId} for ` +
+          `#${ghIssue} exited without resolving it`,
+      },
+    });
+    if (result.rolledBack) {
+      record({ appended: "ROLLED_BACK", locatorRejected: false });
+      continue;
+    }
+    record({
+      appended: result.event?.state === "ROLLBACK_FAILED" ? "ROLLBACK_FAILED" : "none",
+      locatorRejected: false,
+      message: result.message,
+    });
+  }
+
+  return outcomes;
+}
+
+/**
+ * The operator line one reconciled target needs, retry included (#334 B-05).
+ *
+ * Lives beside the outcome shape rather than in the orchestrator, which is a hub
+ * (ARCHITECTURE.md "Hubs"): the retry a given outcome needs is a fact about the
+ * recovery protocol, not about the run loop that prints it.
+ *
+ * The retry is fixed per outcome rather than left to the reader, because the
+ * three cases need three different human actions and the line is the only place
+ * the operator learns which one applies. A `ROLLED_BACK` target is done: the
+ * lineage is terminal and the next launch runs normally. A `ROLLBACK_FAILED`
+ * appended now names the snapshot directory to repair, because the next launch
+ * retries the same locator under `ROLLBACK_FAILED -> ROLLED_BACK`. An
+ * append-nothing outcome names the run-state file and the `attemptId` and says
+ * so plainly: no relaunch can move that lineage on its own, so the hold is
+ * terminal until #335 supplies the completion path.
+ */
+export function describeRecoveryReconciliation(
+  outcome: RecoveryReconciliationOutcome,
+): string {
+  const pair = `${CONTRACT_FILENAME} and ${ACCEPTANCE_MANIFEST_FILENAME}`;
+  const repair =
+    `repair the snapshot directory ${outcome.snapshotDir} — its ${pair} must again ` +
+    `read as a valid LOCKED pair matching the fingerprints attempt ` +
+    `${outcome.attemptId} recorded`;
+  const head =
+    `Recovery attempt ${outcome.attemptId} for #${outcome.ghIssue} was left ` +
+    `unresolved on ${outcome.trailingState}`;
+
+  if (outcome.appended === "ROLLED_BACK") {
+    return (
+      `${head}; this launch restored the accepted pair from ${outcome.snapshotDir} ` +
+      `and appended ROLLED_BACK. Retry: relaunch the same command — the lineage is ` +
+      `now terminal, so the next launch runs this slice normally.`
+    );
+  }
+  if (outcome.appended === "ROLLBACK_FAILED") {
+    return (
+      `${head}; the rollback did not verify (${outcome.message}) and ` +
+      `ROLLBACK_FAILED was appended. Retry: ${repair}, then relaunch — the next ` +
+      `launch retries from the same snapshotPath "${outcome.snapshotPath}".`
+    );
+  }
+  const cause = outcome.locatorRejected
+    ? `the recorded snapshotPath "${outcome.snapshotPath}" is unusable ` +
+      `(${outcome.message}), so the target stays held until #335's attempt-state ` +
+      `reporting can resolve it`
+    : `the retry failed again (${outcome.message}), so the existing hold stays in ` +
+      `force. A human must ${repair}`;
+  return (
+    `${head}; nothing was appended: ${cause}. This hold is intentionally terminal ` +
+    `until #335 supplies the completion path: attempt ${outcome.attemptId} in ` +
+    `${outcome.runStateFile} stays as it is, and a relaunch alone will report the ` +
+    `same target and stop again.`
+  );
 }
