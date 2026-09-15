@@ -18,7 +18,7 @@
  * can never hold a ship gate open indefinitely.
  */
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { buildChangeSummary, type ChangeSummary, type ChangeSummaryFile } from "./change-summary.js";
 import { registerWorktreeProcess } from "./worktree-processes.js";
@@ -31,7 +31,43 @@ import { registerWorktreeProcess } from "./worktree-processes.js";
 export interface MutationReportConfig {
   command: string;
   reportPath: string;
+  /**
+   * The declared incremental baseline artifact (#304 B-01). Absent means no
+   * baseline was declared, which is the normal case and never an error: every
+   * survivor is then reported `unattributed`.
+   */
+  baselinePath?: string;
+  /**
+   * The declared triage decisions file (#304 B-01). Absent means no decisions
+   * file was declared — again normal, and never an error.
+   */
+  decisionsPath?: string;
 }
+
+/**
+ * What attribution says about one survivor (#304 B-05, B-07).
+ *
+ * A label is report text and nothing else: no gate id, verdict or PR-open
+ * condition reads one (ADR 0063, ADR 0071's "no blocking mutation gate"), and
+ * `accepted` marks a survivor rather than removing it — the report marks, it
+ * never suppresses.
+ */
+export type MutationSurvivorLabel =
+  | "new-in-this-run"
+  | "pre-existing"
+  | "unattributed"
+  | "accepted";
+
+/**
+ * Why attribution could not answer, when it could not (#304 B-08).
+ *
+ * Keyed only on a file that is *present but unusable*. An absent baseline or
+ * decisions file produces no note at all, because absence is the normal case
+ * and a note for it would be a warning every project without one reads forever.
+ */
+export type MutationAttributionNote =
+  | "BASELINE_UNUSABLE"
+  | "DECISIONS_UNUSABLE";
 
 /** Where one mutant sits in its file, as the report spells it. */
 export interface MutationSurvivorPosition {
@@ -51,6 +87,13 @@ export interface MutationSurvivor {
   file: string;
   mutator: string;
   position: MutationSurvivorPosition;
+  /**
+   * What attribution said about this survivor (#304 B-05). Optional, because a
+   * record persisted before this slice carries none — and absence *means*
+   * `unattributed`, which is why the render derivation substitutes exactly that
+   * and the parser mints no label of its own.
+   */
+  label?: MutationSurvivorLabel;
 }
 
 /**
@@ -72,7 +115,16 @@ export type MutationNotRunReason =
 
 /** The step's whole result vocabulary — two cases, neither of them a verdict. */
 export type MutationStepOutcome =
-  | { status: "MUTATION_REPORTED"; survivors: MutationSurvivor[] }
+  | {
+      status: "MUTATION_REPORTED";
+      survivors: MutationSurvivor[];
+      /**
+       * Present only when a declared baseline or decisions file was there but
+       * unusable (#304 B-08). Absent is the ordinary shape, so nothing changes
+       * for a run that declared neither file.
+       */
+      attributionNotes?: MutationAttributionNote[];
+    }
   | { status: "MUTATION_NOT_RUN"; reason: MutationNotRunReason };
 
 /** How the declared command exited, as the step observed it. */
@@ -201,6 +253,321 @@ export function readMutationReport(
     };
   }
   return parseMutationReport(text);
+}
+
+/** A triage verdict a human recorded for one mutant (ADR 0071). */
+export type MutationDecisionVerdict = "KILL" | "ACCEPT";
+
+/**
+ * One entry of the committed decisions file, in ADR 0071's field set with the
+ * key spellings pinned here (#304 B-04) so every Stage A triage session writes
+ * one spelling from day one.
+ *
+ * `id` is the mutation tool's own id, as {@link MutationSurvivor} already
+ * declares it, and `file` corroborates it: per-file ids collide across files, so
+ * a bare id match must be corroborated before it resolves identity (ADR 0065).
+ */
+export interface MutationDecision {
+  id: string;
+  file: string;
+  verdict: MutationDecisionVerdict;
+  /** What shipping this mutant unkilled would cost. */
+  consequence: string;
+  /** What keeps that cost bounded. */
+  containment: string;
+  /** The one line of reasoning behind the verdict. */
+  reasoning: string;
+}
+
+/**
+ * What parsing the decisions *text* produced. No `UNREADABLE`: a text this
+ * function was handed was already read.
+ */
+export type MutationDecisionsParse =
+  | { status: "PARSED"; decisions: MutationDecision[] }
+  | { status: "MALFORMED"; detail: string };
+
+/**
+ * What reading a declared baseline artifact produced — {@link
+ * MutationReportRead} plus `ABSENT`.
+ *
+ * `ABSENT` is the whole point of this union and the one signal every
+ * degradation rule in this slice keys on: a declared baseline that is simply not
+ * there is the normal case and must stay silent, while one that is there and
+ * unusable is a named degradation. That deliberately diverges from
+ * {@link readMutationReport}, which collapses an absent report into
+ * `UNREADABLE` — and must keep doing so, because a missing mutation report is a
+ * real failure that has to reach `REPORT_UNREADABLE` (#303).
+ */
+export type MutationBaselineRead = MutationReportRead | { status: "ABSENT" };
+
+/** What reading a declared decisions file produced. See {@link MutationBaselineRead}. */
+export type MutationDecisionsRead =
+  | MutationDecisionsParse
+  | { status: "UNREADABLE"; detail: string }
+  | { status: "ABSENT" };
+
+function malformedDecisions(detail: string): MutationDecisionsParse {
+  return { status: "MALFORMED", detail };
+}
+
+/**
+ * Parse a triage decisions file into its entries.
+ *
+ * Pure and total, the discipline {@link parseMutationReport} is under: every
+ * rejection is a `MALFORMED` result naming the offending member, never a throw,
+ * because a report-only step's parse error must not reach a gate.
+ *
+ * `version: 1` matches the manifest's version regime per ADR 0071's "Decisions
+ * file schema"; a blank field is refused rather than defaulted, because a
+ * decision with an empty `reasoning` is a decision nobody can review later —
+ * the same rule a protected-change waiver is under.
+ */
+export function parseMutationDecisions(text: string): MutationDecisionsParse {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (error) {
+    return malformedDecisions(
+      `decisions file is not valid JSON: ${describeError(error)}`,
+    );
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return malformedDecisions("decisions file must be a JSON object");
+  }
+  const doc = raw as Record<string, unknown>;
+  if (doc.version !== 1) {
+    return malformedDecisions("decisions file must declare version 1");
+  }
+  if (!Array.isArray(doc.decisions)) {
+    return malformedDecisions("decisions file must hold a decisions array");
+  }
+  const decisions: MutationDecision[] = [];
+  for (const [index, entry] of doc.decisions.entries()) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return malformedDecisions(
+        `decisions entry ${index} must be a JSON object holding id, file, ` +
+          `verdict, consequence, containment and reasoning`,
+      );
+    }
+    const value = entry as Record<string, unknown>;
+    if (value.verdict !== "KILL" && value.verdict !== "ACCEPT") {
+      return malformedDecisions(
+        `decisions entry ${index} does not recognise verdict ` +
+          `${JSON.stringify(value.verdict)}; the declared verdicts are KILL, ACCEPT`,
+      );
+    }
+    const fields: Record<string, string> = {};
+    for (const field of [
+      "id",
+      "file",
+      "consequence",
+      "containment",
+      "reasoning",
+    ] as const) {
+      const declared = value[field];
+      if (typeof declared !== "string" || declared.trim() === "") {
+        return malformedDecisions(
+          `decisions entry ${index} requires a non-blank ${field}`,
+        );
+      }
+      fields[field] = declared.trim();
+    }
+    decisions.push({
+      id: fields.id!,
+      file: fields.file!,
+      verdict: value.verdict,
+      consequence: fields.consequence!,
+      containment: fields.containment!,
+      reasoning: fields.reasoning!,
+    });
+  }
+  return { status: "PARSED", decisions };
+}
+
+/**
+ * Read one declared optional artifact, separating "not there" from "there and
+ * unreadable" — the distinction the whole degradation vocabulary keys on
+ * (#304 B-04). `existsSync` is checked first and is the *only* thing that
+ * produces `ABSENT`.
+ */
+function readDeclaredArtifact(
+  cwd: string,
+  path: string,
+):
+  | { status: "ABSENT" }
+  | { status: "UNREADABLE"; detail: string }
+  | { status: "READ"; text: string } {
+  const full = join(cwd, path);
+  if (!existsSync(full)) return { status: "ABSENT" };
+  try {
+    return { status: "READ", text: readFileSync(full, "utf-8") };
+  } catch (error) {
+    return {
+      status: "UNREADABLE",
+      detail: `cannot read ${path}: ${describeError(error)}`,
+    };
+  }
+}
+
+/**
+ * Read the declared baseline artifact from the worktree the command ran in.
+ *
+ * Parsed by {@link parseMutationReport} on this slice's stated assumption that
+ * the tool's incremental artifact is the same mutation-testing-elements
+ * document — no sample incremental file and no schema artifact exists in this
+ * repository to confirm that shape, the same gap the report parser above already
+ * records. The assumption is safe because its failure is contained and named: a
+ * differently shaped baseline parses `MALFORMED`, which becomes
+ * `BASELINE_UNUSABLE` with every survivor `unattributed`, so a wrong shape can
+ * only cost attribution and can never produce a wrong label.
+ */
+export function readMutationBaseline(
+  cwd: string,
+  baselinePath: string,
+): MutationBaselineRead {
+  const read = readDeclaredArtifact(cwd, baselinePath);
+  if (read.status !== "READ") return read;
+  return parseMutationReport(read.text);
+}
+
+/** Read the declared decisions file from the worktree the command ran in. */
+export function readMutationDecisions(
+  cwd: string,
+  decisionsPath: string,
+): MutationDecisionsRead {
+  const read = readDeclaredArtifact(cwd, decisionsPath);
+  if (read.status !== "READ") return read;
+  return parseMutationDecisions(read.text);
+}
+
+/** One spelling for a path, so a baseline and a report compare the same bytes. */
+function samePath(file: string): string {
+  return file.replace(/\\/g, "/");
+}
+
+/**
+ * The field separator inside a match key. Written as an escape, not as a literal
+ * control character, so the source file stays text: a raw NUL byte makes `grep`
+ * and `git diff` treat this module as binary.
+ */
+const KEY_FIELD = "\u0000";
+
+/**
+ * The baseline match key: file, mutator and all four position numbers — never
+ * the tool's id.
+ *
+ * On this slice's conservative assumption that an incremental artifact may
+ * renumber its per-file mutant ids between runs, an id-keyed comparison would
+ * report unchanged survivors as new. Location and mutator are stable under
+ * renumbering either way, so the assumption costs nothing if it is wrong.
+ */
+function baselineKey(survivor: MutationSurvivor): string {
+  return [
+    samePath(survivor.file),
+    survivor.mutator,
+    survivor.position.startLine,
+    survivor.position.startColumn,
+    survivor.position.endLine,
+    survivor.position.endColumn,
+  ].join(KEY_FIELD);
+}
+
+/**
+ * The decisions match key: the tool's own `id`, corroborated by `file`.
+ *
+ * Deliberately *not* {@link baselineKey}, and the divergence is the recorded
+ * decision's rather than this slice's: {@link MutationSurvivor} and ADR 0071
+ * already commit the decisions file to the tool's own id, and amending that ADR
+ * is an explicit non-goal. B-05's premise therefore lands here as a stated
+ * consequence: if the tool renumbers per-file ids between runs, a committed
+ * `ACCEPT` entry goes stale — either matching nothing, so its survivor is
+ * re-raised carrying its baseline label, or matching whichever mutant now holds
+ * that id in the same file, so one bullet is mislabeled. The harm is bounded by
+ * what a label is: report text no gate, verdict or PR-open condition reads, on a
+ * survivor that stays in the list at full detail.
+ */
+function decisionKey(entry: { id: string; file: string }): string {
+  return `${entry.id}${KEY_FIELD}${samePath(entry.file)}`;
+}
+
+/** One `label` per survivor, plus whatever degradation had to be stated. */
+export interface MutationAttribution {
+  survivors: MutationSurvivor[];
+  notes: MutationAttributionNote[];
+}
+
+/**
+ * Label each survivor from the run's optional baseline and optional decisions
+ * file. Pure — the three inputs are the whole content, and it is called once per
+ * run, so `run-summary.md` and the draft PR body cannot disagree about a label.
+ *
+ * Absence is silent, and it is the *omitted or `ABSENT` input* that makes it so:
+ * an omitted argument and an `{ status: "ABSENT" }` argument take the identical
+ * branch, and neither produces a note. Because the noted branch is keyed on
+ * `UNREADABLE` or `MALFORMED` alone, no single input can be both silent and
+ * noted.
+ *
+ * Nothing here gates. A label is a mark on a bullet a reviewer reads.
+ */
+export function attributeMutationSurvivors(input: {
+  survivors: readonly MutationSurvivor[];
+  /** Omitted when no `baselinePath` was declared; see {@link MutationBaselineRead}. */
+  baseline?: MutationBaselineRead;
+  /** Omitted when no `decisionsPath` was declared. */
+  decisions?: MutationDecisionsRead;
+}): MutationAttribution {
+  const notes: MutationAttributionNote[] = [];
+
+  const baseline = input.baseline;
+  const baselineKeys =
+    baseline?.status === "PARSED"
+      ? new Set(baseline.survivors.map(baselineKey))
+      : undefined;
+  if (
+    baseline !== undefined &&
+    baseline.status !== "PARSED" &&
+    baseline.status !== "ABSENT"
+  ) {
+    notes.push("BASELINE_UNUSABLE");
+  }
+
+  const decisions = input.decisions;
+  const accepted =
+    decisions?.status === "PARSED"
+      ? new Set(
+          decisions.decisions
+            .filter((entry) => entry.verdict === "ACCEPT")
+            .map(decisionKey),
+        )
+      : undefined;
+  if (
+    decisions !== undefined &&
+    decisions.status !== "PARSED" &&
+    decisions.status !== "ABSENT"
+  ) {
+    notes.push("DECISIONS_UNUSABLE");
+  }
+
+  // Mapped, never filtered: an `accepted` survivor keeps its place in the list
+  // at full detail, because the report marks and never suppresses.
+  const survivors = input.survivors.map((survivor) => {
+    const fromBaseline: MutationSurvivorLabel =
+      baselineKeys === undefined
+        ? "unattributed"
+        : baselineKeys.has(baselineKey(survivor))
+          ? "pre-existing"
+          : "new-in-this-run";
+    // A `KILL` entry changes no label: an unkilled mutant a human ruled killable
+    // is still an open finding.
+    const label: MutationSurvivorLabel =
+      accepted !== undefined && accepted.has(decisionKey(survivor))
+        ? "accepted"
+        : fromBaseline;
+    return { ...survivor, label };
+  });
+
+  return { survivors, notes };
 }
 
 /**
@@ -386,7 +753,7 @@ export async function runMutationStep(
   } catch (error) {
     exit = { status: "FAILED", detail: describeError(error) };
   }
-  return classifyMutationStep({
+  const outcome = classifyMutationStep({
     exit,
     report:
       exit.status === "OK"
@@ -394,6 +761,50 @@ export async function runMutationStep(
         : undefined,
     deadline: "INSIDE",
   });
+  return attributeStepOutcome(args.cwd, args.config, outcome);
+}
+
+/**
+ * Attribute a reported outcome from the two declared paths, under the step's own
+ * `cwd` and after the command has exited — so the pre-spawn abandonment window
+ * above is untouched (#304 B-09).
+ *
+ * The reads happen here and nowhere else: a declared path's read result is
+ * passed straight through, `ABSENT` included, so the absent-versus-unusable
+ * distinction lives only in the readers and this call site probes nothing.
+ *
+ * A run that declared *neither* path is left exactly as it was, unlabeled: no
+ * label is the same fact as `unattributed` (the render derivation substitutes
+ * precisely that), so writing one would add a member to every survivor of every
+ * run that opted into nothing.
+ */
+function attributeStepOutcome(
+  cwd: string,
+  config: MutationReportConfig,
+  outcome: MutationStepOutcome | undefined,
+): MutationStepOutcome | undefined {
+  if (outcome === undefined || outcome.status !== "MUTATION_REPORTED") {
+    return outcome;
+  }
+  if (config.baselinePath === undefined && config.decisionsPath === undefined) {
+    return outcome;
+  }
+  const attributed = attributeMutationSurvivors({
+    survivors: outcome.survivors,
+    ...(config.baselinePath !== undefined
+      ? { baseline: readMutationBaseline(cwd, config.baselinePath) }
+      : {}),
+    ...(config.decisionsPath !== undefined
+      ? { decisions: readMutationDecisions(cwd, config.decisionsPath) }
+      : {}),
+  });
+  return {
+    status: "MUTATION_REPORTED",
+    survivors: attributed.survivors,
+    ...(attributed.notes.length > 0
+      ? { attributionNotes: attributed.notes }
+      : {}),
+  };
 }
 
 function describeError(error: unknown): string {
@@ -491,16 +902,40 @@ export const MUTATION_REPORT_HEADING =
   "## Mutation survivors (reported, never blocking)";
 
 /**
+ * The one line each attribution note renders, so a degradation reads the same in
+ * `run-summary.md` and in the draft PR body. Each says what was lost and that
+ * nothing was gated on it — a degraded artifact costs attribution, never an
+ * outcome (#304 B-08/B-10).
+ */
+const ATTRIBUTION_NOTE_LINES: Record<MutationAttributionNote, string> = {
+  BASELINE_UNUSABLE:
+    "- Attribution degraded: `BASELINE_UNUSABLE` — the declared baseline was " +
+    "there but could not be read or parsed, so every survivor above is " +
+    "`unattributed`. Nothing was gated on this (ADR 0063).",
+  DECISIONS_UNUSABLE:
+    "- Attribution degraded: `DECISIONS_UNUSABLE` — the declared decisions " +
+    "file was there but could not be read or parsed, so no survivor above is " +
+    "marked `accepted`. Nothing was gated on this (ADR 0063).",
+};
+
+/**
  * The report text, from one formatter, so the run summary and the PR body
  * cannot disagree about what survived.
  *
  * The empty-survivor case renders its own line: a section that fell silent
  * when nothing survived could not be told from a step that never ran.
+ *
+ * Each survivor's bullet ends with its label when it carries one, and each
+ * attribution note gets one line of its own (#304 B-10). An unlabeled survivor
+ * renders exactly as it did before this slice: the render derivation is what
+ * substitutes `unattributed` for a record that predates labels, so nothing is
+ * invented here.
  */
 export function formatMutationReportLines(report: {
   status: "MUTATION_REPORTED" | "MUTATION_NOT_RUN";
   reason?: MutationNotRunReason;
   survivors: readonly MutationSurvivor[];
+  attributionNotes?: readonly MutationAttributionNote[];
 }): string[] {
   if (report.status === "MUTATION_NOT_RUN") {
     // A record with no reason is reachable from disk — `reason` is optional on
@@ -515,14 +950,19 @@ export function formatMutationReportLines(report: {
           "Nothing was gated on this (ADR 0063).",
     ];
   }
-  if (report.survivors.length === 0) {
-    return [
-      "- No surviving mutants in the changed source files.",
-    ];
-  }
-  return report.survivors.map(
-    (survivor) =>
-      `- \`${survivor.id}\` ${survivor.file}:${survivor.position.startLine}:` +
-      `${survivor.position.startColumn} — ${survivor.mutator}`,
+  const noteLines = (report.attributionNotes ?? []).map(
+    (note) => ATTRIBUTION_NOTE_LINES[note],
   );
+  if (report.survivors.length === 0) {
+    return ["- No surviving mutants in the changed source files.", ...noteLines];
+  }
+  return [
+    ...report.survivors.map(
+      (survivor) =>
+        `- \`${survivor.id}\` ${survivor.file}:${survivor.position.startLine}:` +
+        `${survivor.position.startColumn} — ${survivor.mutator}` +
+        (survivor.label === undefined ? "" : ` — ${survivor.label}`),
+    ),
+    ...noteLines,
+  ];
 }

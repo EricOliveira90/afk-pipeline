@@ -14,7 +14,13 @@
  * are facts about *where* something is written, which no runtime assertion can
  * observe without spawning a run.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -22,15 +28,23 @@ import type { ChangeSummary, ChangeSummaryFile } from "./change-summary.js";
 import {
   MUTATION_REPORT_HEADING,
   MUTATION_STEP_BOUND_MS,
+  attributeMutationSurvivors,
   awaitMutationStepWithinBound,
   classifyMutationStep,
   formatMutationReportLines,
   isMutationEligibleSource,
   mutationEligibleSources,
+  parseMutationDecisions,
   parseMutationReport,
+  readMutationBaseline,
+  readMutationDecisions,
   readMutationReport,
   runMutationStep,
+  type MutationBaselineRead,
+  type MutationDecisionsRead,
   type MutationStepOutcome,
+  type MutationSurvivor,
+  type MutationSurvivorLabel,
 } from "./mutation-report.js";
 
 const roots: string[] = [];
@@ -128,7 +142,7 @@ function summary(files: ChangeSummaryFile[]): ChangeSummary {
   } as ChangeSummary;
 }
 
-describe("[behavior:#303:B-08] the report parser", () => {
+describe("[behavior:#303:B-08] [behavior:#304:P-06] the report parser", () => {
   it("[behavior:#303:B-08] returns every survivor's identity, file, position and mutator", () => {
     const read = parseMutationReport(JSON.stringify(REPORT));
     expect(read).toEqual({ status: "PARSED", survivors: [SURVIVOR_1, SURVIVOR_5] });
@@ -395,7 +409,7 @@ describe("[behavior:#303:B-10] mutation-eligible file scope", () => {
   });
 });
 
-describe("[behavior:#303:B-11] runMutationStep", () => {
+describe("[behavior:#303:B-11] [behavior:#304:P-05] runMutationStep", () => {
   it("[behavior:#303:B-11] invokes the declared command over the derived scope, then reads the report file", async () => {
     const cwd = tempDir();
     writeFileSync(join(cwd, "mutation.json"), JSON.stringify(REPORT));
@@ -510,7 +524,7 @@ describe("[behavior:#303:B-11] runMutationStep", () => {
   });
 });
 
-describe("[behavior:#303:B-12] the bounded wait", () => {
+describe("[behavior:#303:B-12] [behavior:#304:P-05] the bounded wait", () => {
   const never = (): Promise<MutationStepOutcome | undefined> => new Promise(() => {});
 
   it("[behavior:#303:B-12] fixes the bound at thirty minutes, in the module that waits", () => {
@@ -656,7 +670,7 @@ describe("[behavior:#303:B-07] the launch refusal runs before any agent is dispa
   });
 });
 
-describe("[behavior:#303:B-14] the one shared report text", () => {
+describe("[behavior:#303:B-14] [behavior:#304:P-04] the one shared report text", () => {
   it("[behavior:#303:B-14] lists each survivor with its identity, location and mutator", () => {
     expect(
       formatMutationReportLines({
@@ -709,6 +723,641 @@ describe("[behavior:#303:B-14] the one shared report text", () => {
     }
     expect(lines[0]).toContain("not recorded");
     expect(lines[0]).toContain("ADR 0063");
+  });
+});
+
+/**
+ * Survivor attribution (#304).
+ *
+ * Every assertion below is a pure function over an inline value or a temp
+ * directory holding an inline JSON string: no baseline artifact is committed, no
+ * decisions file is committed, no mutation tool runs and no pipeline is spawned.
+ */
+
+/**
+ * An incremental baseline artifact, on this slice's stated assumption that it is
+ * the same mutation-testing-elements document the report is. Its mutant ids are
+ * deliberately *not* the report's, which is what makes the location-and-mutator
+ * match key observable.
+ */
+const BASELINE_JSON = {
+  files: {
+    "src/cart.ts": {
+      mutants: [
+        {
+          id: "914",
+          mutatorName: "ArithmeticOperator",
+          status: "Survived",
+          location: { start: { line: 1, column: 36 }, end: { line: 1, column: 41 } },
+        },
+      ],
+    },
+  },
+};
+
+/** A third survivor, so B-07 can hold an accepted, a stale and a killed entry. */
+const SURVIVOR_9 = {
+  id: "9",
+  file: "src/checkout.ts",
+  mutator: "EqualityOperator",
+  position: { startLine: 7, startColumn: 2, endLine: 7, endColumn: 8 },
+};
+
+/** A baseline holding every survivor handed to it, at its own renumbered ids. */
+function baselineHolding(...survivors: MutationSurvivor[]): MutationBaselineRead {
+  const files: Record<string, { mutants: unknown[] }> = {};
+  for (const [index, survivor] of survivors.entries()) {
+    const entry = (files[survivor.file] ??= { mutants: [] });
+    entry.mutants.push({
+      id: `baseline-${index}`,
+      mutatorName: survivor.mutator,
+      status: "Survived",
+      location: {
+        start: {
+          line: survivor.position.startLine,
+          column: survivor.position.startColumn,
+        },
+        end: {
+          line: survivor.position.endLine,
+          column: survivor.position.endColumn,
+        },
+      },
+    });
+  }
+  return parseMutationReport(JSON.stringify({ files }));
+}
+
+function decision(overrides: Record<string, unknown>) {
+  return {
+    id: "1",
+    file: "src/cart.ts",
+    verdict: "ACCEPT",
+    consequence: "an off-by-one in the total nobody notices until invoicing",
+    containment: "the invoice reconciliation job catches it within a day",
+    reasoning: "the arithmetic is asserted end to end, not per operator",
+    ...overrides,
+  };
+}
+
+function decisionsText(entries: Record<string, unknown>[]): string {
+  return JSON.stringify({ version: 1, decisions: entries });
+}
+
+function labelsOf(survivors: readonly MutationSurvivor[]): (MutationSurvivorLabel | undefined)[] {
+  return survivors.map((survivor) => survivor.label);
+}
+
+describe("[behavior:#304:B-04] the decisions parser and the two optional readers", () => {
+  it("[behavior:#304:B-04] parses ADR 0071's field set under its pinned key spellings", () => {
+    const read = parseMutationDecisions(
+      decisionsText([
+        decision({}),
+        decision({ id: "5", file: "src/checkout.ts", verdict: "KILL" }),
+      ]),
+    );
+    // The spellings are the contract Stage A triage sessions write against, so
+    // they are asserted rather than described.
+    expect(read).toEqual({
+      status: "PARSED",
+      decisions: [
+        {
+          id: "1",
+          file: "src/cart.ts",
+          verdict: "ACCEPT",
+          consequence: "an off-by-one in the total nobody notices until invoicing",
+          containment: "the invoice reconciliation job catches it within a day",
+          reasoning: "the arithmetic is asserted end to end, not per operator",
+        },
+        {
+          id: "5",
+          file: "src/checkout.ts",
+          verdict: "KILL",
+          consequence: "an off-by-one in the total nobody notices until invoicing",
+          containment: "the invoice reconciliation job catches it within a day",
+          reasoning: "the arithmetic is asserted end to end, not per operator",
+        },
+      ],
+    });
+  });
+
+  it.each([
+    ["not JSON at all", "{ nope", /not valid JSON/],
+    ["a JSON array", "[]", /must be a JSON object/],
+    ["a JSON scalar", "12", /must be a JSON object/],
+    ["no version", JSON.stringify({ decisions: [] }), /must declare version 1/],
+    [
+      "a foreign version",
+      JSON.stringify({ version: 2, decisions: [] }),
+      /must declare version 1/,
+    ],
+    [
+      "no decisions array",
+      JSON.stringify({ version: 1 }),
+      /must hold a decisions array/,
+    ],
+    [
+      "a decisions member that is not an array",
+      JSON.stringify({ version: 1, decisions: { id: "1" } }),
+      /must hold a decisions array/,
+    ],
+    [
+      "a non-object entry",
+      decisionsText(["1" as unknown as Record<string, unknown>]),
+      /decisions entry 0 must be a JSON object/,
+    ],
+    [
+      "an unrecognized verdict",
+      decisionsText([decision({ verdict: "MAYBE" })]),
+      /decisions entry 0 does not recognise verdict "MAYBE"/,
+    ],
+    [
+      "a missing verdict",
+      decisionsText([decision({ verdict: undefined })]),
+      /does not recognise verdict/,
+    ],
+    [
+      "a blank id",
+      decisionsText([decision({ id: "  " })]),
+      /decisions entry 0 requires a non-blank id/,
+    ],
+    [
+      "a blank file",
+      decisionsText([decision({ file: "" })]),
+      /decisions entry 0 requires a non-blank file/,
+    ],
+    [
+      "a blank consequence",
+      decisionsText([decision({ consequence: " " })]),
+      /decisions entry 0 requires a non-blank consequence/,
+    ],
+    [
+      "a blank containment",
+      decisionsText([decision({ containment: " " })]),
+      /decisions entry 0 requires a non-blank containment/,
+    ],
+    [
+      "a blank reasoning",
+      decisionsText([decision({ reasoning: "" })]),
+      /decisions entry 0 requires a non-blank reasoning/,
+    ],
+  ])(
+    "[behavior:#304:B-04] calls %s malformed, naming the offending member",
+    (_label, text: string, detail: RegExp) => {
+      // Never a throw: a report-only step's parse error must not reach a gate,
+      // which is the same discipline the report parser above is under.
+      const read = parseMutationDecisions(text);
+      expect(read.status).toBe("MALFORMED");
+      if (read.status !== "MALFORMED") return;
+      expect(read.detail).toMatch(detail);
+    },
+  );
+
+  it("[behavior:#304:B-04] never throws, whatever it is handed", () => {
+    for (const text of ["", "null", "true", '{"version":1,"decisions":null}']) {
+      expect(() => parseMutationDecisions(text)).not.toThrow();
+    }
+  });
+
+  it("[behavior:#304:B-04] separates a file that is not there from one it cannot read", () => {
+    const cwd = tempDir();
+
+    // Absent: no file was written. This is the normal case for both artifacts,
+    // and it is the one signal the silent branch keys on — so it must never be
+    // reported as a read failure.
+    expect(readMutationBaseline(cwd, "reports/incremental.json")).toEqual({
+      status: "ABSENT",
+    });
+    expect(readMutationDecisions(cwd, "docs/decisions.json")).toEqual({
+      status: "ABSENT",
+    });
+
+    // Present but unreadable, without simulating a permission error: a
+    // *directory* at the declared path makes `existsSync` true and `readFileSync`
+    // throw.
+    mkdirSync(join(cwd, "as-a-dir.json"), { recursive: true });
+    const baseline = readMutationBaseline(cwd, "as-a-dir.json");
+    const decisions = readMutationDecisions(cwd, "as-a-dir.json");
+    expect(baseline.status).toBe("UNREADABLE");
+    expect(decisions.status).toBe("UNREADABLE");
+
+    // Present and readable, each through its own parser.
+    writeFileSync(join(cwd, "incremental.json"), JSON.stringify(BASELINE_JSON));
+    writeFileSync(join(cwd, "decisions.json"), decisionsText([decision({})]));
+    expect(readMutationBaseline(cwd, "incremental.json").status).toBe("PARSED");
+    expect(readMutationDecisions(cwd, "decisions.json").status).toBe("PARSED");
+
+    // Present and garbage: read, but not parsed.
+    writeFileSync(join(cwd, "junk.json"), "{ not json");
+    expect(readMutationBaseline(cwd, "junk.json").status).toBe("MALFORMED");
+    expect(readMutationDecisions(cwd, "junk.json").status).toBe("MALFORMED");
+  });
+
+  it("[behavior:#304:B-04] leaves readMutationReport's missing-file verdict alone", () => {
+    // The divergence is deliberate and one-directional: a missing *report* is a
+    // real failure that has to reach REPORT_UNREADABLE and MUTATION_NOT_RUN,
+    // while a missing baseline or decisions file is the normal case.
+    const cwd = tempDir();
+    expect(readMutationReport(cwd, "reports/absent.json").status).toBe(
+      "UNREADABLE",
+    );
+    expect(readMutationBaseline(cwd, "reports/absent.json").status).toBe("ABSENT");
+  });
+});
+
+describe("[behavior:#304:B-05] baseline attribution", () => {
+  it("[behavior:#304:B-05] calls a survivor the baseline holds pre-existing and the rest new in this run", () => {
+    const attributed = attributeMutationSurvivors({
+      survivors: [SURVIVOR_1, SURVIVOR_5],
+      baseline: parseMutationReport(JSON.stringify(BASELINE_JSON)),
+    });
+
+    // The baseline spells SURVIVOR_1's mutant `914`, not `1`: the match is on
+    // file, mutator and all four position numbers, so an incremental artifact
+    // that renumbered its per-file ids between runs still recognises it.
+    expect(labelsOf(attributed.survivors)).toEqual([
+      "pre-existing",
+      "new-in-this-run",
+    ]);
+    expect(attributed.notes).toEqual([]);
+  });
+
+  it("[behavior:#304:B-05] calls a survivor new when any one position number moved", () => {
+    // A mutant that moved is a mutant in code that changed, which is exactly
+    // what "new in this run" is asking about.
+    for (const key of [
+      "startLine",
+      "startColumn",
+      "endLine",
+      "endColumn",
+    ] as const) {
+      const moved = {
+        ...SURVIVOR_1,
+        position: { ...SURVIVOR_1.position, [key]: 99 },
+      };
+      expect(
+        labelsOf(
+          attributeMutationSurvivors({
+            survivors: [moved],
+            baseline: baselineHolding(SURVIVOR_1),
+          }).survivors,
+        ),
+      ).toEqual(["new-in-this-run"]);
+    }
+    // And a different mutator at the same place is a different mutant.
+    expect(
+      labelsOf(
+        attributeMutationSurvivors({
+          survivors: [{ ...SURVIVOR_1, mutator: "BooleanLiteral" }],
+          baseline: baselineHolding(SURVIVOR_1),
+        }).survivors,
+      ),
+    ).toEqual(["new-in-this-run"]);
+  });
+});
+
+describe("[behavior:#304:B-06] absence is silent", () => {
+  it.each([
+    ["an omitted baseline argument", undefined],
+    ["a baseline the reader called ABSENT", { status: "ABSENT" } as const],
+  ])(
+    "[behavior:#304:B-06] labels every survivor unattributed and states nothing for %s",
+    (_label, baseline: MutationBaselineRead | undefined) => {
+      const attributed = attributeMutationSurvivors({
+        survivors: [SURVIVOR_1, SURVIVOR_5],
+        ...(baseline !== undefined ? { baseline } : {}),
+      });
+
+      expect(labelsOf(attributed.survivors)).toEqual([
+        "unattributed",
+        "unattributed",
+      ]);
+      // No note: a project that declared no baseline would otherwise read a
+      // degradation warning on every run forever.
+      expect(attributed.notes).toEqual([]);
+    },
+  );
+
+  it.each([
+    ["an omitted decisions argument", undefined],
+    ["a decisions file the reader called ABSENT", { status: "ABSENT" } as const],
+  ])(
+    "[behavior:#304:B-06] leaves every baseline label exactly as it is for %s",
+    (_label, decisions: MutationDecisionsRead | undefined) => {
+      const attributed = attributeMutationSurvivors({
+        survivors: [SURVIVOR_1, SURVIVOR_5],
+        baseline: baselineHolding(SURVIVOR_1),
+        ...(decisions !== undefined ? { decisions } : {}),
+      });
+
+      expect(labelsOf(attributed.survivors)).toEqual([
+        "pre-existing",
+        "new-in-this-run",
+      ]);
+      expect(attributed.survivors.map((s) => s.label)).not.toContain("accepted");
+      expect(attributed.notes).toEqual([]);
+    },
+  );
+});
+
+describe("[behavior:#304:B-07] accepted decisions", () => {
+  it("[behavior:#304:B-07] marks an ACCEPT match accepted, and leaves a stale or killed entry alone", () => {
+    const attributed = attributeMutationSurvivors({
+      survivors: [SURVIVOR_1, SURVIVOR_5, SURVIVOR_9],
+      baseline: baselineHolding(SURVIVOR_1, SURVIVOR_5, SURVIVOR_9),
+      decisions: parseMutationDecisions(
+        decisionsText([
+          // Matches both id and file: adjudicated.
+          decision({ id: "1", file: "src/cart.ts", verdict: "ACCEPT" }),
+          // Id matches SURVIVOR_5, file does not. Per-file ids collide across
+          // files, so a bare id match must be corroborated before it resolves
+          // identity (ADR 0065) — this one resolves nothing.
+          decision({ id: "5", file: "src/elsewhere.ts", verdict: "ACCEPT" }),
+          // Matches SURVIVOR_9, but a mutant a human ruled killable and nobody
+          // killed is still an open finding.
+          decision({ id: "9", file: "src/checkout.ts", verdict: "KILL" }),
+        ]),
+      ),
+    });
+
+    expect(labelsOf(attributed.survivors)).toEqual([
+      "accepted",
+      "pre-existing",
+      "pre-existing",
+    ]);
+    // Marked, never suppressed: same length, same order, same detail. The
+    // accepted survivor is still a bullet a reviewer can check against the
+    // decisions file, which is what bounds a stale ACCEPT entry's harm.
+    expect(attributed.survivors).toHaveLength(3);
+    expect(attributed.survivors.map((s) => s.id)).toEqual(["1", "5", "9"]);
+    expect(attributed.survivors[0]).toEqual({ ...SURVIVOR_1, label: "accepted" });
+    expect(attributed.notes).toEqual([]);
+  });
+
+  it("[behavior:#304:B-07] replaces a new-in-this-run label too, not only a pre-existing one", () => {
+    const attributed = attributeMutationSurvivors({
+      survivors: [SURVIVOR_1],
+      baseline: baselineHolding(SURVIVOR_9),
+      decisions: parseMutationDecisions(decisionsText([decision({})])),
+    });
+    expect(labelsOf(attributed.survivors)).toEqual(["accepted"]);
+  });
+});
+
+describe("[behavior:#304:B-08] degradation is graceful and named", () => {
+  const UNUSABLE_DECISIONS: MutationDecisionsRead[] = [
+    { status: "UNREADABLE", detail: "EISDIR" },
+    { status: "MALFORMED", detail: "decisions file must declare version 1" },
+  ];
+  const UNUSABLE_BASELINES: MutationBaselineRead[] = [
+    { status: "UNREADABLE", detail: "EISDIR" },
+    { status: "MALFORMED", detail: "report must hold a files object" },
+  ];
+
+  it.each(UNUSABLE_DECISIONS.map((read) => [read.status, read] as const))(
+    "[behavior:#304:B-08] states DECISIONS_UNUSABLE and keeps every baseline label for a %s decisions file",
+    (_status, decisions: MutationDecisionsRead) => {
+      const attributed = attributeMutationSurvivors({
+        survivors: [SURVIVOR_1, SURVIVOR_5],
+        baseline: baselineHolding(SURVIVOR_1),
+        decisions,
+      });
+
+      expect(labelsOf(attributed.survivors)).toEqual([
+        "pre-existing",
+        "new-in-this-run",
+      ]);
+      expect(attributed.notes).toEqual(["DECISIONS_UNUSABLE"]);
+    },
+  );
+
+  it.each(UNUSABLE_BASELINES.map((read) => [read.status, read] as const))(
+    "[behavior:#304:B-08] states BASELINE_UNUSABLE and calls every survivor unattributed for a %s baseline",
+    (_status, baseline: MutationBaselineRead) => {
+      const attributed = attributeMutationSurvivors({
+        survivors: [SURVIVOR_1, SURVIVOR_5],
+        baseline,
+      });
+
+      expect(labelsOf(attributed.survivors)).toEqual([
+        "unattributed",
+        "unattributed",
+      ]);
+      expect(attributed.notes).toEqual(["BASELINE_UNUSABLE"]);
+    },
+  );
+
+  it("[behavior:#304:B-08] states both notes when both declared files are unusable", () => {
+    const attributed = attributeMutationSurvivors({
+      survivors: [SURVIVOR_1],
+      baseline: { status: "MALFORMED", detail: "no files object" },
+      decisions: { status: "UNREADABLE", detail: "EISDIR" },
+    });
+    expect(labelsOf(attributed.survivors)).toEqual(["unattributed"]);
+    expect(attributed.notes).toEqual([
+      "BASELINE_UNUSABLE",
+      "DECISIONS_UNUSABLE",
+    ]);
+  });
+
+  it("[behavior:#304:B-08] produces the same labels as an ABSENT input, and only the note differs", () => {
+    // The pair no single input can satisfy: `ABSENT` and `MALFORMED` land on the
+    // same labels, and the note is the only thing that tells them apart.
+    const absent = attributeMutationSurvivors({
+      survivors: [SURVIVOR_1],
+      baseline: { status: "ABSENT" },
+    });
+    const unusable = attributeMutationSurvivors({
+      survivors: [SURVIVOR_1],
+      baseline: { status: "MALFORMED", detail: "no files object" },
+    });
+    expect(labelsOf(absent.survivors)).toEqual(labelsOf(unusable.survivors));
+    expect(absent.notes).toEqual([]);
+    expect(unusable.notes).toEqual(["BASELINE_UNUSABLE"]);
+  });
+});
+
+describe("[behavior:#304:B-09] [behavior:#304:P-03] runMutationStep attributes what the run declared", () => {
+  const CONFIG = {
+    command: "pnpm run mutate",
+    reportPath: "mutation.json",
+    baselinePath: "reports/incremental.json",
+    decisionsPath: "docs/decisions.json",
+  };
+
+  function stepDir(options: {
+    baseline?: string | "directory";
+    decisions?: string | "directory";
+  }): string {
+    const cwd = tempDir();
+    writeFileSync(join(cwd, "mutation.json"), JSON.stringify(REPORT));
+    mkdirSync(join(cwd, "reports"), { recursive: true });
+    mkdirSync(join(cwd, "docs"), { recursive: true });
+    for (const [path, content] of [
+      ["reports/incremental.json", options.baseline],
+      ["docs/decisions.json", options.decisions],
+    ] as const) {
+      if (content === undefined) continue;
+      if (content === "directory") mkdirSync(join(cwd, path));
+      else writeFileSync(join(cwd, path), content);
+    }
+    return cwd;
+  }
+
+  const step = (cwd: string): Promise<MutationStepOutcome | undefined> =>
+    runMutationStep({
+      cwd,
+      fromRef: "main",
+      toRef: "HEAD",
+      config: CONFIG,
+      isAbandoned: () => false,
+      mutationRun: async () => "stryker: done\n",
+      mutationScope: async () => ["src/cart.ts", "src/checkout.ts"],
+    });
+
+  it("[behavior:#304:B-09] reads both declared paths under the step's own cwd and labels the outcome", async () => {
+    const outcome = await step(
+      stepDir({
+        baseline: JSON.stringify(BASELINE_JSON),
+        decisions: decisionsText([decision({ id: "5", file: "src/checkout.ts" })]),
+      }),
+    );
+
+    // One producer of labels: the step reads, attributes once, and hands the
+    // labels to the event stream and the run-state record unchanged.
+    expect(outcome).toEqual({
+      status: "MUTATION_REPORTED",
+      survivors: [
+        { ...SURVIVOR_1, label: "pre-existing" },
+        { ...SURVIVOR_5, label: "accepted" },
+      ],
+    });
+  });
+
+  it("[behavior:#304:B-09] passes an unusable file's read result straight through as a note", async () => {
+    const outcome = await step(
+      stepDir({ baseline: "{ not json", decisions: "directory" }),
+    );
+
+    expect(outcome).toEqual({
+      status: "MUTATION_REPORTED",
+      survivors: [
+        { ...SURVIVOR_1, label: "unattributed" },
+        { ...SURVIVOR_5, label: "unattributed" },
+      ],
+      attributionNotes: ["BASELINE_UNUSABLE", "DECISIONS_UNUSABLE"],
+    });
+  });
+
+  it("[behavior:#304:B-09] takes no new argument, and reads the paths after the command exited", () => {
+    const source = readFileSync(join("src", "mutation-report.ts"), "utf-8");
+    // No second producer and no new seam: the paths come off the existing
+    // `config`, so nothing was added to `RunMutationStepArgs`.
+    const args = source.slice(
+      source.indexOf("interface RunMutationStepArgs"),
+      source.indexOf("export async function runMutationStep"),
+    );
+    expect(args).not.toContain("baselinePath");
+    expect(args).not.toContain("decisionsPath");
+    expect(source).toContain("attributeStepOutcome(args.cwd, args.config,");
+    expect(source).toContain("config.baselinePath");
+    expect(source).toContain("config.decisionsPath");
+    // And the pre-spawn window is untouched: the attribution reads sit after the
+    // classifier, which is after the awaited command.
+    const checkedAt = source.indexOf("if (args.isAbandoned()) return undefined;");
+    const invokedAt = source.indexOf("started = run(args.config.command");
+    const attributedAt = source.indexOf("return attributeStepOutcome(");
+    expect(source.slice(checkedAt, invokedAt)).not.toContain("await");
+    expect(attributedAt).toBeGreaterThan(invokedAt);
+  });
+
+  it.each([
+    ["an absent baseline and decisions file", {}],
+    [
+      "a malformed baseline",
+      { baseline: "{ nope", decisions: decisionsText([decision({})]) },
+    ],
+    [
+      "an unreadable decisions file",
+      { baseline: JSON.stringify(BASELINE_JSON), decisions: "directory" as const },
+    ],
+    ["both files unusable", { baseline: "[]", decisions: "[]" }],
+  ])(
+    "[behavior:#304:P-03] still reports the step for %s",
+    async (_label, options: Parameters<typeof stepDir>[0]) => {
+      // No baseline or decisions condition may reach MUTATION_NOT_RUN: the
+      // report parsed, so the run has survivors to publish either way.
+      const outcome = await step(stepDir(options));
+      expect(outcome?.status).toBe("MUTATION_REPORTED");
+    },
+  );
+
+  it("[behavior:#304:P-03] adds no member to the MUTATION_NOT_RUN vocabulary", () => {
+    const source = readFileSync(join("src", "mutation-report.ts"), "utf-8");
+    const union = source.slice(
+      source.indexOf("export type MutationNotRunReason ="),
+      source.indexOf("/** The step's whole result vocabulary"),
+    );
+    expect(union.match(/"[A-Z_]+"/g)).toEqual([
+      '"BOUND_REACHED"',
+      '"COMMAND_FAILED"',
+      '"REPORT_UNREADABLE"',
+      '"REPORT_MALFORMED"',
+    ]);
+  });
+});
+
+describe("[behavior:#304:B-10] labels and notes in the one shared report text", () => {
+  it("[behavior:#304:B-10] ends each bullet with that survivor's label and states each degradation once", () => {
+    expect(
+      formatMutationReportLines({
+        status: "MUTATION_REPORTED",
+        survivors: [
+          { ...SURVIVOR_1, label: "new-in-this-run" },
+          { ...SURVIVOR_5, label: "pre-existing" },
+          { ...SURVIVOR_9, label: "accepted" },
+          {
+            ...SURVIVOR_9,
+            id: "10",
+            label: "unattributed",
+          },
+        ],
+        attributionNotes: ["DECISIONS_UNUSABLE"],
+      }),
+    ).toEqual([
+      // Every existing part of the bullet is intact — id, path, position,
+      // mutator — with the label appended, so nothing a reviewer already read
+      // moved.
+      "- `1` src/cart.ts:1:36 — ArithmeticOperator — new-in-this-run",
+      "- `5` src/checkout.ts:1:20 — StringLiteral — pre-existing",
+      "- `9` src/checkout.ts:7:2 — EqualityOperator — accepted",
+      "- `10` src/checkout.ts:7:2 — EqualityOperator — unattributed",
+      "- Attribution degraded: `DECISIONS_UNUSABLE` — the declared decisions " +
+        "file was there but could not be read or parsed, so no survivor above " +
+        "is marked `accepted`. Nothing was gated on this (ADR 0063).",
+    ]);
+  });
+
+  it("[behavior:#304:B-10] states a degradation even when nothing survived", () => {
+    const lines = formatMutationReportLines({
+      status: "MUTATION_REPORTED",
+      survivors: [],
+      attributionNotes: ["BASELINE_UNUSABLE"],
+    });
+    expect(lines[0]).toBe("- No surviving mutants in the changed source files.");
+    expect(lines[1]).toContain("BASELINE_UNUSABLE");
+    expect(lines[1]).toContain("ADR 0063");
+    expect(lines).toHaveLength(2);
+  });
+
+  it("[behavior:#304:B-10] is still the one formatter both consumers call", () => {
+    // No per-consumer branch: both call sites pass their report through this
+    // function, so the labels and the degradation line cannot differ between
+    // `run-summary.md` and the draft PR body.
+    for (const name of ["src/logger.ts", "src/ship-gate.ts"]) {
+      const consumer = readFileSync(name, "utf-8");
+      expect(consumer).toContain("formatMutationReportLines(");
+      expect(consumer).not.toMatch(/new-in-this-run|pre-existing|Attribution degraded/);
+    }
   });
 });
 
