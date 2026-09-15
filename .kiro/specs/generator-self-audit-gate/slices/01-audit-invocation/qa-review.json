@@ -1,0 +1,34 @@
+{
+  "version": 2,
+  "verdict": "PASS",
+  "failureClass": "NONE",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-01",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-11"],
+      "summary": "ADR 0069's Consequences section states that an AUDIT_CHANGED verdict is recorded, but this slice records only AUDIT_UNCHANGED, so the durable decision record describes behavior the shipped tree does not have.",
+      "evidence": "docs/adr/0069-bounded-generator-self-audit-before-qa-dispatch.md:78-82 reads \"until it exists an `AUDIT_CHANGED` verdict is recorded and changes nothing downstream\", and :86-89 reads \"the persisted outcome carries the candidate tree the audit was handed and the tree it left behind\". src/self-audit.ts:190-196 guards the write with `if (classification.verdict === \"AUDIT_UNCHANGED\")`, and src/self-audit.test.ts:229-231 asserts the opposite of the ADR sentence: after an AUDIT_CHANGED run, `expect(selfAuditsFor(loadRunState(stateRoot, PRD_SLUG), GH_ISSUE)).toEqual([])`. Probe: `pnpm vitest run src/self-audit.test.ts` — 8 passed, including \"reports AUDIT_CHANGED when the audit rewrote the tree\", which passes precisely because nothing is persisted.",
+      "expected": "contract.md Non-goals: \"Recording `AUDIT_CHANGED` or `AUDIT_NOT_RUN` in run state. This slice lands the persisted shape covering all three verdicts so neither sibling slice needs a second version bump, but only `AUDIT_UNCHANGED` is written here.\" The contract's own scope lock words the changed-tree case as \"an `AUDIT_CHANGED` verdict is classified and returned but changes nothing downstream\" — classified and returned, not recorded.",
+      "observed": "The ADR asserts as present-tense fact that AUDIT_CHANGED is recorded. On this tree it is classified, returned, and discarded; no run-state entry is written for it. B-11's declared observations (mechanism, swarm-forge provenance, swarm_handoff.sh, the one-invocation bound, ADR structure) are all satisfied, so this is an accuracy defect in the record rather than a missing behavior.",
+      "clearCondition": "ADR 0069's Consequences section describes the changed-tree case in terms that match the shipped stage — that an AUDIT_CHANGED verdict is classified and changes nothing downstream, with recording deferred to the sibling slice — and no sentence in the ADR claims a persisted entry exists for a verdict this slice does not write.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-02",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-10"],
+      "summary": "sanitizeSelfAudits — 50 lines of new load-time validation with a load-bearing whole-list-drops-on-one-malformed-entry rule — has no test, against a run-state convention where every other record sanitizer has one.",
+      "evidence": "src/run-state.ts:1028-1083 adds `sanitizeSelfAudits` with five reject branches (non-object container, non-array value, non-object entry, blank/absent candidateTreeId, unknown verdict, blank auditedTreeId) plus a whole-key discard on `dropped || entries.length === 0`. Neither test added for B-10/P-03 (src/run-state.test.ts:1185, :1220) feeds it a malformed entry: both write well-formed records through `recordSelfAuditOutcome`. The convention it departs from: src/run-state.test.ts:205 (collidingPrefixes), :275 (locators, #91 B-06), :498 (resume entries) and :951 (appliedWaivers, #193 B-13) each pin the malformed-record degradation. Probe: `pnpm vitest run src/run-state.test.ts` — 5 files, 210 tests, exit 0; deleting the verdict check from sanitizeSelfAudits would keep every one of them green.",
+      "expected": "acceptance-manifest.json B-10 lists \"sanitization in adaptLoadedState\" among the shipped members, and CLAUDE.md's \"Where a new assertion goes\" ranks a unit test as the first-choice home for a new assertion — which is exactly what this branch set is.",
+      "observed": "The sanitizer's behavior is unobserved. A regression that widened it (accepting an unknown verdict string, or keeping a partially-valid list) or narrowed it (rejecting a well-formed entry) would not fail any test in the suite. Mitigating: the sanitizer mirrors `sanitizeQualityStages` (src/run-state.ts:847) structurally and line for line, and that precedent is also untested, so this is convention-consistent rather than novel; and the contract's test plan does not name a sanitization scenario.",
+      "clearCondition": "A src/run-state.test.ts case loads a state whose selfAudits carries a malformed entry — an unknown verdict string or a blank candidateTreeId — and asserts the resulting degradation, so the sanitizer's reject branches fail a test when they change.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    }
+  ]
+}
