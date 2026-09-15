@@ -1,0 +1,47 @@
+{
+  "version": 2,
+  "verdict": "PASS",
+  "failureClass": "NONE",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-01",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-02"],
+      "summary": "The [behavior:#300:B-02] distinct-path requirement now has a test that fails when the audited checkpoint reuses the round's own checkpointDir.",
+      "evidence": "The fabricated ROUND_CHECKPOINT_DIR constant is gone from src/self-audit.test.ts (commit d4631b9); the unit assertion is now `expect(h.createCheckpoint.mock.calls[0]![0]).toBe(h.input.checkpointDir)` (src/self-audit.test.ts:500), and distinctness is asserted at the only call site by a new `[behavior:#300:B-02] mints the audited checkpoint at a path of its own` scan (src/orchestrator.test.ts:8389-8410). Probe: I rewrote src/orchestrator.ts:6502 from `checkpointDir: `${checkpointDir}-audited`,` to `checkpointDir: checkpointDir,` and ran `npx vitest run src/orchestrator.test.ts -t \"mints the audited checkpoint at a path of its own\"` — it FAILED: \"AssertionError: checkpointDir: expected '' not to be '' // Object.is equality\" at src/orchestrator.test.ts:8409. Reverted; `git status --porcelain src/ docs/` is empty and `pnpm run typecheck` passes. Unmodified, the whole `the audited-tree gate re-run call site` describe passes (10 passed).",
+      "expected": "Contract B-02: the audited checkpoint is minted \"into a path distinct from the round's `checkpointDir`\", and a candidate that reuses it must fail a test.",
+      "observed": "The hub mints at `${checkpointDir}-audited` (src/orchestrator.ts:6502) and the call-site scan fails on the exact reuse regression, verified by probe.",
+      "clearCondition": "A test fails when the audited checkpoint path equals the round's own checkpoint path.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-02",
+      "severity": "ADVISORY",
+      "behaviorIds": ["P-01"],
+      "summary": "The inert createCheckpoint spy has been dropped from the [behavior:#300:P-01] test in favour of an assertion that can fail.",
+      "evidence": "src/self-audit.test.ts:249-290: the `createCheckpoint` spy and `expect(createCheckpoint).toHaveBeenCalledTimes(0)` are removed; the test now asserts `expect(graded).toEqual({ ...released, baseGate: releasedBaseGate })` and `expect(graded.baseGate).toBe(releasedBaseGate)` through `resolveGradedCandidate`, a seam the stage's consumers actually reach. The non-minting claim is pinned where it can fail — the B-05 scan on the single `verifyAuditedTree(` call site behind its `AUDIT_CHANGED` guard, which passes. `npx vitest run src/self-audit.test.ts`: 16 passed, exit 0.",
+      "expected": "The P-01 test either drops the inert spy in favour of the assertion that carries the claim, or asserts non-minting through a reachable seam.",
+      "observed": "The spy is gone and the surviving assertions are reachable and falsifiable.",
+      "clearCondition": "The P-01 test either drops the inert spy in favour of the assertion that carries the claim, or asserts non-minting through a seam the stage can actually reach.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-03",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-08"],
+      "summary": "The [behavior:#300:B-08] single-element loop is gone; the released-pair case is asserted straight-line.",
+      "evidence": "src/self-audit.test.ts:611-628: `for (const value of [undefined])` is replaced by one straight-line `resolveGradedCandidate({ released, releasedBaseGate, audited: undefined })` with its three assertions, plus a second genuinely different input — the omitted member the hub's non-changed paths pass (src/orchestrator.ts:6612) — compared against it. `npx vitest run src/self-audit.test.ts`: 16 passed.",
+      "expected": "The B-08 released-pair case is asserted without a single-element loop, or the loop iterates values that actually differ.",
+      "observed": "No loop remains; the two asserted inputs (explicit `undefined` and omitted) genuinely differ.",
+      "clearCondition": "The B-08 released-pair case is asserted without a single-element loop, or the loop iterates values that actually differ.",
+      "state": "RESOLVED",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    }
+  ]
+}
