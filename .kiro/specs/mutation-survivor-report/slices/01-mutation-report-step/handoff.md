@@ -55,6 +55,18 @@ New migration files: 0
   PR — and rethrows the guardian's own reason, including when the termination
   itself fails. A failed quiesce is the worktree teardown's report to make;
   substituting it would lose why the run stopped.
+- The ship gate has no `gate-outcome` event of its own, so B-11/B-16's "the gate
+  ids are identical with the flag set and absent" is pinned as a projection over
+  the teed `events.jsonl`: every payload carrying a `gateId`/`gateIds`, plus the
+  `sanity` phase entries, which are this gate's whole gate-result surface. The
+  two runs are compared set-for-set with `toEqual` rather than by asserting the
+  absence of a named id, so any future gate the step grows — under any id — moves
+  the projection and fails.
+- The rejoin origin is pinned by a clock the *guardians* move rather than by a
+  read-counting clock. `mutationNow` is read only twice per run (the origin, then
+  the helper's deadline arithmetic), so a per-read clock returns the same first
+  value wherever the capture sits; a clock the guardian invocations advance makes
+  the pre-fork and post-fork instants two different numbers.
 
 ## Gotchas / learnings
 
@@ -91,3 +103,20 @@ New migration files: 0
 - Do not append large TypeScript blocks to a file with a bash heredoc here —
   backticks and apostrophes in the content break the outer quoting. Write the
   content to a file with the editor tools instead.
+- A control character written into a `.ts` file as a raw byte rather than as a
+  JavaScript escape makes git classify the whole file as **binary**: no `git diff`,
+  no `git grep` match, no `git blame`, no PR line-by-line review — silently, since
+  the tests still pass. Round 2 shipped `src/mutation-report.test.ts` that way with
+  a single raw NUL. Spell it as an escape — backslash, `u`, then four zeros —
+  which is the identical runtime string, and after adding any odd byte check that
+  `git diff --stat` reports a line count rather than `Bin`. Beware
+  that a `\x00` typed into a shell heredoc or `printf` can itself land as a raw
+  byte; `grep -c $'\x00'` is no help either — the pattern degenerates to empty and
+  matches every line.
+- Read a test's `filter` predicates before trusting them. Round 2's
+  ARCHITECTURE.md cap assertion filtered with `(line) => line !== "" || true`,
+  which is unconditionally true and drops nothing; the cap still held, but the
+  predicate said the count excluded blank lines when it did not. `wc -l` counting
+  is `lines.at(-1) === "" ? lines.length - 1 : lines.length` over
+  `split("\n")` — a trailing newline closes the last line rather than opening an
+  empty one.
