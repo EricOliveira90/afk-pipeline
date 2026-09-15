@@ -120,6 +120,15 @@ export interface PipelineRuntimeOptions {
   renegotiateStale?: string;
   /** Why the pair named by `renegotiateStale` is stale; trimmed, else verbatim. */
   recoveryReason?: string;
+  /**
+   * Slice numbers or GH issue ids the renegotiation named by `renegotiateStale`
+   * should additionally admit into the run's scope of record (`--extend-scope`,
+   * #278 B-01). Selectors as typed and in the order typed — resolving one to a
+   * `{number, ghIssue}` identity needs the run's persisted scope and `issues.md`,
+   * which `src/preserve-work-recovery.ts` owns. Absent on every run that asked
+   * for no additions.
+   */
+  extendScope?: string[];
 }
 
 /**
@@ -139,6 +148,7 @@ export interface StaleRenegotiationRequest {
 
 const RENEGOTIATE_STALE_FLAG = "--renegotiate-stale";
 const RECOVERY_REASON_FLAG = "--recovery-reason";
+const EXTEND_SCOPE_FLAG = "--extend-scope";
 
 /** How many times a flag token appears in the whole argument list. */
 function countFlagOccurrences(args: readonly string[], flag: string): number {
@@ -220,6 +230,79 @@ export function parseStaleRenegotiationRequest(
   }
 
   return { selector, reason };
+}
+
+/**
+ * Read the scope additions a recovery attempt should admit, or `undefined` when
+ * the run asked for none (#278 B-01).
+ *
+ * Exported for the reason {@link parseStaleRenegotiationRequest} is: the shared
+ * parser still throws #277's #335 guard for every well-formed recovery request,
+ * so the accepted case has no observable return there. Here it does.
+ *
+ * Digits-only is the whole selector language, exactly as `--force-restart` and
+ * `--renegotiate-stale` have it: a part is either a canonical slice number (zero
+ * padding preserved as typed) or a bare GH issue id, because `issues-parser.ts`
+ * stores `ghIssue` with the `#` already stripped. `#278` and every other
+ * non-digit spelling is refused rather than normalized — a parser that quietly
+ * accepted two spellings of one identity would make the duplicate check below a
+ * lie. Which of the two an accepted part names is not decidable here and is not
+ * decided here; `src/preserve-work-recovery.ts` corroborates it against
+ * `issues.md` and the persisted scope.
+ *
+ * One occurrence only, following {@link parseStaleRenegotiationRequest}'s
+ * discipline rather than `parseSliceIdList`'s repeatable form: the additions are
+ * one set belonging to one recovery attempt, so a second occurrence is a
+ * mistake about that set rather than more of it.
+ */
+export function parseScopeExtensionSelectors(
+  args: readonly string[],
+): string[] | undefined {
+  if (countFlagOccurrences(args, EXTEND_SCOPE_FLAG) > 1) {
+    throw new Error(
+      `${EXTEND_SCOPE_FLAG} was supplied more than once; a recovery attempt admits one set of additions`,
+    );
+  }
+
+  // `optionValue` before the paired-presence checks, matching
+  // `parseStaleRenegotiationRequest`: a flag with nothing after it is a mistake
+  // about this flag, whatever else the argument list is missing.
+  const raw = optionValue(args, EXTEND_SCOPE_FLAG);
+  if (raw === undefined) return undefined;
+
+  // Additions are a rider on a recovery request, never a request of their own:
+  // there is no attempt to attach them to and no reason on record without both
+  // flags. Two messages rather than one, because a missing target and a missing
+  // reason are different mistakes — the same split #277 B-02 draws.
+  if (!args.includes(RENEGOTIATE_STALE_FLAG)) {
+    throw new Error(
+      `${EXTEND_SCOPE_FLAG} requires ${RENEGOTIATE_STALE_FLAG} <slice|ghIssue> naming the renegotiation to extend`,
+    );
+  }
+  if (!args.includes(RECOVERY_REASON_FLAG)) {
+    throw new Error(
+      `${EXTEND_SCOPE_FLAG} requires ${RECOVERY_REASON_FLAG} <text> recording why the accepted pair is stale`,
+    );
+  }
+
+  const selectors: string[] = [];
+  for (const part of raw.split(",").map((value) => value.trim())) {
+    if (!/^\d+$/.test(part)) {
+      throw new Error(
+        `${EXTEND_SCOPE_FLAG} must be a comma-separated list of slice numbers or GH issue ids`,
+      );
+    }
+    // Literal repetition only. Naming one identity by number in one part and by
+    // GH issue id in another is undetectable without `issues.md`, and the
+    // resolver refuses that case with `extension-identity-conflict`.
+    if (selectors.includes(part)) {
+      throw new Error(
+        `${EXTEND_SCOPE_FLAG} names ${part} more than once; list each addition exactly once`,
+      );
+    }
+    selectors.push(part);
+  }
+  return selectors;
 }
 
 function optionValue(args: readonly string[], flag: string): string | undefined {
@@ -390,6 +473,10 @@ export function parsePipelineRuntimeOptions(
   // `undefined`, and the members must survive as the shape a run carries.
   const renegotiateStale: string | undefined = staleRenegotiation?.selector;
   const recoveryReason: string | undefined = staleRenegotiation?.reason;
+  // Also before the guard, and for the same reason (#278 B-01): the additions
+  // ride on the request the guard refuses, so validating them after it would
+  // make every `--extend-scope` mistake unreportable until #277's guard goes.
+  const extendScope = parseScopeExtensionSelectors(args);
   if (staleRenegotiation !== undefined) {
     throw new Error(
       `${RENEGOTIATE_STALE_FLAG} is refused until #335 lands: verified rollback (#333) and ` +
@@ -418,6 +505,7 @@ export function parsePipelineRuntimeOptions(
     // present so the shape a run carries does not change when that guard goes.
     renegotiateStale,
     recoveryReason,
+    extendScope,
     sharedPreview: verifyMigrationCommand && applyMigrationCommand
       ? {
           verifyMigrationCommand,
