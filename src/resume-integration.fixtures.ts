@@ -27,6 +27,7 @@ import {
   type ContractFindingLineage,
 } from "./contract-convergence.js";
 import { recordExactStageCheckpoint } from "./exact-stage-resume.js";
+import { RECOVERY_FINGERPRINT_ABSENT } from "./run-state.js";
 import { validExplorerContext } from "./explorer-test-fixtures.js";
 import type { Slice } from "./issues-parser.js";
 import { writeContractReview, writeQAReview } from "./test-support.js";
@@ -336,15 +337,26 @@ export function allRunLogs(repo: string, loggerSlug: string): string {
  * counters, a second slice's outcome, migration claims, guardian history — plus
  * the committed `PENDING` lineage event and the two live negotiation controls.
  *
- * Written rather than run: no pipeline is spawned, because every fact here is
- * reachable by writing it, and the assertion this fixture serves is "execution
- * changed only two of these" (`AGENTS.md` assertion ladder, #332 B-06).
+ * Written rather than run: building the fixture spawns no pipeline, because every
+ * fact here is reachable by writing it, and the assertion it was built for is
+ * "execution changed only two of these" (`AGENTS.md` assertion ladder, #332
+ * B-06). #334 hands the same fixture to one real `runPipeline` — the claim there
+ * is dispatch *order* at the orchestrator seam, which no written state can show —
+ * and that run exits before any agent invocation, so it costs no agent round.
  */
 export interface RecoveryExecutionFixture {
   repo: string;
   slug: string;
-  /** Run slug — the state file's key. The bare PRD slug for the stub provider. */
+  /**
+   * Run slug — the state file's key. The bare PRD slug by default, which is what
+   * a direct call to the recovery API passes; a `runPipeline` caller passes the
+   * provider-qualified slug its journal uses instead (ADR 0002).
+   */
   runSlug: string;
+  /** Absolute PRD directory, as `runPipeline` expects it. */
+  prdDir: string;
+  /** Repo-relative specs directory, as `runPipeline` expects it. */
+  specsDir: string;
   ghIssue: string;
   /** A second in-scope slice, whose checkpoint and lineage must survive. */
   otherGhIssue: string;
@@ -448,9 +460,18 @@ function writeRecoveryFiles(root: string, files: Record<string, string>): void {
 }
 
 export function makeRecoveryExecutionFixture(
-  opts: { slug?: string } = {},
+  opts: {
+    slug?: string;
+    /**
+     * Which run-state file to write. Defaults to the bare PRD slug; a
+     * `runPipeline` caller passes the provider-qualified journal slug, because
+     * that is the only file the pipeline itself reads (#334 B-04).
+     */
+    runSlug?: string;
+  } = {},
 ): RecoveryExecutionFixture {
   const slug = opts.slug ?? "recovery-execution";
+  const runSlug = opts.runSlug ?? slug;
   const repo = makeRepo();
   const { prdDir, specsDir } = writePrdFixture(repo, slug);
   const slice = makeSlice();
@@ -477,14 +498,14 @@ export function makeRecoveryExecutionFixture(
   const digest = (text: string): string =>
     createHash("sha256").update(text, "utf-8").digest("hex");
 
-  const statePath = join(repo, ".afk", "state", `${slug}.json`);
+  const statePath = join(repo, ".afk", "state", `${runSlug}.json`);
   mkdirSync(join(repo, ".afk", "state"), { recursive: true });
   writeFileSync(
     statePath,
     `${JSON.stringify(
       {
         version: 7,
-        prdSlug: slug,
+        prdSlug: runSlug,
         featureBranch,
         specsDir,
         scope: {
@@ -593,7 +614,7 @@ export function makeRecoveryExecutionFixture(
     [otherGhIssue, "d9".repeat(20)],
   ] as const) {
     recordExactStageCheckpoint(
-      { repoRoot: repo, prdSlug: slug, ghIssue },
+      { repoRoot: repo, prdSlug: runSlug, ghIssue },
       {
         version: 1,
         completedStage: "deterministic-qa",
@@ -604,18 +625,20 @@ export function makeRecoveryExecutionFixture(
     );
   }
   saveContractFindingLineage(
-    { repoRoot: repo, runSlug: slug, ghIssue: slice.ghIssue },
+    { repoRoot: repo, runSlug, ghIssue: slice.ghIssue },
     recoveryLineageFixture("F-01"),
   );
   saveContractFindingLineage(
-    { repoRoot: repo, runSlug: slug, ghIssue: otherGhIssue },
+    { repoRoot: repo, runSlug, ghIssue: otherGhIssue },
     recoveryLineageFixture("F-02"),
   );
 
   return {
     repo,
     slug,
-    runSlug: slug,
+    runSlug,
+    prdDir,
+    specsDir,
     ghIssue: slice.ghIssue,
     otherGhIssue,
     sliceDir,
@@ -625,6 +648,153 @@ export function makeRecoveryExecutionFixture(
     negotiationFiles: { ...RECOVERY_NEGOTIATION_BYTES },
     preservedArtifacts: { ...RECOVERY_PRESERVED_ARTIFACTS },
   };
+}
+
+/** What a reopened negotiation leaves where a fixture's accepted pair was. */
+export const RECOVERY_REOPENED_CONTRACT = [
+  "# Slice Contract — reopened for renegotiation",
+  "",
+  "**Status:** NEGOTIATING",
+  "",
+].join("\n");
+
+/** One unresolved target planted beside the fixture's own, with its expectation. */
+export interface PlantedRecoveryTarget {
+  ghIssue: string;
+  attemptId: string;
+  /** Absolute artifact directory a restore writes to, or would have. */
+  sliceDir: string;
+  /** Absolute snapshot directory the recorded locator resolves to. */
+  snapshotDir: string;
+  /** The locator as recorded in the lineage event. */
+  snapshotPath: string;
+  /** The state launch-time reconciliation is expected to append, if any. */
+  appends: "ROLLED_BACK" | "ROLLBACK_FAILED" | "none";
+}
+
+/**
+ * Plant one unresolved target per reported outcome family (#334 B-05).
+ *
+ * The fixture's own target is included and returned first: its snapshot is intact
+ * and its live pair is reopened here, so a launch that reconciles it has
+ * something to put back. The other three are written directly into the same PRD
+ * layout — a snapshot whose `contract.md` is gone (so the restore cannot verify),
+ * the same obstacle behind a trailing `ROLLBACK_FAILED` (so the retry appends
+ * nothing), and a two-segment locator that never resolves at all.
+ *
+ * Each event is cloned from the fixture's own so the persisted shape stays one
+ * fact: a field added to the lineage event reaches these targets automatically.
+ */
+export function plantUnresolvedRecoveryTargets(
+  fixture: RecoveryExecutionFixture,
+): PlantedRecoveryTarget[] {
+  const document = JSON.parse(readFileSync(fixture.statePath, "utf-8")) as {
+    recoveryLineage: Record<string, Record<string, unknown>[]>;
+  };
+  const template = document.recoveryLineage[fixture.ghIssue]![0]!;
+  const digest = (text: string): string =>
+    createHash("sha256").update(text, "utf-8").digest("hex");
+  const specs = fixture.specsDir.split("\\").join("/");
+  const planted: PlantedRecoveryTarget[] = [];
+
+  const plant = (opts: {
+    ghIssue: string;
+    attemptId: string;
+    dirName: string;
+    locator?: string;
+    breakSnapshot?: boolean;
+    heldAlready?: boolean;
+    appends: PlantedRecoveryTarget["appends"];
+  }): void => {
+    const sliceDir = join(fixture.prdDir, "slices", opts.dirName);
+    const snapshotDir = join(sliceDir, "recovery-snapshots", opts.attemptId);
+    writeRecoveryFiles(sliceDir, {
+      "contract.md": RECOVERY_REOPENED_CONTRACT,
+      "acceptance-manifest.json": '{"version":2,"behaviors":[]}\n',
+    });
+    writeRecoveryFiles(snapshotDir, {
+      "contract.md": RECOVERY_LOCKED_CONTRACT,
+      "acceptance-manifest.json": RECOVERY_ACCEPTED_MANIFEST,
+    });
+    if (opts.breakSnapshot === true) rmSync(join(snapshotDir, "contract.md"));
+    const snapshotPath =
+      opts.locator ??
+      `${specs}/slices/${opts.dirName}/recovery-snapshots/${opts.attemptId}`;
+    const pending = {
+      ...template,
+      attemptId: opts.attemptId,
+      state: "PENDING",
+      target: { number: opts.dirName.split("-")[0], ghIssue: opts.ghIssue },
+      snapshotPath,
+    };
+    document.recoveryLineage[opts.ghIssue] =
+      opts.heldAlready === true
+        ? [
+            pending,
+            {
+              ...pending,
+              state: "ROLLBACK_FAILED",
+              rollbackError: "an earlier launch could not read the snapshot",
+              observedContractFingerprint: digest(RECOVERY_REOPENED_CONTRACT),
+              observedManifestFingerprint: RECOVERY_FINGERPRINT_ABSENT,
+            },
+          ]
+        : [pending];
+    planted.push({
+      ghIssue: opts.ghIssue,
+      attemptId: opts.attemptId,
+      sliceDir,
+      snapshotDir,
+      snapshotPath,
+      appends: opts.appends,
+    });
+  };
+
+  // The fixture's own target, its live pair reopened so the restore is visible.
+  writeRecoveryFiles(fixture.sliceDir, {
+    "contract.md": RECOVERY_REOPENED_CONTRACT,
+  });
+  planted.push({
+    ghIssue: fixture.ghIssue,
+    attemptId: fixture.attemptId,
+    sliceDir: fixture.sliceDir,
+    snapshotDir: join(
+      fixture.sliceDir,
+      "recovery-snapshots",
+      fixture.attemptId,
+    ),
+    snapshotPath: String(template.snapshotPath),
+    appends: "ROLLED_BACK",
+  });
+  plant({
+    ghIssue: "5002",
+    attemptId: "attempt-unverifiable",
+    dirName: "02-unverifiable",
+    breakSnapshot: true,
+    appends: "ROLLBACK_FAILED",
+  });
+  plant({
+    ghIssue: "5003",
+    attemptId: "attempt-held",
+    dirName: "03-held",
+    breakSnapshot: true,
+    heldAlready: true,
+    appends: "none",
+  });
+  plant({
+    ghIssue: "5004",
+    attemptId: "attempt-unusable",
+    dirName: "04-unusable",
+    locator: "recovery-snapshots/attempt-unusable",
+    appends: "none",
+  });
+
+  writeFileSync(
+    fixture.statePath,
+    `${JSON.stringify(document, null, 2)}\n`,
+    "utf-8",
+  );
+  return planted;
 }
 
 /**

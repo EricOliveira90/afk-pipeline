@@ -44,6 +44,7 @@ import {
   makeRecoveryExecutionFixture,
   makeRepo,
   makeSlice,
+  plantUnresolvedRecoveryTargets,
   sliceLogLines,
   sliceNumberFromCwd,
   writePrdFixture,
@@ -300,6 +301,22 @@ describe("retried slice resume (spec #33)", () => {
       } catch {
         // best effort
       }
+    });
+
+    /**
+     * The unreconciled case, on a fixture that already ran two pipelines and
+     * carries no recovery lineage: an `it` on a shared result rather than a
+     * spawn, which is the top of the `AGENTS.md` assertion ladder (#334 P-03).
+     */
+    it("[behavior:#334:P-03] adds no reconciliation line to a run with no recovery lineage", () => {
+      const state = JSON.parse(readFileSync(statePath, "utf-8"));
+      expect(state.recoveryLineage).toBeUndefined();
+      const logs = allRunLogs(repo, `${slug}-stub`);
+
+      expect(logs).not.toMatch(/was left unresolved on/);
+      expect(logs).not.toMatch(/Launch stopped after reconciling/);
+      // Both runs went on to do their work, so nothing refused before dispatch.
+      expect(logs).toMatch(/Slice #4001/);
     });
 
     it("leaves every dead slice in ERROR after the first run", () => {
@@ -1148,6 +1165,112 @@ describe("retried slice resume (spec #33)", () => {
     ).toContain("**Status:** LOCKED");
   }, 240_000);
 
+});
+
+/**
+ * Launch-time reconciliation at the orchestrator seam (#334 B-04/B-05).
+ *
+ * The one spawned `runPipeline` this slice adds, and the reason is the claim:
+ * reconciliation happens *before* run-scope resolution, before the resume
+ * decision and before any dispatch. Ordering at that seam is not visible in any
+ * written state, and no existing spawned scenario carries unresolved lineage. It
+ * costs no agent round — the run exits before the first provider invocation, and
+ * the assertions below prove that rather than assume it.
+ *
+ * All four reported outcome families are planted in the one run, so the operator
+ * lines B-05 fixes are read off a real `run.log` instead of a formatter call.
+ */
+describe("a launch that finds unresolved recovery attempts", () => {
+  it("[behavior:#334:B-04] [behavior:#334:B-05] reconciles first, dispatches nothing and stops unsuccessfully", async () => {
+    const fixture = makeRecoveryExecutionFixture({
+      slug: "recovery-launch",
+      runSlug: "recovery-launch-stub",
+    });
+    const planted = plantUnresolvedRecoveryTargets(fixture);
+    const before = JSON.parse(readFileSync(fixture.statePath, "utf-8"));
+    expect(before.resume[fixture.ghIssue].attempts).toBe(2);
+    const records: PromptRecord[] = [];
+
+    const result = await runPipeline({
+      repoRoot: fixture.repo,
+      prdSlug: fixture.slug,
+      prdDir: fixture.prdDir,
+      specsDir: fixture.specsDir,
+      dag: buildDAG([makeSlice()]),
+      provider: buildProvider({
+        records,
+        // Reached only if the launch dispatched, which is what `records` proves
+        // it did not; failing loudly is better than passing quietly here.
+        generator: () => {
+          throw new Error("the launch dispatched a generator after reconciling");
+        },
+      }),
+    });
+
+    // Stopped, with a reason naming every reconciled target.
+    expect(result.success).toBe(false);
+    expect(result.failureReason).toMatch(/Launch stopped after reconciling 4/);
+    for (const target of planted) {
+      expect(result.failureReason).toContain(`#${target.ghIssue}`);
+    }
+    expect(typeof result.summary).toBe("string");
+    expect(typeof result.consoleSummary).toBe("string");
+
+    // Nothing was dispatched: no provider invocation, no worktree, no slice
+    // branch — so the call cannot have happened after the resume decision.
+    expect(records).toEqual([]);
+    const worktrees = join(fixture.repo, ".afk", "worktrees");
+    expect(existsSync(worktrees) ? readdirSync(worktrees) : []).toEqual([]);
+    expect(git(fixture.repo, ["branch", "--list"])).not.toMatch(/slice-01/);
+
+    // One operator line per reported target, each naming its own retry.
+    const logs = allRunLogs(fixture.repo, "recovery-launch-stub");
+    const linesFor = (attemptId: string): string[] =>
+      logs
+        .split(/\r?\n/)
+        .filter((line) => line.includes(`Recovery attempt ${attemptId} for #`));
+    for (const target of planted) {
+      const lines = linesFor(target.attemptId);
+      expect(lines).toHaveLength(1);
+      const line = lines[0]!;
+      if (target.appends === "ROLLED_BACK") {
+        expect(line).toContain("appended ROLLED_BACK");
+        expect(line).toContain("relaunch the same command");
+      } else if (target.appends === "ROLLBACK_FAILED") {
+        expect(line).toContain("ROLLBACK_FAILED was appended");
+        expect(line).toContain(`repair the snapshot directory ${target.snapshotDir}`);
+      } else {
+        expect(line).toContain("nothing was appended");
+        expect(line).toContain("terminal until #335");
+        expect(line).toContain(fixture.statePath);
+      }
+    }
+
+    const after = JSON.parse(readFileSync(fixture.statePath, "utf-8"));
+    const states = (ghIssue: string): string[] =>
+      (after.recoveryLineage[ghIssue] as Array<{ state: string }>).map(
+        (event) => event.state,
+      );
+    expect(states(fixture.ghIssue)).toEqual(["PENDING", "ROLLED_BACK"]);
+    expect(states("5002")).toEqual(["PENDING", "ROLLBACK_FAILED"]);
+    // The two append-nothing targets are byte-for-byte what they were.
+    expect(after.recoveryLineage["5003"]).toEqual(before.recoveryLineage["5003"]);
+    expect(after.recoveryLineage["5004"]).toEqual(before.recoveryLineage["5004"]);
+    // The verified restore really put the accepted pair back.
+    expect(readFileSync(join(fixture.sliceDir, "contract.md"), "utf-8")).toContain(
+      "**Status:** LOCKED",
+    );
+    // The rejected two-segment locator wrote nothing at the repository root.
+    expect(existsSync(join(fixture.repo, "contract.md"))).toBe(false);
+    expect(existsSync(join(fixture.repo, "acceptance-manifest.json"))).toBe(false);
+
+    // No run scope was resolved and no resume counter moved: the call is ahead
+    // of both, and returning stopped the run before either could run.
+    expect(after.scope).toEqual(before.scope);
+    expect(after.slices).toEqual(before.slices);
+    expect(after.resume).toEqual(before.resume);
+    expect(after.resume[fixture.ghIssue].attempts).toBe(2);
+  }, 120_000);
 });
 
 /**
