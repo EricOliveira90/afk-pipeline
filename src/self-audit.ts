@@ -12,11 +12,21 @@
  * Dispatch travels through an injected callback, like `src/cleaner-stage.ts`'s
  * `ctx.dispatch`, so the whole stage is exercised without a provider.
  */
+import { join, relative } from "node:path";
+import type { CandidateGatePhaseResult } from "./candidate-gate-phase.js";
+import { assertGateEvidenceReleasesEvaluation } from "./candidate-gate-phase.js";
 import {
   assembleSelfAuditEnvelope,
   type RoleEnvelopeEvidence,
 } from "./context-envelope.js";
-import { resolveCandidateTreeId } from "./gate-runner.js";
+import {
+  resolveCandidateTreeId,
+  verifyGateEvidence,
+  type GateDeclaration,
+  type GateEvidence,
+  type GateEvidenceArtifact,
+  type GateResult,
+} from "./gate-runner.js";
 import {
   recordSelfAuditOutcome,
   type PersistedSelfAuditVerdict,
@@ -183,15 +193,22 @@ export async function runSelfAuditStage(
   });
   input.log?.(`self-audit: ${classification.verdict} — ${classification.reason}`);
 
-  // Only `AUDIT_UNCHANGED` is recorded here: this slice lands the persisted
-  // shape for all three verdicts so neither sibling slice needs a second
-  // version bump, but the changed-tree path is #300's and the dead-invocation
-  // taxonomy is #301's.
-  if (classification.verdict === "AUDIT_UNCHANGED") {
+  // Both *graded* verdicts are recorded here (#300 B-01): the verdict is a fact
+  // about the audit, not about whatever the changed tree's gate re-run later
+  // decides, so it is written before this function returns and whatever
+  // `verifyAuditedTree` goes on to conclude. `AUDIT_NOT_RUN` stays unrecorded —
+  // the dead-invocation taxonomy is #301's. No schema change and no version
+  // bump: `PersistedSelfAuditOutcome` already carries both entries as-is, with
+  // `auditedTreeId` the post-audit tree, equal to `candidateTreeId` only on
+  // `AUDIT_UNCHANGED`.
+  if (
+    classification.verdict === "AUDIT_UNCHANGED" ||
+    classification.verdict === "AUDIT_CHANGED"
+  ) {
     recordSelfAuditOutcome(input.repoRoot, input.prdSlug, input.ghIssue, {
       candidateTreeId: releasedTreeId,
       auditedTreeId: classification.treeId,
-      verdict: "AUDIT_UNCHANGED",
+      verdict: classification.verdict,
     });
   }
   return {
@@ -247,4 +264,238 @@ async function dispatchAudit(
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/* ---------------------------------------------------------------------------
+ * The changed-tree path (#300, ADR 0069)
+ *
+ * A tree the audit rewrote has not been through the required cheap gates, so it
+ * is not a candidate anyone may grade yet. What follows re-runs exactly the
+ * gates that released the pre-audit tree on the audited one and, on a pass,
+ * mints the *one* graded-candidate identity every pass-path consumer reads.
+ * Orchestration lives here behind injected callbacks — one call site in the hub
+ * (ARCHITECTURE.md "Hubs — do not grow these") — for the same reason
+ * `runSelfAuditStage` takes an injected dispatch: the whole path is exercised
+ * without a git process, a provider or a spawned pipeline.
+ * ------------------------------------------------------------------------- */
+
+/**
+ * The base-gate evidence an audited gate re-run produces, declared
+ * **structurally** rather than by importing `QABaseGateEvidence` from
+ * `src/orchestrator.ts`: the hub imports this module, so importing its type back
+ * would be a cycle. `pnpm run typecheck` proves the two shapes agree at the
+ * assignment in the hub, which is the check that matters.
+ *
+ * `candidateTreeId` is required here, not optional: an audited authorization
+ * that names no tree would authorize a skip for nothing (ADR 0012).
+ */
+export interface AuditedBaseGateEvidence {
+  evidence: GateEvidence;
+  /** Repo-relative path of the re-run's own verified evidence artifact. */
+  evidenceArtifactId: string;
+  /** The selected subset that actually re-ran — never the full pre-QA set. */
+  declarations: readonly GateDeclaration[];
+  candidateTreeId: string;
+}
+
+/**
+ * The tree QA grades, the commit holding it, and the base-gate evidence that
+ * released it — one value rather than three, because the risk this shape exists
+ * to close is a divergence between consumers and a single value cannot diverge
+ * from itself (#300 settled decision, 2026-09-15).
+ */
+export interface GradedCandidateIdentity<TBaseGate> {
+  treeId: string;
+  commitSha: string;
+  baseGate: TBaseGate;
+}
+
+/** What an injected checkpoint mint hands back; `createCandidateCheckpoint`'s shape. */
+export interface AuditedCheckpoint {
+  readonly treeId: string;
+  readonly commitSha: string;
+  /** Present when the checkpoint was materialized, as the gate cwd. */
+  readonly worktreeDir?: string | undefined;
+}
+
+/**
+ * Everything the audited gate re-run needs, and deliberately no way to dispatch
+ * an agent (#300 B-07): this input declares no such callback, so a changed tree
+ * cannot be challenged a second time by construction rather than by a counter.
+ */
+export interface AuditedTreeVerificationInput {
+  /** Root the evidence artifact id is made relative to. */
+  repoRoot: string;
+  /**
+   * Where the audited checkpoint is materialized. Must differ from the round's
+   * own `checkpointDir`: `createCandidateCheckpoint` throws when its target
+   * already exists.
+   */
+  checkpointDir: string;
+  /** The round's gate evidence directory, reused unchanged. */
+  evidenceDir: string;
+  /** The selected declarations, from {@link selectAuditedGateDeclarations}. */
+  declarations: readonly GateDeclaration[];
+  createCheckpoint: (dir: string) => AuditedCheckpoint;
+  /** Registers the minted tree as the attempt's current candidate (B-10). */
+  onCandidateTree: (treeId: string) => void;
+  runGates: (input: {
+    treeId: string;
+    cwd: string;
+    declarations: readonly GateDeclaration[];
+  }) => Promise<CandidateGatePhaseResult>;
+}
+
+export type AuditedTreeVerification =
+  | {
+      outcome: "PASS";
+      graded: GradedCandidateIdentity<AuditedBaseGateEvidence>;
+      artifacts: readonly GateEvidenceArtifact[];
+    }
+  | {
+      outcome: "REPAIR";
+      auditedTreeId: string;
+      failedGateIds: string[];
+      evidenceReferences: string[];
+      artifacts: readonly GateEvidenceArtifact[];
+    };
+
+/**
+ * The re-run set: the round's own pre-QA declarations whose id the cheap gate
+ * catalog names `required` (#300 B-03).
+ *
+ * Pure — the catalog is a parameter, not a filesystem read — and the elements are
+ * the *same declaration objects*, so the commands, args and required flags that
+ * re-run are byte-identical to the ones that released the pre-audit tree. A
+ * declaration the catalog does not name is excluded: the acceptance gate declares
+ * no `expectedCostMs`, and a gate whose price is undeclared cannot be asserted
+ * cheap.
+ */
+export function selectAuditedGateDeclarations(
+  declarations: readonly GateDeclaration[],
+  cheapGateCatalog: readonly { id: string; required: boolean }[],
+): readonly GateDeclaration[] {
+  const requiredCheapIds = new Set(
+    cheapGateCatalog.filter((gate) => gate.required).map((gate) => gate.id),
+  );
+  return declarations.filter((declaration) =>
+    requiredCheapIds.has(declaration.id),
+  );
+}
+
+/**
+ * Re-run the selected cheap gates on the tree the audit left behind (#300 B-02,
+ * B-04, B-10).
+ *
+ * A `PASS` carries the one graded-candidate identity; a `REPAIR` carries what the
+ * existing bounded repair loop needs and spends no new counter. The audited tree
+ * is registered as the attempt's candidate before the gates run, so it is named
+ * on both branches.
+ */
+export async function verifyAuditedTree(
+  input: AuditedTreeVerificationInput,
+): Promise<AuditedTreeVerification> {
+  const audited = input.createCheckpoint(input.checkpointDir);
+  input.onCandidateTree(audited.treeId);
+  const run = await input.runGates({
+    treeId: audited.treeId,
+    cwd: audited.worktreeDir ?? input.checkpointDir,
+    declarations: input.declarations,
+  });
+  const failures = requiredAuditedGateFailures(run, input.declarations);
+  if (failures.length > 0) {
+    return {
+      outcome: "REPAIR",
+      auditedTreeId: audited.treeId,
+      failedGateIds: [...new Set(failures.map(({ result }) => result.gateId))],
+      evidenceReferences: [
+        ...new Set(failures.map(({ evidencePath }) => displayPath(evidencePath))),
+        ...failures.map(({ result }) =>
+          displayPath(join(input.evidenceDir, result.logArtifactId)),
+        ),
+      ],
+      artifacts: run.artifacts,
+    };
+  }
+  // Additive, on the audited tree: the pre-audit release sequence keeps its own
+  // text and order (P-06), and this asserts the same two things again over the
+  // re-run's evidence and the audited tree id.
+  assertGateEvidenceReleasesEvaluation(
+    run.evidence,
+    input.declarations,
+    audited.treeId,
+  );
+  for (const artifact of run.artifacts) verifyGateEvidence(artifact);
+  return {
+    outcome: "PASS",
+    graded: {
+      treeId: audited.treeId,
+      commitSha: audited.commitSha,
+      // Built fresh from the re-run's own evidence. Never a spread of the
+      // pre-audit base-gate object, which silently drops ADR 0012's skip
+      // authorization, and never that object passed through, which authorizes a
+      // skip for a tree QA is not grading. The declarations it vouches for are
+      // the selected subset, so the evaluator still runs everything else.
+      baseGate: {
+        evidence: run.evidence,
+        evidenceArtifactId: displayPath(
+          relative(input.repoRoot, run.evidencePath),
+        ),
+        declarations: input.declarations,
+        candidateTreeId: audited.treeId,
+      },
+    },
+    artifacts: run.artifacts,
+  };
+}
+
+/**
+ * The one graded-candidate binding (#300 B-08).
+ *
+ * An audited `PASS` resolves to the audited triple; `AUDIT_UNCHANGED`,
+ * `AUDIT_NOT_RUN`, a declined stage and an audited `REPAIR` all resolve to the
+ * released pair and the released base-gate object *by reference*, so every
+ * non-changed path does exactly what it does today. Pure: no filesystem, no run
+ * state, no clock.
+ */
+export function resolveGradedCandidate<TBaseGate>(input: {
+  released: { readonly treeId: string; readonly commitSha: string };
+  releasedBaseGate: TBaseGate;
+  audited?: GradedCandidateIdentity<TBaseGate> | undefined;
+}): GradedCandidateIdentity<TBaseGate> {
+  if (input.audited !== undefined) return input.audited;
+  return {
+    treeId: input.released.treeId,
+    commitSha: input.released.commitSha,
+    baseGate: input.releasedBaseGate,
+  };
+}
+
+/**
+ * The audited re-run's own pass/fail evaluation, in the shape
+ * `collectRequiredGateFailures` (`src/orchestrator.ts`) uses for the pre-audit
+ * run. Read from every attempt, not only the last, for the same reason: an
+ * infrastructure retry's earlier attempt still names evidence the generator has
+ * to read.
+ */
+function requiredAuditedGateFailures(
+  run: CandidateGatePhaseResult,
+  declarations: readonly GateDeclaration[],
+): Array<{ evidencePath: string; result: GateResult }> {
+  const requiredIds = new Set(
+    declarations
+      .filter((declaration) => declaration.required)
+      .map((declaration) => declaration.id),
+  );
+  return run.attempts.flatMap(({ evidence, evidencePath }) =>
+    evidence.results
+      .filter(
+        (result) => requiredIds.has(result.gateId) && result.status === "FAIL",
+      )
+      .map((result) => ({ evidencePath, result })),
+  );
+}
+
+function displayPath(path: string): string {
+  return path.replace(/\\/g, "/");
 }
