@@ -156,6 +156,21 @@ describe("parsePipelineRuntimeOptions", () => {
     ).toBeUndefined();
   });
 
+  it("[behavior:#299:B-01] audits only for the exact --self-audit token", () => {
+    expect(parsePipelineRuntimeOptions(["--self-audit"]).selfAudit).toBe(true);
+    // Absent leaves the field unset rather than false, exactly as
+    // `--record-prompts` does: only a run that asked for the audit carries it,
+    // and the audit is off by default (#299 AC1).
+    expect(parsePipelineRuntimeOptions([]).selfAudit).toBeUndefined();
+    // Near misses are silently not the flag: the option has no value form.
+    expect(
+      parsePipelineRuntimeOptions(["--self-audit=true"]).selfAudit,
+    ).toBeUndefined();
+    expect(
+      parsePipelineRuntimeOptions(["--self-audits"]).selfAudit,
+    ).toBeUndefined();
+  });
+
   it("reads the guardian round cap, allowing 0 to disable it and leaving it absent by default", () => {
     expect(
       parsePipelineRuntimeOptions(["--guardian-round-cap", "5"])
