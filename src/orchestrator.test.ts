@@ -8249,3 +8249,62 @@ describe("archiveForTheRecord", () => {
     expect(events[0]).toMatchObject({ message: "ENOSPC" });
   });
 });
+
+/**
+ * Where the self-audit call site sits (#299 B-03, ADR 0069).
+ *
+ * A source-order scan rather than a spawned pipeline: `--self-audit` is default
+ * off, so no spawned scenario would reach the stage, and the placement claim —
+ * after the gate-release assertion, before the deterministic QA dispatch, and
+ * absent from the required-failure branch — is a fact about this file. Anchored
+ * on stable tokens rather than line numbers (#319).
+ */
+describe("the generator self-audit call site", () => {
+  const source = readFileSync(
+    fileURLToPath(new URL("./orchestrator.ts", import.meta.url)),
+    "utf-8",
+  );
+
+  it("[behavior:#299:B-03] audits once, between the gate release and the QA dispatch", () => {
+    // The import names the symbol without calling it, so this token matches
+    // call sites only.
+    const auditCalls = [...source.matchAll(/runSelfAuditStage\(/g)].map(
+      (match) => match.index,
+    );
+    // Exactly one invocation per QA submission, bounded by construction: a
+    // second call site is a second challenge this slice does not have.
+    expect(auditCalls).toHaveLength(1);
+    const auditAt = auditCalls[0]!;
+
+    const requiredFailuresAt = source.indexOf(
+      "requiredFailures = collectRequiredGateFailures(",
+    );
+    const gateReleaseAt = source.indexOf(
+      "assertGateEvidenceReleasesEvaluation(",
+    );
+    // The assignment form, not the exported declaration; and `await
+    // runQAStage(` rather than the bare token, which matches the declaration
+    // near the top of the file first.
+    const qaDispatchAt = source.indexOf("await runQAStage(");
+    for (const [name, at] of [
+      ["requiredFailures assignment", requiredFailuresAt],
+      ["gate-release assertion", gateReleaseAt],
+      ["deterministic QA dispatch", qaDispatchAt],
+    ] as const) {
+      expect(at, name).toBeGreaterThan(-1);
+    }
+
+    // Only a candidate the gates released is audited, and QA still grades what
+    // the audit hands back.
+    expect(gateReleaseAt).toBeLessThan(auditAt);
+    expect(auditAt).toBeLessThan(qaDispatchAt);
+    // And the required-cheap-gate failure branch — everything between the
+    // failure assignment and the gate-release assertion — holds no audit call
+    // site, so a candidate that failed a required gate is never audited
+    // (AC3, P-02).
+    expect(requiredFailuresAt).toBeLessThan(gateReleaseAt);
+    expect(
+      auditCalls.filter((at) => at! > requiredFailuresAt && at! < gateReleaseAt),
+    ).toEqual([]);
+  });
+});
