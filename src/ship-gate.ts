@@ -20,6 +20,7 @@ import {
 } from "./logger.js";
 import {
   MUTATION_REPORT_HEADING,
+  MUTATION_STEP_BOUND_MS,
   awaitMutationStepWithinBound,
   formatMutationReportLines,
   runMutationStep,
@@ -1018,6 +1019,27 @@ export async function runShipGate(
           ...(args.mutationRun ? { mutationRun: args.mutationRun } : {}),
           ...(args.mutationScope ? { mutationScope: args.mutationScope } : {}),
         });
+  // US-13 (#303): a ship gate holding for the step must be distinguishable from
+  // a stall. The step is opened as a run phase the moment it is kicked off, and
+  // closed below with its own status as the verdict, so `afk status` shows an
+  // active "Mutation step" stage while the guardians and the step run, and the
+  // run.log names the bound the operator is waiting on. Lifecycle only: the
+  // phase carries no gate id and its verdict feeds no decision (ADR 0071).
+  let mutationPhaseClosed = false;
+  const closeMutationPhase = (verdict: string): void => {
+    if (mutationStep === undefined || mutationPhaseClosed) return;
+    mutationPhaseClosed = true;
+    journal.event({ type: "run-phase-ended", phase: "mutation-step", verdict });
+  };
+  if (mutationStep !== undefined) {
+    journal.event({ type: "run-phase-started", phase: "mutation-step" });
+    journal.phase(
+      `  🧬 Mutation step: started alongside the guardian reviews; the ship gate ` +
+        `waits for it up to ${Math.round(MUTATION_STEP_BOUND_MS / 60_000)}m after ` +
+        `both reviews finish. Reported, never a gate.`,
+      "log",
+    );
+  }
   // The one termination binding: the existing quiesce path on the review
   // worktree (ADR 0020, ADR 0035). There is no second kill path, and both the
   // bound-reached exit and every guardian-rejection exit invoke this same
@@ -1058,8 +1080,15 @@ export async function runShipGate(
     } catch {
       // Swallowed: see above.
     }
-    // Publishes nothing: this exit never reaches the gate's publish path, so
-    // there is no run-state entry, no event, and no report text.
+    // Publishes nothing about the step's result: this exit never reaches the
+    // gate's publish path, so there is no run-state entry, no `mutation-step`
+    // event, and no report text. The open run phase is still closed, so a
+    // status reader does not see an abandoned step as one still running.
+    try {
+      closeMutationPhase("ABANDONED");
+    } catch {
+      // Swallowed: see above.
+    }
   };
 
   let architectResult: ReviewRunResult;
@@ -1118,6 +1147,7 @@ export async function runShipGate(
       // the summary and the PR body both derive their text from (B-13, B-14).
       recordMutationStepOutcome(repoRoot, runSlug, record);
       journal.event({ type: "mutation-step", ...record });
+      closeMutationPhase(outcome.status);
       journal.phase(
         `  🧬 Mutation step: ${
           outcome.status === "MUTATION_REPORTED"
@@ -1126,6 +1156,10 @@ export async function runShipGate(
         }. Reported, never a gate.`,
         "log",
       );
+    } else {
+      // The step rejected or was abandoned before producing an outcome: nothing
+      // to publish, but the phase closes so it never reads as still running.
+      closeMutationPhase("NO_OUTCOME");
     }
   }
 

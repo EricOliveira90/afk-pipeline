@@ -2221,6 +2221,27 @@ describe("runShipGate — the report-only mutation step", () => {
       .filter((payload) => payload.type === "mutation-step");
   }
 
+  /**
+   * The step's run-phase lifecycle (#303 US-13): the `run-phase-started` /
+   * `run-phase-ended` pair that makes a gate waiting on the step visible to
+   * `afk status`, projected to the fields the status pipeline reads.
+   */
+  function mutationPhaseEvents(fixture: ReturnType<typeof makeJournal>) {
+    return fixture.event.mock.calls
+      .map(([payload]) => payload as RunEventPayload)
+      .filter(
+        (payload) =>
+          (payload.type === "run-phase-started" ||
+            payload.type === "run-phase-ended") &&
+          payload.phase === "mutation-step",
+      )
+      .map((payload) =>
+        payload.type === "run-phase-ended"
+          ? { type: payload.type, verdict: payload.verdict }
+          : { type: payload.type },
+      );
+  }
+
   /** The phases whose events are this gate's gate identity and gate result. */
   const GATE_PHASES = new Set(["sanity"]);
 
@@ -2316,6 +2337,20 @@ describe("runShipGate — the report-only mutation step", () => {
     expect(mutationRun.mock.calls[0]![1]).toEqual(["src/cart.ts"]);
     expect(mutationRun.mock.calls[0]![2]).toEqual({ cwd: repo, encoding: "utf-8" });
     expect(result.verdict).toBe("SHIP");
+    // US-13: the step is an open run phase from the moment it starts and closes
+    // with its own status as the verdict, so a gate waiting on it reads as
+    // "mutation step in flight" rather than as a stall.
+    expect(mutationPhaseEvents(fixture)).toEqual([
+      { type: "run-phase-started" },
+      { type: "run-phase-ended", verdict: "MUTATION_REPORTED" },
+    ]);
+    expect(
+      fixture.phase.mock.calls.map(([message]) => String(message)),
+    ).toContainEqual(
+      expect.stringMatching(
+        /Mutation step: started alongside the guardian reviews; the ship gate waits for it up to 30m/,
+      ),
+    );
   });
 
   it("[behavior:#303:B-11] reports what the report file says, not what the command printed", async () => {
@@ -2444,6 +2479,11 @@ describe("runShipGate — the report-only mutation step", () => {
     expect(body).toContain("BOUND_REACHED");
     expect(result.verdict).toBe("SHIP");
     expect(result.pr?.requested).toBe(true);
+    // US-13: a not-run step still closes its phase, with the not-run status.
+    expect(mutationPhaseEvents(fixture)).toEqual([
+      { type: "run-phase-started" },
+      { type: "run-phase-ended", verdict: "MUTATION_NOT_RUN" },
+    ]);
   });
 
   it("[behavior:#303:B-12] [behavior:#304:P-05] never spawns a step still deriving its scope once the bound is spent", async () => {
@@ -2731,6 +2771,9 @@ describe("runShipGate — the report-only mutation step", () => {
     expect(mutationRun).not.toHaveBeenCalled();
     expect(vi.mocked(quiesceWorktree)).not.toHaveBeenCalled();
     expect(mutationEvents(fixture)).toEqual([]);
+    // US-13: no run phase is opened for a step the run never declared, so the
+    // status surface shows no stage for it.
+    expect(mutationPhaseEvents(fixture)).toEqual([]);
     expect(loadRunState(repo, slug).mutationStep).toBeUndefined();
     expect(prBody(runCommand)).not.toContain(MUTATION_REPORT_HEADING);
     expect(result.verdict).toBe("SHIP");
@@ -2780,8 +2823,14 @@ describe("runShipGate — the report-only mutation step", () => {
       await expect(
         vi.mocked(quiesceWorktree).mock.results[0]!.value as Promise<unknown>,
       ).resolves.toMatchObject({ observed: [], terminated: [] });
-      // This exit publishes nothing: no event, no run-state record, no PR.
+      // This exit publishes nothing about the step: no `mutation-step` event, no
+      // run-state record, no PR. The open run phase is closed as ABANDONED so a
+      // status reader never sees the abandoned step as still running (US-13).
       expect(mutationEvents(fixture)).toEqual([]);
+      expect(mutationPhaseEvents(fixture)).toEqual([
+        { type: "run-phase-started" },
+        { type: "run-phase-ended", verdict: "ABANDONED" },
+      ]);
       expect(loadRunState(repo, slug).mutationStep).toBeUndefined();
       expect(prBody(runCommand)).toBeUndefined();
     });

@@ -68,7 +68,11 @@ export interface PipelineWave {
 }
 
 export interface PipelineAggregateStage {
-  id: "sanity" | "architect-review" | "pm-review" | "draft-pr";
+  /**
+   * `mutation-step` is present only on runs that opened the report-only
+   * mutation step (#303 US-13); the other four are always projected.
+   */
+  id: "sanity" | "architect-review" | "pm-review" | "mutation-step" | "draft-pr";
   label: string;
   state: PipelineState;
   attempts: PipelineInvocation[];
@@ -269,7 +273,7 @@ function aggregateStages(
   }
 
   let previousFailed = false;
-  return definitions.map(([id, label]) => {
+  const stages: PipelineAggregateStage[] = definitions.map(([id, label]) => {
     const attempts = byPhase.get(id) ?? [];
     const verdict = [...attempts].reverse().find((item) => item.verdict)?.verdict;
     let state: PipelineState;
@@ -284,6 +288,33 @@ function aggregateStages(
     previousFailed ||= state === "failed" || state === "blocked";
     return { id, label, state, attempts, verdict };
   });
+
+  // The report-only mutation step (#303 US-13, ADR 0071) is opt-in and never a
+  // gate, so it is projected differently from the four stages above: it appears
+  // only when the run actually opened it - a run without `--mutation-report`
+  // shows no "queued" step it will never run - and it takes no part in the
+  // blocked chain, because its verdict cannot block the draft PR. It is placed
+  // after the guardian reviews, which is when the ship gate waits on it.
+  const mutationAttempts = byPhase.get("mutation-step");
+  if (mutationAttempts !== undefined && mutationAttempts.length > 0) {
+    const verdict = [...mutationAttempts]
+      .reverse()
+      .find((item) => item.verdict)?.verdict;
+    const state: PipelineState = mutationAttempts.some(
+      (item) => item.state === "active",
+    )
+      ? "active"
+      : "done";
+    const draftPrIndex = stages.findIndex((stage) => stage.id === "draft-pr");
+    stages.splice(draftPrIndex, 0, {
+      id: "mutation-step",
+      label: "Mutation step",
+      state,
+      attempts: mutationAttempts,
+      verdict,
+    });
+  }
+  return stages;
 }
 
 function manifestNotes(manifest: ManifestReadResult): string[] {

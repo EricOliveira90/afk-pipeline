@@ -109,3 +109,19 @@ AFK's. `MUTATION_NOT_RUN` will be common at first, and that is honest output
 rather than a failure. Baseline attribution and decisions-file marking are
 described here as the mechanism's shape; they land as their own slices, and
 until they do every survivor is unattributed.
+
+### Amendment 2026-09-15 — the wait is visible (US-13)
+
+The 30-minute hold is three times the 10-minute silence after which the status
+surface flags a slice as possibly hung, so a ship gate legitimately waiting on
+the step read as a stall (PM guardian finding P-01 on the PRD 11 ship gate). The
+step is therefore journaled as a run-level phase: `run-phase-started` with
+`phase: "mutation-step"` the moment it is kicked off beside the guardians, a
+`run.log` line naming the bound, and `run-phase-ended` whose verdict is the
+step's own status (`MUTATION_REPORTED`, `MUTATION_NOT_RUN`, `ABANDONED` on a
+guardian-rejection exit, `NO_OUTCOME` when the step rejected). `afk status`
+projects it as an aggregate stage between the guardian reviews and the draft
+PR, only on runs that opened it, and outside the blocked chain - so the stage
+is information about the wait and never a reason the PR did not open. This
+does not weaken the refusals above: the phase carries no gate id and its
+verdict feeds no decision.

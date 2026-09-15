@@ -174,4 +174,117 @@ describe("buildPipelineSection", () => {
       elapsedMs: 3_000,
     });
   });
+
+  // #303 US-13: a ship gate waiting on the report-only mutation step is a
+  // visible open stage, not silence - and a run that never declared the step
+  // shows no stage for it at all.
+  describe("[behavior:#303:US-13] the report-only mutation step as an aggregate stage", () => {
+    const manifest: ManifestReadResult = { status: "available", slices: MANIFEST };
+    const future: FutureSection = {
+      pending: [],
+      upcomingWaves: [],
+      currentLanes: { wave: 1, lanes: [["101", "102"]], serial: false },
+      skipped: [],
+      notes: [],
+    };
+    const present: PresentSection = { active: [] };
+    const now = new Date("2026-08-22T02:00:00.000Z");
+    const build = (snapshot: RunSnapshot) =>
+      buildPipelineSection({ snapshot, manifest, future, present, now });
+
+    it("projects no mutation stage for a run that never opened the step", () => {
+      const snapshot = snapshotFixture();
+      snapshot.runPhases = [
+        {
+          phase: "sanity",
+          startedTs: "2026-08-22T01:30:00.000Z",
+          endedTs: "2026-08-22T01:40:00.000Z",
+          verdict: "PASS",
+        },
+      ];
+      const stages = build(snapshot).aggregateStages;
+      expect(stages.map((stage) => stage.id)).toEqual([
+        "sanity",
+        "architect-review",
+        "pm-review",
+        "draft-pr",
+      ]);
+    });
+
+    it("shows an open step as an active stage between the guardian reviews and the draft PR, with its elapsed time", () => {
+      const snapshot = snapshotFixture();
+      snapshot.runPhases = [
+        {
+          phase: "sanity",
+          startedTs: "2026-08-22T01:30:00.000Z",
+          endedTs: "2026-08-22T01:40:00.000Z",
+          verdict: "PASS",
+        },
+        {
+          phase: "architect-review",
+          attempt: 1,
+          startedTs: "2026-08-22T01:40:00.000Z",
+          endedTs: "2026-08-22T01:50:00.000Z",
+          verdict: "ACCEPT",
+        },
+        {
+          phase: "pm-review",
+          attempt: 1,
+          startedTs: "2026-08-22T01:40:00.000Z",
+          endedTs: "2026-08-22T01:50:00.000Z",
+          verdict: "ACCEPT",
+        },
+        { phase: "mutation-step", startedTs: "2026-08-22T01:40:00.000Z" },
+      ];
+      const stages = build(snapshot).aggregateStages;
+      expect(stages.map((stage) => stage.id)).toEqual([
+        "sanity",
+        "architect-review",
+        "pm-review",
+        "mutation-step",
+        "draft-pr",
+      ]);
+      const mutation = stages.find((stage) => stage.id === "mutation-step");
+      expect(mutation).toMatchObject({
+        label: "Mutation step",
+        state: "active",
+        verdict: undefined,
+      });
+      expect(mutation?.attempts[0]).toMatchObject({
+        state: "active",
+        elapsedMs: 20 * 60_000,
+      });
+      // The draft PR is waiting on the step, not blocked by it.
+      expect(stages.find((stage) => stage.id === "draft-pr")?.state).toBe(
+        "queued",
+      );
+    });
+
+    it("closes with the step's own status as verdict and never blocks the draft PR, even when the step did not run", () => {
+      const snapshot = snapshotFixture();
+      snapshot.runPhases = [
+        {
+          phase: "mutation-step",
+          startedTs: "2026-08-22T01:40:00.000Z",
+          endedTs: "2026-08-22T01:55:00.000Z",
+          verdict: "MUTATION_NOT_RUN",
+        },
+        {
+          phase: "draft-pr",
+          startedTs: "2026-08-22T01:55:00.000Z",
+          endedTs: "2026-08-22T01:55:01.000Z",
+          verdict: "OPENED",
+        },
+      ];
+      const stages = build(snapshot).aggregateStages;
+      expect(stages.find((stage) => stage.id === "mutation-step")).toMatchObject({
+        state: "done",
+        verdict: "MUTATION_NOT_RUN",
+      });
+      expect(stages.find((stage) => stage.id === "draft-pr")).toMatchObject({
+        state: "done",
+        verdict: "OPENED",
+      });
+    });
+  });
 });

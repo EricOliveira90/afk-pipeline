@@ -32,6 +32,19 @@ export const EVENTS_FILE = "events.jsonl";
 export const EVENTS_SCHEMA_VERSION = 1;
 
 /**
+ * Run-level phases the ship gate journals as `run-phase-started` /
+ * `run-phase-ended` pairs. The first four are the gate's own stages;
+ * `mutation-step` (#303 US-13) is the report-only step that runs beside the
+ * guardians. Adding a member is additive - the events schema stays at 1.
+ */
+export type RunPhaseName =
+  | "sanity"
+  | "architect-review"
+  | "pm-review"
+  | "mutation-step"
+  | "draft-pr";
+
+/**
  * Event payloads as emitted at call sites — the RunJournal stamps `ts`.
  */
 export type RunEventPayload =
@@ -376,13 +389,21 @@ export type RunEventPayload =
     }
   | {
       type: "run-phase-started";
-      phase: "sanity" | "architect-review" | "pm-review" | "draft-pr";
+      /**
+       * `mutation-step` is the report-only mutation step (#303 US-13, ADR
+       * 0071): it opens when the step is kicked off alongside the guardians
+       * and closes with the step's own status as its verdict, so a ship gate
+       * holding for it is a visible open phase rather than silence. It is a
+       * lifecycle phase, not a gate: no `gateId`, and its verdict never feeds a
+       * decision.
+       */
+      phase: RunPhaseName;
       attempt?: number;
       cached?: boolean;
     }
   | {
       type: "run-phase-ended";
-      phase: "sanity" | "architect-review" | "pm-review" | "draft-pr";
+      phase: RunPhaseName;
       attempt?: number;
       cached?: boolean;
       verdict: string;
