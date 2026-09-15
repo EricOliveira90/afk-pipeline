@@ -62,6 +62,12 @@
   test that asserted a dead dispatch persists nothing now asserts the entry it
   writes. Anything counting run-state entries per issue counts one more per dead
   audit than it did.
+- #300's B-09 scan counted `candidateTreeId: checkpoint.treeId,` across the whole
+  hub and required every occurrence to precede the audit. The outcome event
+  carries that same fragment as the audit's provenance, after the audit, so the
+  scan now counts the pre-audit occurrences and pins the one post-audit
+  occurrence to the event's own call site. Any later consumer of the pre-audit
+  pair still trips it.
 - A source scan for "this module does not import the hub's constant" cannot be
   `not.toContain("DEFAULT_INFRASTRUCTURE_RETRIES")` — the stage's own doc comment
   names the expression the hub passes. The scan matches an `import` statement

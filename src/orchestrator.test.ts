@@ -8511,8 +8511,14 @@ describe("the audited-tree gate re-run call site", () => {
     // And the two pre-audit `candidateTreeId: checkpoint.treeId,` fragments:
     // P-02's exhaust argument and P-06's `qaBaseGate` literal.
     const residualCandidate = occurrences("candidateTreeId: checkpoint.treeId,");
-    expect(residualCandidate).toHaveLength(2);
-    for (const at of residualCandidate) expect(at).toBeLessThan(auditAt);
+    expect(residualCandidate.filter((at) => at < auditAt)).toHaveLength(2);
+    // Past the audit the fragment appears exactly once, and not as a consumer:
+    // #301's outcome event reports the pre-audit id as the audit's provenance.
+    const eventAt = source.indexOf("logger.recordSelfAuditOutcomeEvent({");
+    expect(eventAt).toBeGreaterThan(auditAt);
+    expect(residualCandidate.filter((at) => at > auditAt)).toEqual([
+      source.indexOf("candidateTreeId: checkpoint.treeId,", eventAt),
+    ]);
   });
 
   it("[behavior:#300:P-06] leaves the pre-audit release sequence in its present text and order", () => {
