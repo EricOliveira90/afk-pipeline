@@ -64,6 +64,13 @@ export interface PipelineRuntimeOptions {
    */
   recordPrompts?: boolean;
   /**
+   * Give every candidate that clears its required cheap gates one bounded
+   * generator self-audit invocation before the deterministic QA dispatch, in the
+   * slice's own worktree. Default off; one knob for the whole run, with no
+   * per-slice configuration. See ADR 0069 (#299).
+   */
+  selfAudit?: boolean;
+  /**
    * Open the draft PR despite an unfavorable PM verdict, recording the
    * human override and both guardian verdicts in the PR body (ADR 0015).
    * Requires a favorable architect verdict; only a real FIX-BEFORE-SHIP
@@ -253,6 +260,10 @@ export function parsePipelineRuntimeOptions(
   // `--record-prompts=false`) is silently not the flag: it has no value
   // form, and no boolean flag here rejects anything either.
   const recordPrompts = args.includes("--record-prompts") ? true : undefined;
+  // Same exact-token shape and the same reason (#299 B-01): absent leaves the
+  // field unset rather than `false`, so only a run that asked for the audit
+  // carries it, and `--self-audit=true` or `--self-audits` is not the flag.
+  const selfAudit = args.includes("--self-audit") ? true : undefined;
   const forceRestart = parseSliceIdList(args, "--force-restart");
   const resumeStuck = parseSliceIdList(args, "--resume-stuck");
   // "Throw this tree away" and "finish this tree" are contradictory
@@ -287,6 +298,7 @@ export function parsePipelineRuntimeOptions(
     serialLanes,
     openPrOnOverride,
     recordPrompts,
+    selfAudit,
     guardianRoundCap,
     forceRestart,
     resumeStuck,
