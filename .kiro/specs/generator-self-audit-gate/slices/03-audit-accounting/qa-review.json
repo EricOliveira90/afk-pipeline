@@ -1,19 +1,19 @@
 {
   "version": 2,
-  "verdict": "FAIL",
-  "failureClass": "IMPLEMENTATION",
+  "verdict": "PASS",
+  "failureClass": "NONE",
   "infrastructureEvidence": null,
   "findings": [
     {
       "id": "QA-01",
       "severity": "BLOCKING",
       "behaviorIds": ["B-06", "P-04"],
-      "summary": "The unconditional RUN_STATE_VERSION bump to 8 left two stale literal pins at 7 in the heavy QA suites, so the deterministic suite the pre-ship gate runs fails on this candidate.",
-      "evidence": "pnpm vitest run src/qa-orchestration-gates.test.ts -t \"reads a v4 state\" → \"FAIL src/qa-orchestration-gates.test.ts > final evaluation and reuse > [behavior:P-06] reads a v4 state, keeping the #91 locator and #193 waivers, and adds finalEvaluations / AssertionError: expected 8 to be 7 // Object.is equality ❯ src/qa-orchestration-gates.test.ts:1043:28\" (Test Files 1 failed). pnpm vitest run src/qa-orchestration.test.ts -t \"records checkpoint evidence, authorizes QA for the passing tree\" → \"FAIL ... [behavior:P-03] [behavior:B-06] records checkpoint evidence, authorizes QA for the passing tree, and establishes its approved baseline / AssertionError: expected 8 to be 7 ❯ src/qa-orchestration.test.ts:1028:27\" (Test Files 1 failed). Both files are in test:heavy:qa, which package.json excludes from test:fast, so the slice's own verification could not see them; pnpm test:fast on this tree is green (103 files / 2375 tests, exit 0). Slice 1's handoff already recorded that RUN_STATE_VERSION had four literal pins, naming src/qa-orchestration.test.ts and src/qa-orchestration-gates.test.ts among them; this slice refreshed only src/run-state.test.ts and src/eval-boundary.test.ts.",
-      "expected": "Contract B-06 and the Definition of done: \"RUN_STATE_VERSION moves from 7 to 8 ... `src/eval-boundary.test.ts:127` pins that literal ... the pin is refreshed to `8`\" and \"`pnpm run typecheck`, `pnpm test:fast` and the heavy suites this scope touches pass\" — a schema bump leaves no reader asserting the previous literal, and the deterministic suite stays green on the candidate.",
-      "observed": "src/qa-orchestration.test.ts:1028 still asserts `expect(state.version).toBe(7)` and src/qa-orchestration-gates.test.ts:1043 still asserts `expect(bumped.version).toBe(7)`. Both now read 8 and fail. The adaptation behavior itself is intact (v3/v4/v6/v7 files still load with every other member present, asserted by the new [behavior:#301:P-04] test); only these two stale literals are wrong, and they are outside the contract's thirteen declared paths.",
-      "clearCondition": "`pnpm run test:heavy:qa` passes on the candidate tree, with no assertion in src/qa-orchestration.test.ts or src/qa-orchestration-gates.test.ts pinning a superseded RUN_STATE_VERSION literal. Refreshing those two pins requires the orchestrator to extend the locked file list, since neither path is one this slice changed and the amendment mechanism covers only changed paths.",
-      "state": "OPEN",
+      "summary": "The unconditional RUN_STATE_VERSION bump to 8 left two stale literal pins at 7 in the heavy QA suites, so the deterministic suite the pre-ship gate runs failed on the round-1 candidate.",
+      "evidence": "Grep over src/ for `version).toBe(` and `RUN_STATE_VERSION` on this candidate shows `src/qa-orchestration.test.ts:1028: expect(state.version).toBe(8);` and `src/qa-orchestration-gates.test.ts:1043: expect(bumped.version).toBe(8);` — both refreshed by commit 1420222 (\"test(qa): refresh the loaded run-state version pins to v8 (#301 QA-01, P-04)\"), whose diff touches exactly one line in each file (`git diff --stat c246e3f~1..HEAD` shows `src/qa-orchestration-gates.test.ts | 2 +-` and `src/qa-orchestration.test.ts | 2 +-`). `pnpm run test:heavy:qa` on the candidate tree: `Test Files 2 passed (2) / Tests 59 passed (59) / Duration 169.45s / [suite-time] qa-orchestration: 170.4s / [exited with code 0]`. No superseded pin remains: every other `RUN_STATE_VERSION` reader in the tree either compares against the exported constant or asserts 8 (src/eval-boundary.test.ts:130, src/run-state.test.ts:994/1210/1314/1485, src/self-audit.test.ts:326/343).",
+      "expected": "`pnpm run test:heavy:qa` passes on the candidate tree, with no assertion in src/qa-orchestration.test.ts or src/qa-orchestration-gates.test.ts pinning a superseded RUN_STATE_VERSION literal.",
+      "observed": "Both pins now read 8, each as a one-line change with the surrounding approvedBaselines, appliedWaivers and #91 baseline-locator assertions untouched, and `pnpm run test:heavy:qa` exits 0 with 59 tests passing. The contract's `## Files expected to change` and the acceptance manifest's fileScope both now declare the two paths, so the change is inside the locked file list.",
+      "clearCondition": "`pnpm run test:heavy:qa` passes on the candidate tree, with no assertion in src/qa-orchestration.test.ts or src/qa-orchestration-gates.test.ts pinning a superseded RUN_STATE_VERSION literal.",
+      "state": "RESOLVED",
       "remedy": "SOURCE_CHANGE",
       "amendmentPaths": []
     }
