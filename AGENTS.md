@@ -56,6 +56,27 @@ Before a PRD's tickets enter AFK, run `pnpm lint:tickets <issue>...`
 (ADR 0049); check 1 (compound predicates) is an authoring-checklist item,
 not a lint.
 
+**Anchor a ticket on a name, never on a line number.** Check 6 gates a
+citation like `src/gate-runner.ts:92` or "line 394" under any heading
+listed in `loadBearingSections` (`ticket-lint-vocabulary.json`) — the
+sections an agent is told to act on. Write the durable form instead: the
+file plus a `describe(...)`/`it(...)` title, an exported symbol, or a
+command. A citation in a bug ticket's diagnostic prose ("Suspected
+cause", "Evidence") is a dated observation and is left alone.
+
+Why it gates rather than warns: on 2026-09-13 splitting
+`qa-orchestration.test.ts` in two changed no behavior and still made four
+prepared PRD 5 tickets stale, one of them (#86) on line numbers that had
+moved. Editing four tickets was routine. The same citation inside a
+*preserved locked* contract is not — repairing it would violate the lock,
+so the run has to stop for a human (#319). The cheap moment to fix the
+anchor shape is before the ticket is ever locked.
+
+If the line number genuinely *is* the evidence — a ticket reporting that
+a specific line is wrong — waive it in `ticket-lint-waivers.json` with a
+reason. The waiver names the citation, so it lapses the moment the
+citation is edited.
+
 If you hand-wrote or migrated a `contract-negotiation-outcome.json`, lint
 it too: `pnpm lint:tickets --outcome .afk`. Check 5 gates the one shape
 that parks forever — an `IMPASSE` carrying `CONTESTED` findings *and* an

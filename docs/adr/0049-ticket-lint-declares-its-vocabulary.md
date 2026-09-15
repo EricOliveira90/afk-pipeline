@@ -157,3 +157,81 @@ Deliberately narrow, per the issue: only the *mixed* shape. An outcome with
 only contested findings is the adjudicable case the park exists for, and an
 `IMPASSE` spelling of a purely open exhaustion is a different defect from the
 one this check was filed for.
+
+## Amendment (2026-09-15) — check 6 gates a fragile anchor, by section (#319)
+
+Every check above asks whether a criterion *means* something. Check 6 asks
+whether its anchor will still *point* at something next week.
+
+On 2026-09-13 the Wave A suite split moved `qa-orchestration.test.ts` into two
+files. No behavior changed and four already-authored PRD 5 tickets went stale
+on the spot — #86 because the anchors its generator was told to reuse were line
+numbers that had moved. Editing four tickets was routine. Had the same citation
+been inside #87's preserved **`LOCKED`** contract, editing it would have
+violated the lock and the run would have had to stop for a human decision. Two
+operator decisions recorded on 2026-09-14 already reason about this class by
+name; #299's refuses to pin a QA argument list precisely because #300 rewrites
+it, "the stale-anchor class #319 exists to prevent".
+
+| Check | What it decides | Verdict |
+|---|---|---|
+| 6 | A source or test line-number citation sits under a heading declared in `loadBearingSections`. | Gates |
+
+**Load-bearing is declared, not inferred.** `loadBearingSections` in
+`ticket-lint-vocabulary.json` lists the headings whose content instructs the
+implementer, matched as a prefix at a word edge so real decoration survives
+("Code anchors — verified against `integration/pre-prd4` on 2026-09-08" is the
+"code anchors" section). This is the same compromise the original decision
+made for names: a hand-maintained list beats anything parsed, and here it is
+what keeps the check quiet where a line number is the *right* thing to write.
+A bug ticket's "Suspected cause" or "Evidence" citation is a dated observation
+about the tree at filing time. The hedged sections — "Suggested fix",
+"Proposed fix" — are excluded too; they say themselves that they do not bind,
+and the criteria are what does.
+
+**It scans sections, not criteria**, which is the first structural departure
+from checks 2–4. Two reasons, both from the corpus: none of the citations that
+actually cost this repo were in a criterion (#86's were under "Code anchors",
+#195's under "What to build", #87's in a scope-narrowing addendum), and
+`parseTicket` sees only `- [ ]` items, so a ticket that numbers its criteria
+`1.` (#341) is invisible to checks 2–4 but not to this one.
+
+A backticked bare `:169` counts as a citation. It is how #86 spells its second
+anchor, and it is never anything else; an unbackticked `:169` is a ratio, a
+time or a port and is not a shape.
+
+Measured over all 255 issues in this repo on 2026-09-15: **47 cite a line
+somewhere, 15 of them under a load-bearing heading (50 findings), and the other
+32 are left alone.** None of the eleven tickets then prepared for launch
+(#277, #278, #299, #300, #303, #304, #332–#336) gates. No waivers were added:
+all 15 are the defect class, they are almost all closed, and the lint is
+per-issue on demand rather than part of `pnpm test`.
+
+### What #319 asks for and this does not do, with the reason
+
+#319 also asks for anchor *resolution* — that referenced files exist and named
+tests can be found before launch, repeated before a preserved lock resumes,
+refusing rather than auto-editing a stale lock. **A file-existence check does
+not belong in the lint**, and the corpus says so: run over the eleven prepared
+tickets, "every cited path must exist in the tree" would refuse 7 of 11, on 20
+of 26 cited paths. Nearly all of those are correct as written. `issues.md`,
+`prd.md`, `contract.md`, `afk.json` and `run-summary.md` are per-slice run
+artifacts, not repo files — they are in this vocabulary's `names` list for
+exactly that reason — and `src/run-events.test.ts` in #336 is a file that
+slice creates. The lint cannot tell a repo path from an artifact name from a
+file about to be written.
+
+The information that settles it is the manifest's `fileScope`: a cited path
+outside `fileScope` that does not exist is stale, and one inside it may
+legitimately not exist yet. That lives with the locked pair, so the check
+belongs at the contract, not at the ticket — either the preserved-`LOCKED`
+read-back in `negotiateAttempt` (which already refuses a lock it cannot
+validate, by returning an outcome rather than throwing) or the pre-dispatch
+manifest read in `runSliceExecute` (which throws). Both are in the heavy
+orchestrator suite.
+
+The symmetric point about test titles: over the same 255 issues there are
+**zero** `describe(...)`/`it(...)` citations under a load-bearing heading, so
+a resolver for them would have had nothing to verify today. Check 6 is what
+creates the corpus a resolver would later check — gate the fragile form first,
+resolve the durable form once tickets carry it.
