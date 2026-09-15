@@ -20,7 +20,7 @@
 - P-01: `src/self-audit.ts:runSelfAuditStage` (the two declines)
 - P-02: `src/self-audit.ts:classifySelfAuditVerdict`, `src/self-audit.ts:verifyAuditedTree`, `src/self-audit.ts:selectAuditedGateDeclarations`, `src/self-audit.ts:resolveGradedCandidate`
 - P-03: `src/self-audit.ts:AuditedTreeVerificationInput`, `src/orchestrator.ts:runSliceAttempt` (audit → QA region)
-- P-04: `src/run-state.ts:adaptLoadedState`, `src/eval-boundary.test.ts` (pinned `RUN_STATE_VERSION`)
+- P-04: `src/run-state.ts:adaptLoadedState`, `src/eval-boundary.test.ts`, `src/qa-orchestration.test.ts`, `src/qa-orchestration-gates.test.ts` (pinned `RUN_STATE_VERSION` / loaded `state.version`)
 - P-05: `src/logger.ts:RunJournal.writeSummary`, `src/logger.ts:readQualityStageOutcomes`
 - P-06: `src/orchestrator.ts:runSliceAttempt` (single `runSelfAuditStage` call site)
 
@@ -77,6 +77,15 @@
   spans instead — every occurrence lies inside the derivation or the section
   render — plus that the only comparison the rate takes part in is
   `=== undefined`, which is a presence check rather than a threshold.
+- A `RUN_STATE_VERSION` bump has more literal readers than
+  `expect(RUN_STATE_VERSION).toBe(N)` finds. Two of them assert the *loaded*
+  value instead — `expect(state.version).toBe(N)` in `src/qa-orchestration.test.ts`
+  and `expect(bumped.version).toBe(N)` in `src/qa-orchestration-gates.test.ts` —
+  and both live in heavy suites that `pnpm test:fast` never runs, so the bump
+  looks green locally and fails only under `pnpm run test:heavy:qa`. The next
+  bump should grep for `version).toBe(` and `version: <N>` across all of `src/`,
+  not just for the constant's name, and should run the heavy QA suite before
+  handoff.
 - The envelope is assembled before the injected `dispatch` is called, so an
   envelope that throws never reaches the dispatch spy. The attempt count for
   that case is observable through the `changeSummary` supplier, which the

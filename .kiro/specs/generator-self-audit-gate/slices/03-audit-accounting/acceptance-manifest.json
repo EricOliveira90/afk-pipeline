@@ -14,6 +14,8 @@
       "src/orchestrator.ts",
       "src/orchestrator.test.ts",
       "src/eval-boundary.test.ts",
+      "src/qa-orchestration.test.ts",
+      "src/qa-orchestration-gates.test.ts",
       "docs/adr/0069-bounded-generator-self-audit-before-qa-dispatch.md",
       "context.md"
     ]
@@ -242,11 +244,11 @@
     },
     {
       "id": "P-04",
-      "source": "src/run-state.ts:49-66 version-history doctrine — older files still load and the bump is unconditional",
-      "given": "v3, v6 and v7 run-state fixtures, and a run that dispatches no audit",
-      "when": "each file is loaded and a state is written",
-      "then": "each adapts in memory with approvedBaselines, appliedWaivers, finalEvaluations, qualityStages and per-slice records intact, and the written state carries version 8 with no selfAudits member",
-      "observableResult": "[behavior:P-04] unit tests in src/run-state.test.ts assert the adapted members of each fixture and assert a written no-audit state has version 8 and no selfAudits key; src/eval-boundary.test.ts's pinned RUN_STATE_VERSION assertion reads 8 and its EVENTS_SCHEMA_VERSION assertion still reads 1",
+      "source": "src/run-state.ts:49-66 version-history doctrine — older files still load and the bump is unconditional; the three pinned readers of the constant at src/eval-boundary.test.ts:127, src/qa-orchestration.test.ts:1028 and src/qa-orchestration-gates.test.ts:1043",
+      "given": "v3, v6 and v7 run-state fixtures, a run that dispatches no audit, and the three existing tests that pin the loaded version as a literal",
+      "when": "each file is loaded, a state is written, and those three suites run",
+      "then": "each fixture adapts in memory with approvedBaselines, appliedWaivers, finalEvaluations, qualityStages and per-slice records intact, the written state carries version 8 with no selfAudits member, and every literal pin of the loaded version reads 8 — the two qa-orchestration pins are stale readers of the constant B-06 bumps, refreshed 7 → 8 and nothing else in those files touched, so no superseded RUN_STATE_VERSION pin remains and pnpm run test:heavy:qa is green",
+      "observableResult": "[behavior:P-04] unit tests in src/run-state.test.ts assert the adapted members of each fixture and assert a written no-audit state has version 8 and no selfAudits key; src/eval-boundary.test.ts's pinned RUN_STATE_VERSION assertion reads 8 and its EVENTS_SCHEMA_VERSION assertion still reads 1; src/qa-orchestration.test.ts:1028 (expect(state.version).toBe(8)) and src/qa-orchestration-gates.test.ts:1043 (expect(bumped.version).toBe(8)) each still assert their surrounding approvedBaselines, appliedWaivers and #91 baseline-locator expectations unchanged, so the refresh proves the older file adapted to the current version rather than removing the check",
       "preservation": true,
       "gateIds": [
         "acceptance:behaviors",

@@ -3,36 +3,47 @@
   "verdict": "ACCEPT",
   "findings": [
     {
-      "id": "F-08",
-      "severity": "BLOCKING",
-      "behaviorIds": ["B-03"],
-      "evidence": "manifest B-03 given: \"(c) degenerate-budget inputs: one omitting infrastructureRetries entirely and ones carrying -1, 1.5 and Number.NaN, each with a dispatch that always rejects with \\\"exited with code 1\\\"\"; manifest B-03 observableResult: \"exactly 1 for each of the four case (c) inputs) and that no case (c) or (b) call rejects, with each case (c) result being { ran: true, verdict: \\\"AUDIT_NOT_RUN\\\", treeId: <released tree id> }\"; contract test plan: \"Given a stage input omitting `infrastructureRetries` entirely, and separately ones carrying `-1`, `1.5` and `Number.NaN` … then no call rejects, the dispatch spy recorded exactly one call in each case, no `self-audit: infrastructure retry` line was narrated, and each result is `{ ran: true, verdict: \\\"AUDIT_NOT_RUN\\\", treeId: <released tree id> }`. (B-03)\"",
-      "expected": "B-03's given and observableResult, plus a matching test-plan bullet, must declare a [behavior:B-03] assertion over an absent infrastructureRetries and at least one value that is not a non-negative safe integer, showing zero retries and a non-rejecting stage.",
-      "observed": "The revision supplies exactly that: a case (c) input group of four (absent, -1, 1.5, Number.NaN), each with an always-rejecting dispatch, and declared assertions that each dispatches exactly once, narrates no retry line, does not reject, and returns { ran: true, verdict: \"AUDIT_NOT_RUN\", treeId: <released tree id> }. The test plan carries the matching bullet ahead of the tool-call-cap bullet, and the contract statement now enumerates the rejected value classes and states each dispatches once and lands AUDIT_NOT_RUN through B-04 rather than rejecting, citing docs/adr/0069-bounded-generator-self-audit-before-qa-dispatch.md:73-77. An implementation that throws on -1 or NaN, or that treats undefined as unbounded retry, now fails a declared observable.",
-      "clearCondition": "B-03's `given` and `observableResult` (and the matching test-plan bullet) declare a [behavior:B-03] assertion that a stage input omitting `infrastructureRetries` and one carrying a non-negative-safe-integer value each dispatch exactly once and do not reject.",
-      "state": "RESOLVED",
-      "revisionCitation": null
-    },
-    {
-      "id": "F-09",
+      "id": "F-01",
       "severity": "ADVISORY",
-      "behaviorIds": ["B-06"],
-      "evidence": "contract B-06: \"That condition's granularity is already whole-issue-list and stays so: a malformed entry sets `dropped = true` and `break`s, and `if (dropped || entries.length === 0) continue;` (`src/run-state.ts:1078`) then drops that `ghIssue` key entirely\"; manifest B-06 observableResult: \"the same whole-list outcome the existing blank-candidateTreeId case already produces, asserted alongside it so a per-entry rewrite of the sanitizer fails\"",
-      "expected": "The pair must state the discard granularity the existing sanitizer actually has, as observed in src/run-state.ts, or authorize a granularity change in ## Changes to existing behavior.",
-      "observed": "The revision states the granularity and cites it, and the citations check out against the source: the malformed-entry condition sits at src/run-state.ts:1062-1069 and sets `dropped = true` then `break`s; `if (dropped || entries.length === 0) continue;` is at :1078, so the ghIssue key is omitted from the returned record; the doc comment at :1032-1034 states the rule in the quoted terms. The granularity is therefore whole-issue-list already, the runId check merely joins an existing condition, no discard-granularity change is needed for the pre-existing candidateTreeId, verdict or auditedTreeId checks, and no ## Changes to existing behavior bullet is owed. The manifest additionally pins the runId-less case alongside the existing blank-candidateTreeId case, so a per-entry rewrite fails a declared assertion.",
-      "clearCondition": "Either B-06's `then`/`observableResult` states the discard granularity the existing sanitizer actually has (per-entry or whole-list) as observed in `src/run-state.ts`, or `## Changes to existing behavior` names the granularity change and the fields it affects.",
-      "state": "RESOLVED",
+      "behaviorIds": ["B-11", "B-10"],
+      "evidence": "\"assert that every src/logger.ts occurrence lies inside the derivation and the section render rather than a branch\"",
+      "expected": "B-11's observable result should carry the same carve-out its contract half states — \"no occurrence sits inside an `if`, ternary, comparison or `GateDeclaration` literal outside the summary render\" — because B-10 requires the render to print `Changed rate: n/a` when `graded` is `0`, which is necessarily a branch on a value B-09 derives.",
+      "observed": "The manifest drops the \"outside the summary render\" qualifier and reads as though no occurrence may sit inside a branch at all, which the B-10 `n/a` line cannot satisfy. The contract's B-11 text is the operative, correctly scoped statement; the manifest's paraphrase is looser than the obligation it restates.",
+      "clearCondition": "B-11's observableResult restates the carve-out explicitly, so that a conditional on `changedRatePercent`/`graded` inside the `## Self-Audit` render is stated as permitted and only gate, threshold, merge and dispatch branches are forbidden.",
+      "state": "OPEN",
       "revisionCitation": null
     },
     {
-      "id": "F-10",
+      "id": "F-02",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-03"],
+      "evidence": "\"absent, negative, fractional, NaN, Infinity or a non-number all dispatch exactly once and land AUDIT_NOT_RUN\"",
+      "expected": "Each degenerate budget the Then asserts should appear in the Given, or the Then should claim only what the Given drives.",
+      "observed": "The Given lists four case (c) inputs (omitted, `-1`, `1.5`, `Number.NaN`) and the observableResult counts \"each of the four case (c) inputs\", but the Then also asserts `Infinity` and a non-number read as `0`. `Infinity` is a reachable value that no declared input covers; a non-number is additionally unreachable through a typed `SelfAuditStageInput` literal, so `typecheck` and `tests` together produce no evidence for it.",
+      "clearCondition": "Case (c)'s Given adds an `Infinity` input (making five counted inputs), and the non-number clause is either dropped from the Then or restated as a defensive runtime coercion with no declared test evidence.",
+      "state": "OPEN",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-03",
       "severity": "ADVISORY",
       "behaviorIds": ["B-12"],
-      "evidence": "manifest B-12 then: \"the exact present sentence at :52-53 — \\\"One invocation per QA submission, bounded by construction: there is no loop in the stage, no retry, and no second challenge for a tree the audit rewrote.\\\" — no longer appears as a substring, having been replaced whole\"; manifest B-12 observableResult: \"reads the ADR, whitespace-normalizes it, and asserts not.toContain of that one exact sentence together with toContain of \\\"completed\\\" in the amended bound sentence, \\\"--infrastructure-retries\\\", \\\"AUDIT_NOT_RUN\\\", \\\"swarm_handoff.sh\\\", \\\"## Decision\\\", \\\"## Consequences\\\" and \\\"no second challenge\\\"\"",
-      "expected": "B-12's then must name the literal absence it means rather than the absence of an \"unqualified phrase\".",
-      "observed": "The revision names one exact whitespace-normalized sentence as the literal that must disappear, and that literal matches the present ADR text at docs/adr/0069-bounded-generator-self-audit-before-qa-dispatch.md:52-53 verbatim once the line break is normalized. The retained-text side is now the substring \"no second challenge\" rather than a paraphrased \"bound\", so a correctly qualified amendment such as \"no retry of a completed invocation\" passes while an unamended ADR fails. The contract statement and the test-plan bullet were brought to the same literal.",
-      "clearCondition": "B-12's `then` states the literal absence it means (e.g. the exact sentence at `:52-53` no longer appears) instead of the absence of an \"unqualified phrase\".",
-      "state": "RESOLVED",
+      "evidence": "\"src/logger.test.ts's [behavior:B-12] text test reads the ADR, whitespace-normalizes it\"",
+      "expected": "An ADR text assertion about the self-audit stage's one-invocation bound belongs at a seam that owns that subject — `src/self-audit.test.ts` or `src/orchestrator.test.ts`.",
+      "observed": "It is placed in `src/logger.test.ts`, which owns run-summary rendering and event derivation. The file is in scope so the gate still produces evidence, but the assertion's home does not match its subject and the next reader of ADR 0069 will not find it.",
+      "clearCondition": "B-12's observableResult names `src/self-audit.test.ts` (or `src/orchestrator.test.ts`) as the home of the ADR text test.",
+      "state": "OPEN",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-04",
+      "severity": "ADVISORY",
+      "behaviorIds": [],
+      "evidence": "\"- src/self-audit.ts\" … \"- CONTEXT.md\" (fifteen paths) with thirteen in-scope behaviors and six preservation behaviors",
+      "expected": "A single generator session should carry the whole scope with slack for the heavy-suite runs the Definition of done names (`test:heavy:orchestrator`, `test:heavy:qa`).",
+      "observed": "The slice is at the top of one session: a classifier, a bounded retry loop, a run-state schema bump with three stale literal pins in two heavy suites, a new run event, a new derivation, a summary section, an ADR amendment and a CONTEXT.md term. Each piece is small and mirrors a cited existing pattern, and the risky piece — the unconditional `RUN_STATE_VERSION` 7 → 8 bump — has its full blast radius enumerated (`src/eval-boundary.test.ts:127`, `src/qa-orchestration.test.ts:1028`, `src/qa-orchestration-gates.test.ts:1043`), which is what makes it feasible rather than speculative. Flagged only so the session sequences the bump and its pins first.",
+      "clearCondition": "No contract change required; if the session runs long, the reporting half (B-08 through B-11) is the separable remainder.",
+      "state": "OPEN",
       "revisionCitation": null
     }
   ]

@@ -4,7 +4,8 @@
 **GH issue:** #301
 **Status:** LOCKED
 
-**Lock-Provenance:** negotiation round 2
+**Lock-Provenance:** focused-scope-revision round 4
+
 **Negotiation round:** 1
 
 ## Scope lock
@@ -285,7 +286,21 @@ infrastructure retry, and CONTEXT.md gains the three outcome terms. Every
   that literal (`expect(RUN_STATE_VERSION).toBe(7)`) to assert the eval slice
   moved no schema; the pin is refreshed to `8` and its sibling
   `EVENTS_SCHEMA_VERSION` assertion is left alone, which is why that file is in
-  this slice's scope.
+  this slice's scope. Two further stale literal readers of the same constant are
+  refreshed the same way and for the same reason:
+  `src/qa-orchestration.test.ts:1028` (`expect(state.version).toBe(7)`) and
+  `src/qa-orchestration-gates.test.ts:1043`
+  (`expect(bumped.version).toBe(7)`) each assert the version a loaded state
+  carries, so B-06's unconditional bump and P-04's in-memory adaptation to the
+  current version make both read `8`. Refreshing the two literals to `8` is the
+  whole change to those files: the surrounding assertions on
+  `approvedBaselines`, `appliedWaivers` and the #91 baseline locator, and the
+  comment above the first pin, keep their present text, so neither test loses
+  behavior — each still asserts that loading an older file yields the current
+  version with every other member intact, which is exactly P-04. Recorded here
+  rather than escalated: it is the mechanical consequence of a bump the parent
+  specification already settled, reversible before merge, and no interface or
+  data format turns on it.
 - A dead audit invocation is re-dispatched when its cause is infrastructure,
   where today `dispatchAudit` runs exactly once, authorized by issue #301 AC2 and
   the PRD's Implementation Decisions; ADR 0069 is amended in the same slice
@@ -304,6 +319,8 @@ infrastructure retry, and CONTEXT.md gains the three outcome terms. Every
 - src/orchestrator.ts
 - src/orchestrator.test.ts
 - src/eval-boundary.test.ts
+- src/qa-orchestration.test.ts
+- src/qa-orchestration-gates.test.ts
 - docs/adr/0069-bounded-generator-self-audit-before-qa-dispatch.md
 - CONTEXT.md
 
@@ -455,7 +472,14 @@ infrastructure retry, and CONTEXT.md gains the three outcome terms. Every
   first `await runQAStage(`. (P-03)
 - Given v3, v6 and v7 run-state fixtures, when they are loaded, then each adapts
   in memory with every other member intact, and a written state with no audit
-  carries `version: 8` and no `selfAudits` member. (P-04)
+  carries `version: 8` and no `selfAudits` member; and given the three existing
+  pinned readers of the constant — `src/eval-boundary.test.ts:127`,
+  `src/qa-orchestration.test.ts:1028` and
+  `src/qa-orchestration-gates.test.ts:1043` — when their suites run, then each
+  asserts `8` with its surrounding assertions (`approvedBaselines`,
+  `appliedWaivers`, the #91 baseline locator, `EVENTS_SCHEMA_VERSION` still `1`)
+  unchanged, so `pnpm run test:heavy:qa` is green with no superseded
+  `RUN_STATE_VERSION` pin left in the tree. (P-04)
 - Given `src/orchestrator.ts` read as text, when `runSelfAuditStage(` is counted,
   then it occurs exactly once, after `assertGateEvidenceReleasesEvaluation(` and
   after `requiredFailures = collectRequiredGateFailures(` and before the first
@@ -497,7 +521,11 @@ infrastructure retry, and CONTEXT.md gains the three outcome terms. Every
 - [ ] Every new test's name contains the behavior id it asserts, and every
       assertion lives at an existing unit or source-order seam — no new spawned
       pipeline scenario, fixture or wave.
-- [ ] Only the thirteen paths in `## Files expected to change` are edited;
+- [ ] Every stale literal reader of `RUN_STATE_VERSION` reads `8` — in
+      `src/eval-boundary.test.ts`, `src/qa-orchestration.test.ts` and
+      `src/qa-orchestration-gates.test.ts` — with no other assertion in those
+      files changed.
+- [ ] Only the fifteen paths in `## Files expected to change` are edited;
       migration count is 0.
 - [ ] `pnpm run typecheck`, `pnpm test:fast` and the heavy suites this scope
-      touches (`test:heavy:orchestrator`) pass.
+      touches (`test:heavy:orchestrator`, `test:heavy:qa`) pass.

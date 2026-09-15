@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "verdict": "FAIL",
+  "failureClass": "IMPLEMENTATION",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-01",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-06", "P-04"],
+      "summary": "The unconditional RUN_STATE_VERSION bump to 8 left two stale literal pins at 7 in the heavy QA suites, so the deterministic suite the pre-ship gate runs fails on this candidate.",
+      "evidence": "pnpm vitest run src/qa-orchestration-gates.test.ts -t \"reads a v4 state\" → \"FAIL src/qa-orchestration-gates.test.ts > final evaluation and reuse > [behavior:P-06] reads a v4 state, keeping the #91 locator and #193 waivers, and adds finalEvaluations / AssertionError: expected 8 to be 7 // Object.is equality ❯ src/qa-orchestration-gates.test.ts:1043:28\" (Test Files 1 failed). pnpm vitest run src/qa-orchestration.test.ts -t \"records checkpoint evidence, authorizes QA for the passing tree\" → \"FAIL ... [behavior:P-03] [behavior:B-06] records checkpoint evidence, authorizes QA for the passing tree, and establishes its approved baseline / AssertionError: expected 8 to be 7 ❯ src/qa-orchestration.test.ts:1028:27\" (Test Files 1 failed). Both files are in test:heavy:qa, which package.json excludes from test:fast, so the slice's own verification could not see them; pnpm test:fast on this tree is green (103 files / 2375 tests, exit 0). Slice 1's handoff already recorded that RUN_STATE_VERSION had four literal pins, naming src/qa-orchestration.test.ts and src/qa-orchestration-gates.test.ts among them; this slice refreshed only src/run-state.test.ts and src/eval-boundary.test.ts.",
+      "expected": "Contract B-06 and the Definition of done: \"RUN_STATE_VERSION moves from 7 to 8 ... `src/eval-boundary.test.ts:127` pins that literal ... the pin is refreshed to `8`\" and \"`pnpm run typecheck`, `pnpm test:fast` and the heavy suites this scope touches pass\" — a schema bump leaves no reader asserting the previous literal, and the deterministic suite stays green on the candidate.",
+      "observed": "src/qa-orchestration.test.ts:1028 still asserts `expect(state.version).toBe(7)` and src/qa-orchestration-gates.test.ts:1043 still asserts `expect(bumped.version).toBe(7)`. Both now read 8 and fail. The adaptation behavior itself is intact (v3/v4/v6/v7 files still load with every other member present, asserted by the new [behavior:#301:P-04] test); only these two stale literals are wrong, and they are outside the contract's thirteen declared paths.",
+      "clearCondition": "`pnpm run test:heavy:qa` passes on the candidate tree, with no assertion in src/qa-orchestration.test.ts or src/qa-orchestration-gates.test.ts pinning a superseded RUN_STATE_VERSION literal. Refreshing those two pins requires the orchestrator to extend the locked file list, since neither path is one this slice changed and the amendment mechanism covers only changed paths.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    }
+  ]
+}
