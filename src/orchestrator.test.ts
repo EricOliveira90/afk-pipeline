@@ -8635,6 +8635,107 @@ describe("the audited-tree gate re-run call site", () => {
   });
 });
 
+/**
+ * What the hub binds at that one call site, and what it records after it
+ * (#301 B-03, B-06, B-08, P-03, P-06).
+ *
+ * A source-order scan for the reason the two scans above are: `--self-audit` is
+ * default off, so no spawned scenario reaches the stage, and every claim here is
+ * a fact about this file — which budget the stage is handed, where run identity
+ * comes from, and that the outcome event lands between the audit and the QA
+ * dispatch under the result's `ran` narrowing.
+ */
+describe("the self-audit accounting at the hub's call site", () => {
+  const source = readFileSync(
+    fileURLToPath(new URL("./orchestrator.ts", import.meta.url)),
+    "utf-8",
+  ).replace(/\r\n/g, "\n");
+  const auditAt = source.indexOf("runSelfAuditStage(");
+  const qaDispatchAt = source.indexOf("await runQAStage(");
+  /** The call's own argument list: from the call token to its closing `});`. */
+  const stageArgs = source.slice(auditAt, source.indexOf("\n        });", auditAt));
+
+  it("[behavior:#301:B-03] hands the stage the run's own infrastructure-retry budget", () => {
+    // The operator budget travels in rather than being imported: the stage never
+    // reaches for the hub's constant, which would be an import cycle.
+    expect(stageArgs).toContain("infrastructureRetries:");
+    expect(stageArgs).toContain(
+      "config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES,",
+    );
+    const selfAudit = readFileSync(
+      fileURLToPath(new URL("./self-audit.ts", import.meta.url)),
+      "utf-8",
+    );
+    // Named in the stage's doc comment, which is the point — and imported
+    // nowhere, which is the claim.
+    expect(selfAudit).not.toMatch(
+      /import[^;]*DEFAULT_INFRASTRUCTURE_RETRIES[^;]*;/s,
+    );
+    expect(selfAudit).not.toContain("./orchestrator.js");
+  });
+
+  it("[behavior:#301:B-06] binds run identity from the one existing stamping helper", () => {
+    // Provenance on the persisted outcome comes from the run directory's name
+    // (ADR 0017), not from a clock or a counter the stage keeps.
+    expect(stageArgs).toContain("runId: runIdFor(logger.runDir),");
+  });
+
+  it("[behavior:#301:B-08] records exactly one outcome event, guarded by the ran narrowing", () => {
+    const eventCalls = [
+      ...source.matchAll(/logger\.recordSelfAuditOutcomeEvent\(/g),
+    ].map((match) => match.index!);
+
+    expect(eventCalls).toHaveLength(1);
+    const eventAt = eventCalls[0]!;
+    // Between the audit and the dispatch, so the event exists before anything
+    // grades the tree it describes.
+    expect(eventAt).toBeGreaterThan(auditAt);
+    expect(eventAt).toBeLessThan(qaDispatchAt);
+
+    // Guarded by the result's own narrowing: a declined or spent-on-resume stage
+    // emits nothing, so a total over the stream counts audits, not stage entries.
+    const guardAt = source.lastIndexOf("if (selfAuditOutcome.ran) {", eventAt);
+    expect(guardAt).toBeGreaterThan(auditAt);
+    expect(guardAt).toBeLessThan(eventAt);
+
+    const eventArgs = source.slice(eventAt, source.indexOf("\n        }", eventAt));
+    expect(eventArgs).toContain("sliceNumber: slice.number,");
+    expect(eventArgs).toContain("round,");
+    expect(eventArgs).toContain("runId: runIdFor(logger.runDir),");
+    expect(eventArgs).toContain("candidateTreeId: checkpoint.treeId,");
+    // The audited id rides only on a graded verdict.
+    expect(eventArgs).toContain('selfAuditOutcome.verdict === "AUDIT_NOT_RUN"');
+    expect(eventArgs).toContain("auditedTreeId: selfAuditOutcome.treeId }");
+  });
+
+  it("[behavior:#301:P-03] spends no round of its own between the audit and the QA dispatch", () => {
+    // The retry replaces a dead invocation; it does not advance a generator
+    // round, and neither does recording the outcome.
+    const region = source.slice(auditAt, qaDispatchAt);
+    expect(region).not.toContain("logger.bumpEvalRound(");
+  });
+
+  it("[behavior:#301:P-06] keeps the single call site in its present position", () => {
+    expect(
+      [...source.matchAll(/runSelfAuditStage\(/g)].map((match) => match.index),
+    ).toHaveLength(1);
+    const requiredFailuresAt = source.indexOf(
+      "requiredFailures = collectRequiredGateFailures(",
+    );
+    const gateReleaseAt = source.indexOf(
+      "assertGateEvidenceReleasesEvaluation(",
+    );
+    expect(requiredFailuresAt).toBeGreaterThan(-1);
+    expect(gateReleaseAt).toBeGreaterThan(requiredFailuresAt);
+    expect(gateReleaseAt).toBeLessThan(auditAt);
+    expect(auditAt).toBeLessThan(qaDispatchAt);
+    // And the injected dispatch keeps its present body and per-invocation
+    // bounds: this slice bounds how many times it may be called, not what it is.
+    expect(stageArgs).toContain('role: "generator",');
+    expect(stageArgs).toContain("longCommandRoleBounds({");
+  });
+});
+
 function escapeForRegExp(token: string): string {
   return token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

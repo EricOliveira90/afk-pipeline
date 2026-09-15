@@ -6434,11 +6434,19 @@ export async function runSliceExecute(
           repoRoot: config.repoRoot,
           prdSlug: config.prdSlug,
           ghIssue: slice.ghIssue,
+          // Run-ID provenance on the persisted outcome, from the one existing
+          // stamping helper (#301 B-06): the stage never derives run identity.
+          runId: runIdFor(logger.runDir),
           worktreeDir: ctx.worktreeDir,
           sliceDir: ctx.relSliceDir,
           ...(config.selfAudit !== undefined
             ? { selfAudit: config.selfAudit }
             : {}),
+          // The same operator budget ADR 0025's other retries honour (#301
+          // B-03): an infrastructure-classified dead invocation is re-dispatched
+          // under it, and nothing else is.
+          infrastructureRetries:
+            config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES,
           qaBaseGate,
           checkpoint,
           changeSummary: () =>
@@ -6475,6 +6483,23 @@ export async function runSliceExecute(
             }
           },
         });
+        // One event per landed outcome and none otherwise (#301 B-08): a
+        // declined or spent-on-resume stage emits nothing, so a total over the
+        // stream counts audits rather than stage entries. Measurement only
+        // (ADR 0063) — nothing downstream branches on it.
+        if (selfAuditOutcome.ran) {
+          logger.recordSelfAuditOutcomeEvent({
+            ghIssue: slice.ghIssue,
+            sliceNumber: slice.number,
+            round,
+            runId: runIdFor(logger.runDir),
+            candidateTreeId: checkpoint.treeId,
+            ...(selfAuditOutcome.verdict === "AUDIT_NOT_RUN"
+              ? {}
+              : { auditedTreeId: selfAuditOutcome.treeId }),
+            verdict: selfAuditOutcome.verdict,
+          });
+        }
         /**
          * The changed-tree path (#300 B-05, ADR 0069). A tree the audit rewrote
          * has not been through the required cheap gates, so exactly the
