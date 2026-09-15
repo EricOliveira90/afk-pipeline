@@ -34,8 +34,15 @@ import {
   emptyContractFindingLineage,
   loadContractFindingLineage,
 } from "./contract-convergence.js";
-import { executeRecoveryAttempt } from "./preserve-work-recovery.js";
 import {
+  completeRecoveryAttempt,
+  executeRecoveryAttempt,
+  recoveryPreDispatchRefusal,
+} from "./preserve-work-recovery.js";
+import { RECOVERY_FINGERPRINT_ABSENT, loadRunState } from "./run-state.js";
+import {
+  RECOVERY_REOPENED_CONTRACT,
+  RECOVERY_REPLACEMENT_CONTRACT,
   allRunLogs,
   buildProvider,
   cleanupResumeTempDirs,
@@ -45,6 +52,7 @@ import {
   makeRepo,
   makeSlice,
   plantUnresolvedRecoveryTargets,
+  writeRecoveryReplacementPair,
   sliceLogLines,
   sliceNumberFromCwd,
   writePrdFixture,
@@ -1340,5 +1348,105 @@ describe("preserved-work recovery attempt execution over persisted run state", (
         ghIssue: fixture.ghIssue,
       }),
     ).toEqual(emptyContractFindingLineage());
+  });
+
+  /*
+   * The completion over the same persisted run state, and the dispatch answer a
+   * launch would read off it afterwards (#335 B-02/B-04/P-05).
+   *
+   * An `it` on this file's existing recovery fixture rather than a spawned
+   * scenario: what it adds over the unit tests is that a *resumed* run's whole
+   * document — resume counters, migration claims, the guardian ledger, a second
+   * slice's checkpoint and lineage — survives a completion, and that needs the
+   * fixture's document, not a pipeline (`AGENTS.md` assertion ladder).
+   */
+  it("[behavior:#335:B-02] [behavior:#335:B-04] completes the attempt, changes only the lineage and then answers dispatch", () => {
+    const fixture = makeRecoveryExecutionFixture();
+    const replacement = writeRecoveryReplacementPair(fixture);
+    const before = JSON.parse(readFileSync(fixture.statePath, "utf-8"));
+    expect(before.recoveryLineage[fixture.ghIssue]).toHaveLength(1);
+    expect(before.reviewPhase.rounds).toHaveLength(1);
+    expect(before.migrations.claims[fixture.ghIssue]).toEqual(["125"]);
+    // A completed pair is what unblocks dispatch, so the hold has to be the
+    // answer before the completion — otherwise `undefined` below proves nothing.
+    const state = () => loadRunState(fixture.repo, fixture.runSlug);
+    expect(
+      recoveryPreDispatchRefusal(state(), fixture.ghIssue, fixture.sliceDir),
+    ).toBeUndefined();
+
+    const gateCalls: string[] = [];
+    const result = completeRecoveryAttempt({
+      repoRoot: fixture.repo,
+      prdSlug: fixture.slug,
+      sliceDir: fixture.sliceDir,
+      ghIssue: fixture.ghIssue,
+      lockGate: (contractPath) => {
+        gateCalls.push(contractPath);
+        return null;
+      },
+      provenance: "renegotiated under the run-state lock, resumed run",
+    });
+
+    expect(result.completed).toBe(true);
+    expect(gateCalls).toEqual([join(fixture.sliceDir, "contract.md")]);
+    const after = JSON.parse(readFileSync(fixture.statePath, "utf-8"));
+    expect(Object.keys(after).sort()).toEqual(Object.keys(before).sort());
+    const differing = Object.keys(before).filter(
+      (key) => JSON.stringify(after[key]) !== JSON.stringify(before[key]),
+    );
+    expect(differing).toEqual(["recoveryLineage"]);
+    expect(after.resume).toEqual(before.resume);
+    expect(after.migrations).toEqual(before.migrations);
+    expect(after.reviewPhase).toEqual(before.reviewPhase);
+    expect(after.stageCheckpoints).toEqual(before.stageCheckpoints);
+    expect(after.contractConvergence).toEqual(before.contractConvergence);
+    expect(after.scope).toEqual(before.scope);
+
+    const events = after.recoveryLineage[fixture.ghIssue];
+    expect(events).toHaveLength(2);
+    expect(events[0]).toEqual(before.recoveryLineage[fixture.ghIssue][0]);
+    expect(events[1]).toMatchObject({
+      attemptId: fixture.attemptId,
+      state: "COMPLETED",
+      replacementContractFingerprint: replacement.contractFingerprint,
+      replacementManifestFingerprint: replacement.manifestFingerprint,
+      lockProvenance: "renegotiated under the run-state lock, resumed run",
+      extensions: [],
+    });
+    // The snapshot the attempt was admitted with is untouched, and no new one
+    // was published: a completion publishes nothing.
+    expect(
+      readdirSync(join(fixture.sliceDir, "recovery-snapshots")).sort(),
+    ).toEqual([fixture.attemptId]);
+    expect(
+      readFileSync(
+        join(fixture.sliceDir, "recovery-snapshots", fixture.attemptId, "contract.md"),
+        "utf-8",
+      ),
+    ).not.toBe(RECOVERY_REPLACEMENT_CONTRACT);
+
+    // What a launch now reads off the completed lineage: dispatch proceeds while
+    // the completed pair is on disk, and holds the moment it is not.
+    expect(
+      recoveryPreDispatchRefusal(state(), fixture.ghIssue, fixture.sliceDir),
+    ).toBeUndefined();
+    writeFileSync(
+      join(fixture.sliceDir, "contract.md"),
+      RECOVERY_REOPENED_CONTRACT,
+      "utf-8",
+    );
+    const held = recoveryPreDispatchRefusal(
+      state(),
+      fixture.ghIssue,
+      fixture.sliceDir,
+    );
+    expect(held?.code).toBe("completed-pair-drifted");
+    expect(held?.attemptId).toBe(fixture.attemptId);
+    expect(held?.observedContractFingerprint).toBe(RECOVERY_FINGERPRINT_ABSENT);
+    expect(held?.observedManifestFingerprint).toBe(RECOVERY_FINGERPRINT_ABSENT);
+    // And the hold is a read: it wrote nothing back.
+    expect(
+      JSON.parse(readFileSync(fixture.statePath, "utf-8")).recoveryLineage,
+    ).toEqual(after.recoveryLineage);
   });
 });

@@ -27,7 +27,9 @@ import {
   type ContractFindingLineage,
 } from "./contract-convergence.js";
 import { recordExactStageCheckpoint } from "./exact-stage-resume.js";
+import { runScopeFingerprint } from "./preserve-work-recovery.js";
 import { RECOVERY_FINGERPRINT_ABSENT } from "./run-state.js";
+import type { PersistedRunScope } from "./slice-scope.js";
 import { validExplorerContext } from "./explorer-test-fixtures.js";
 import type { Slice } from "./issues-parser.js";
 import { writeContractReview, writeQAReview } from "./test-support.js";
@@ -657,6 +659,71 @@ export const RECOVERY_REOPENED_CONTRACT = [
   "**Status:** NEGOTIATING",
   "",
 ].join("\n");
+
+/** The valid LOCKED pair a renegotiation puts in place of the stale one (#335). */
+export const RECOVERY_REPLACEMENT_CONTRACT = [
+  "# Slice Contract — recovery fixture, renegotiated",
+  "",
+  "**Status:** LOCKED",
+  "",
+  "### In scope",
+  "",
+  "- [behavior:B-01] The fixture behavior, restated after the pair went stale.",
+  "",
+].join("\n");
+
+/** What a caller needs to say which pair a completion should have recorded. */
+export interface RecoveryReplacementPair {
+  contract: string;
+  manifest: string;
+  contractFingerprint: string;
+  manifestFingerprint: string;
+}
+
+/**
+ * Put the fixture where a completion is called from (#335 B-02/B-04).
+ *
+ * Two edits, both of them the renegotiation's own doing. The replacement pair
+ * replaces the stale one in the live artifact directory — the manifest is reused
+ * byte-for-byte, so the contract fingerprint alone moves and a completion that
+ * recorded the wrong file cannot pass. And the committed `PENDING` event's
+ * `scopeFingerprint` is rewritten to the digest of the scope actually persisted
+ * here: this fixture records a stand-in value, which the rollback and
+ * reconciliation paths never read, but a completion rechecks it under the lock
+ * and would refuse a stand-in as lost consensus.
+ *
+ * The published snapshot is left alone, because the pair it holds is exactly what
+ * a rollback would have to put back.
+ */
+export function writeRecoveryReplacementPair(
+  fixture: RecoveryExecutionFixture,
+): RecoveryReplacementPair {
+  writeRecoveryFiles(fixture.sliceDir, {
+    "contract.md": RECOVERY_REPLACEMENT_CONTRACT,
+    "acceptance-manifest.json": RECOVERY_ACCEPTED_MANIFEST,
+  });
+  const document = JSON.parse(readFileSync(fixture.statePath, "utf-8")) as {
+    scope: PersistedRunScope;
+    recoveryLineage: Record<string, Record<string, unknown>[]>;
+  };
+  const scopeFingerprint = runScopeFingerprint(document.scope);
+  document.recoveryLineage[fixture.ghIssue] = document.recoveryLineage[
+    fixture.ghIssue
+  ]!.map((event) => ({ ...event, scopeFingerprint }));
+  writeFileSync(
+    fixture.statePath,
+    `${JSON.stringify(document, null, 2)}\n`,
+    "utf-8",
+  );
+  const digest = (text: string): string =>
+    createHash("sha256").update(text, "utf-8").digest("hex");
+  return {
+    contract: RECOVERY_REPLACEMENT_CONTRACT,
+    manifest: RECOVERY_ACCEPTED_MANIFEST,
+    contractFingerprint: digest(RECOVERY_REPLACEMENT_CONTRACT),
+    manifestFingerprint: digest(RECOVERY_ACCEPTED_MANIFEST),
+  };
+}
 
 /** One unresolved target planted beside the fixture's own, with its expectation. */
 export interface PlantedRecoveryTarget {
