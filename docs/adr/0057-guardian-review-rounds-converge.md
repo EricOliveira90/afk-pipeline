@@ -122,6 +122,28 @@ recorded-acknowledgement exit signal is only available once the findings are
 durably filed, so a cap exit can never report success on findings that exist
 nowhere but the ledger.
 
+*Amendment, 2026-09-14 (issue #320).* Filing an issue starts a lifecycle;
+decision 4 only specified its first step. Every pass now reconciles the issues
+earlier rounds filed against the folded ledger: a still-live finding gets the
+latest evidence commented onto its open issue, an explicit `RESOLVED` closes it
+with the round, commit and review artifact cited, and a finding that comes back
+reopens it. PRD 5 is the record of the gap — its final architecture review
+marked four findings `RESOLVED` while their issues stayed open, and the operator
+diffed artifacts against issue bodies by hand to find the live work.
+
+Reconciliation is asymmetric with filing on purpose, in three ways. Identity
+must be corroborated (ADR 0065): a stable-ID match whose fingerprint disagrees
+closes nothing, because filing's worst mistake is a duplicate issue while this
+one's is closing somebody else's. Ambiguity is an outcome: a colliding ID, two
+findings sharing one fingerprint, a record naming another PRD or no addressable
+issue leaves the issue exactly as it is and says so in the run summary and the
+terminal handoff. And unlike the cap's filing, no tracker failure can fail a
+run — the guardians' verdicts are the gate, and a `gh` outage says nothing about
+them. Each decision applies once per ledger round, recorded on the filing
+record, so a resumed or cache-served pass is silent; a decision's memory is
+written only when every call it needed succeeded, which prefers one duplicate
+comment over a `CLOSED` record over an issue that is still open.
+
 **5. `--open-pr-on-override` stays the attended exit valve.** The 2026-08-31
 amendment to ADR 0015 already made it symmetric (either single blocking
 guardian can be overridden when the other is favorable); this ADR keeps that

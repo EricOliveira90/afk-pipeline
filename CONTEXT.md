@@ -525,6 +525,24 @@ _Avoid_: "timeout" (this counts rounds, not time), "give up" (the findings
 are filed and the branch ships as a draft), "auto-merge" (a human merges),
 "override" (that one is operator-requested; this one is the clock)
 
+**Finding reconciliation**:
+What the **ship gate** tells the tracker about issues earlier rounds already
+filed, once a later round has spoken. On every pass it matches each filed
+record onto the folded ledger by stable ID first and fingerprint second —
+an ID alone is never identity — then comments the latest evidence onto a
+finding that is still live, closes one an explicit `RESOLVED` cleared, reopens
+one that came back, or refuses out loud when identity or evidence is
+ambiguous. Only a close needs evidence no older than the round that filed the
+issue. Each decision is applied once per ledger round, so a resumed or cached
+pass is silent, and every tracker failure is data: an outage never fails a run.
+The issues left open are reported in `handoff.json`'s
+`unresolvedGuardianIssues` and `run-summary.md`'s Guardian Finding Issues
+section, both projected from the same `guardian-issue-reconciliation` events.
+See #320.
+_Avoid_: "sync" / "syncing issues" (this is one-directional — the ledger is
+authoritative and the tracker is told), "dedup" (that is **filing**'s job,
+before an issue exists), "auto-close" (a refusal is a first-class outcome)
+
 **Cancellation**:
 External termination via `AbortSignal` (typically SIGINT / Ctrl-C).
 In-flight agent invocations are killed immediately, unstarted slices are
