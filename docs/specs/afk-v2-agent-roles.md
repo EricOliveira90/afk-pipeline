@@ -312,6 +312,13 @@ Decisions:
   TDD ritual section entirely.
 - **Escalation channel** (M4): a fix outside the declared files is
   never the generator's to make — escalate, do not edit, do not stall.
+- **The generator reads the whole locked contract**, from
+  `{{SLICE_DIR}}/contract.md` in its own worktree (#269, ADR 0068). No
+  projection of it enters the prompt or the envelope input: there is no
+  list of contract sections a generator is or is not shown, so no round
+  can be starved of a section the contract decided (#284). Unlike the
+  explorer evidence map — which *is* routed by section, one paragraph up
+  in §1 — the contract is one indivisible artifact the round opens.
 - Repair input is the orchestrator-computed unresolved set: finding IDs
   with clear-conditions plus gate failures with gate IDs, one uniform
   block, last in the prompt.

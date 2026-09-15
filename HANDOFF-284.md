@@ -58,9 +58,16 @@ Branch: `fix/284-drop-contract-view` (pushed to `origin`, no PR opened).
   never `input.contractView`, so the by-reference evidence, the
   `includedArtifactIds` ordering assertions and the overflow breakdown's
   "by reference: acceptance-manifest, contract-view" line are all unaffected.
-- `docs/specs/afk-v2-agent-roles.md`. It does not repeat the projected-sections
-  claim; its generator skeleton already says "Read `{{SLICE_DIR}}/contract.md`",
-  which is the amended position. Nothing to mirror.
+
+## Also changed
+
+`docs/specs/afk-v2-agent-roles.md` never repeated the projected-sections claim,
+so there was nothing to correct. But #284's clear condition names this file as a
+place that must *state* the generator reads the whole contract, and the closest
+it came was the prompt skeleton's "Read `{{SLICE_DIR}}/contract.md`". Added a
+§4 decision bullet saying it outright, and distinguishing the contract (one
+indivisible artifact the round opens) from the explorer evidence map (which is
+still routed by section, per §1).
 
 ## Symmetry audit (asked for before amending the ADR)
 
