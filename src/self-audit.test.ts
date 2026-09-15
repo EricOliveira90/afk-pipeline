@@ -10,14 +10,20 @@ import {
   type GateDeclaration,
 } from "./gate-runner.js";
 import { renderPrompt } from "./prompt-template.js";
+import { TransientProviderError } from "./agent-provider.js";
+import { buildSelfAuditOutcomeEvent } from "./run-events.js";
 import {
   RUN_STATE_VERSION,
   loadRunState,
+  recordSelfAuditOutcome,
   saveRunState,
   selfAuditsFor,
+  type PersistedSelfAuditVerdict,
 } from "./run-state.js";
 import {
+  classifySelfAuditFailure,
   classifySelfAuditVerdict,
+  isInfrastructureSelfAuditCause,
   resolveGradedCandidate,
   runSelfAuditStage,
   selectAuditedGateDeclarations,
@@ -32,6 +38,8 @@ function git(cwd: string, args: string[]): string {
 const PRD_SLUG = "generator-self-audit-gate";
 const GH_ISSUE = "299";
 const SLICE_DIR = `.kiro/specs/${PRD_SLUG}/slices/01-audit-invocation`;
+/** A run directory's name (ADR 0017) — the provenance a v8 outcome carries. */
+const RUN_ID = "20260915-120000-abcdef";
 
 /**
  * The stage's own boundary (#299 B-02, B-09, ADR 0069).
@@ -79,11 +87,14 @@ describe("runSelfAuditStage", () => {
     candidateTreeId?: string;
     dispatch: (input: SelfAuditDispatchInput) => Promise<void>;
     changeSummary?: () => string;
+    /** #301 B-03: `unknown` so a degenerate budget can be driven through. */
+    infrastructureRetries?: unknown;
   }) {
     return {
       repoRoot: stateRoot,
       prdSlug: PRD_SLUG,
       ghIssue: GH_ISSUE,
+      runId: RUN_ID,
       worktreeDir: worktree,
       sliceDir: SLICE_DIR,
       ...(overrides.selfAudit === undefined
@@ -95,6 +106,15 @@ describe("runSelfAuditStage", () => {
       checkpoint: { treeId: releasedTree },
       changeSummary: overrides.changeSummary ?? (() => "COMMIT-LOG"),
       dispatch: overrides.dispatch,
+      ...(overrides.infrastructureRetries === undefined
+        ? {}
+        : {
+            // A cast, deliberately: `-1`, `1.5`, `NaN` and a non-number all have
+            // to reach the stage, because the claim under test is that it
+            // degrades each to "no retry" instead of throwing.
+            infrastructureRetries:
+              overrides.infrastructureRetries as number,
+          }),
     };
   }
 
@@ -176,6 +196,7 @@ describe("runSelfAuditStage", () => {
         candidateTreeId: releasedTree,
         auditedTreeId: releasedTree,
         verdict: "AUDIT_UNCHANGED",
+        runId: RUN_ID,
       },
     ]);
 
@@ -205,11 +226,16 @@ describe("runSelfAuditStage", () => {
       treeId: releasedTree,
     });
     expect(logged.join("\n")).toContain("provider died mid-audit");
-    // Only AUDIT_UNCHANGED is persisted in this slice; the dead-invocation
-    // taxonomy is #301's.
-    expect(selfAuditsFor(loadRunState(stateRoot, PRD_SLUG), GH_ISSUE)).toEqual(
-      [],
-    );
+    // #301 B-04 made the recording unconditional: the invocation was spent
+    // whatever it produced, so the outcome is persisted with no `auditedTreeId`
+    // (there is no audited tree to name) rather than dropped.
+    expect(selfAuditsFor(loadRunState(stateRoot, PRD_SLUG), GH_ISSUE)).toEqual([
+      {
+        candidateTreeId: releasedTree,
+        verdict: "AUDIT_NOT_RUN",
+        runId: RUN_ID,
+      },
+    ]);
   });
 
   it("[behavior:#299:B-09] [behavior:#300:B-01] records AUDIT_CHANGED naming both trees when the audit rewrote the tree", async () => {
@@ -242,6 +268,7 @@ describe("runSelfAuditStage", () => {
         candidateTreeId: releasedTree,
         auditedTreeId: auditedTree,
         verdict: "AUDIT_CHANGED",
+        runId: RUN_ID,
       },
     ]);
     expect(recorded[0]!.candidateTreeId).not.toBe(recorded[0]!.auditedTreeId);
@@ -274,6 +301,7 @@ describe("runSelfAuditStage", () => {
         candidateTreeId: releasedTree,
         auditedTreeId: releasedTree,
         verdict: "AUDIT_UNCHANGED",
+        runId: RUN_ID,
       },
     ]);
     // Neither path mints an audited checkpoint or runs an extra gate. That is
@@ -290,10 +318,12 @@ describe("runSelfAuditStage", () => {
     expect(graded.baseGate).toBe(releasedBaseGate);
   });
 
-  it("[behavior:#300:P-03] records the changed verdict at schema v7 with no new field", async () => {
-    // No schema change, no migration, no version bump: the entry the changed
-    // tree writes uses the shape slice 1 landed, and nothing else.
-    expect(RUN_STATE_VERSION).toBe(7);
+  it("[behavior:#300:P-03] records the changed verdict with no field of the changed-tree path's own", async () => {
+    // The changed-tree path still adds no member of its own. The schema did move
+    // to 8, but for one reason that is not this path's: #301 B-06 widened every
+    // entry with `runId`, whatever verdict wrote it. So the shape asserted below
+    // is slice 1's three members plus that one, and nothing else.
+    expect(RUN_STATE_VERSION).toBe(8);
 
     await runSelfAuditStage(
       stageInput({
@@ -310,14 +340,599 @@ describe("runSelfAuditStage", () => {
     );
 
     const state = loadRunState(stateRoot, PRD_SLUG);
-    expect(state.version).toBe(7);
+    expect(state.version).toBe(8);
     const recorded = selfAuditsFor(state, GH_ISSUE);
     expect(recorded).toHaveLength(1);
     expect(Object.keys(recorded[0]!).sort()).toEqual([
       "auditedTreeId",
       "candidateTreeId",
+      "runId",
       "verdict",
     ]);
+  });
+
+  /* -------------------------------------------------------------------------
+   * The completed-invocation bound (#301)
+   * ----------------------------------------------------------------------- */
+
+  /** A rejection the classifier reads as `provider-exit`, i.e. infrastructure. */
+  const EXIT_1 = "Agent generator exited with code 1";
+  /** A rejection the classifier reads as an opted-in bound doing its job. */
+  const TOOL_CAP = "Agent generator exceeded 40 tool calls and was killed";
+
+  /** Reset the run-state file, so an earlier entry cannot read as spent. */
+  function resetRunState(): void {
+    // `saveRunState` refuses to replace an existing file from a whole-file
+    // snapshot, which is the guard working: the file goes first.
+    rmSync(join(stateRoot, ".afk", "state", `${PRD_SLUG}.json`), {
+      force: true,
+    });
+    saveRunState(stateRoot, {
+      version: RUN_STATE_VERSION,
+      prdSlug: PRD_SLUG,
+      featureBranch: `feat/${PRD_SLUG}`,
+      slices: {},
+    });
+  }
+
+  /** Persist one outcome for this issue, as an interrupted earlier run would. */
+  function seedOutcome(entry: {
+    candidateTreeId: string;
+    auditedTreeId?: string;
+    verdict: PersistedSelfAuditVerdict;
+  }): void {
+    recordSelfAuditOutcome(stateRoot, PRD_SLUG, GH_ISSUE, {
+      ...entry,
+      runId: "20260914-090000-earlier",
+    });
+  }
+
+  it("[behavior:#301:B-03] retries an infrastructure-classified dead invocation under the run's budget and stops on the first completed one", async () => {
+    const logged: string[] = [];
+    let attempts = 0;
+    const dispatch = vi.fn(async () => {
+      attempts += 1;
+      // Two dead invocations, then one that completes leaving the tree alone.
+      if (attempts <= 2) throw new Error(EXIT_1);
+    });
+
+    const result = await runSelfAuditStage({
+      ...stageInput({ selfAudit: true, dispatch, infrastructureRetries: 2 }),
+      log: (message) => logged.push(message),
+    });
+
+    // `infrastructureRetries + 1` attempts, and the loop exits on the first
+    // completed one: a retry replaces a dead invocation rather than buying a
+    // second completed challenge.
+    expect(dispatch).toHaveBeenCalledTimes(3);
+    expect(result).toEqual({
+      ran: true,
+      verdict: "AUDIT_UNCHANGED",
+      treeId: releasedTree,
+    });
+    // One completed invocation, so one entry — not one per attempt.
+    expect(selfAuditsFor(loadRunState(stateRoot, PRD_SLUG), GH_ISSUE)).toEqual([
+      {
+        candidateTreeId: releasedTree,
+        auditedTreeId: releasedTree,
+        verdict: "AUDIT_UNCHANGED",
+        runId: RUN_ID,
+      },
+    ]);
+
+    // Narrated through the existing sink, in the shared retry vocabulary: no new
+    // typed warn event and no new warn reason.
+    const retries = logged.filter((line) =>
+      line.startsWith("self-audit: infrastructure retry"),
+    );
+    expect(retries).toHaveLength(2);
+    expect(retries[0]).toContain("retry 1/2 — ");
+    expect(retries[1]).toContain("retry 2/2 — ");
+    // The cause summary rides along, so an operator reading the log knows why.
+    for (const line of retries) expect(line).toContain("exited with code 1");
+  });
+
+  it("[behavior:#301:B-03] [behavior:#301:B-02] never retries a non-infrastructure cause", async () => {
+    const logged: string[] = [];
+    const capped = vi.fn(async () => {
+      throw new Error(TOOL_CAP);
+    });
+
+    // A tool-call cap only exists because a caller opted in (ADR 0036), so
+    // tripping it is the bound working, not infrastructure flaking — a verbatim
+    // retry would spend another full budget re-hitting it.
+    await expect(
+      runSelfAuditStage({
+        ...stageInput({ selfAudit: true, dispatch: capped, infrastructureRetries: 2 }),
+        log: (message) => logged.push(message),
+      }),
+    ).resolves.toEqual({
+      ran: true,
+      verdict: "AUDIT_NOT_RUN",
+      treeId: releasedTree,
+    });
+    expect(capped).toHaveBeenCalledTimes(1);
+
+    resetRunState();
+
+    // An envelope that fails closed is an `internal-error`: a pipeline-internal
+    // throw whose blast radius a retry cannot change. Assembly happens before
+    // the callback, so the attempt is counted by the change-summary supplier the
+    // envelope pulls — the dispatch spy is never reached at all.
+    const unreached = vi.fn(async () => {});
+    const changeSummary = vi.fn(() => {
+      throw new Error("manifest is unreadable");
+    });
+    await expect(
+      runSelfAuditStage({
+        ...stageInput({
+          selfAudit: true,
+          dispatch: unreached,
+          changeSummary,
+          infrastructureRetries: 2,
+        }),
+        log: (message) => logged.push(message),
+      }),
+    ).resolves.toEqual({
+      ran: true,
+      verdict: "AUDIT_NOT_RUN",
+      treeId: releasedTree,
+    });
+    expect(changeSummary).toHaveBeenCalledTimes(1);
+    expect(unreached).toHaveBeenCalledTimes(0);
+
+    expect(
+      logged.filter((line) =>
+        line.startsWith("self-audit: infrastructure retry"),
+      ),
+    ).toEqual([]);
+  });
+
+  it("[behavior:#301:B-03] reads every degenerate retry budget as zero rather than throwing", async () => {
+    // This stage may never block a run by its own failure, its own input
+    // validation included: an operator-supplied budget that makes no sense costs
+    // the run its audit, never the slice. `undefined` must not read as unbounded.
+    const budgets: unknown[] = [undefined, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "2"];
+
+    for (const budget of budgets) {
+      resetRunState();
+      const logged: string[] = [];
+      const dispatch = vi.fn(async () => {
+        throw new Error(EXIT_1);
+      });
+
+      await expect(
+        runSelfAuditStage({
+          ...stageInput({
+            selfAudit: true,
+            dispatch,
+            ...(budget === undefined ? {} : { infrastructureRetries: budget }),
+          }),
+          log: (message) => logged.push(message),
+        }),
+        String(budget),
+      ).resolves.toEqual({
+        ran: true,
+        verdict: "AUDIT_NOT_RUN",
+        treeId: releasedTree,
+      });
+      expect(dispatch, String(budget)).toHaveBeenCalledTimes(1);
+      expect(
+        logged.filter((line) =>
+          line.startsWith("self-audit: infrastructure retry"),
+        ),
+        String(budget),
+      ).toEqual([]);
+    }
+  });
+
+  it("[behavior:#301:B-04] records AUDIT_NOT_RUN with the run's id and no audited tree when the budget is exhausted", async () => {
+    const dispatch = vi.fn(async () => {
+      throw new Error(EXIT_1);
+    });
+
+    await runSelfAuditStage(
+      stageInput({ selfAudit: true, dispatch, infrastructureRetries: 1 }),
+    );
+
+    // `infrastructureRetries: 1` buys one retry: two attempts, both dead.
+    expect(dispatch).toHaveBeenCalledTimes(2);
+    const recorded = selfAuditsFor(loadRunState(stateRoot, PRD_SLUG), GH_ISSUE);
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]).toEqual({
+      candidateTreeId: releasedTree,
+      verdict: "AUDIT_NOT_RUN",
+      runId: RUN_ID,
+    });
+    // Absent rather than blank or equal to the released id: after a dead
+    // invocation there is no audited tree to name honestly.
+    expect("auditedTreeId" in recorded[0]!).toBe(false);
+  });
+
+  it("[behavior:#301:B-04] records AUDIT_NOT_RUN when the invocation completed but its tree cannot be resolved", async () => {
+    const dispatch = vi.fn(async () => {
+      // Completed, and left behind a worktree nothing can hash.
+      rmSync(join(worktree, ".git"), { recursive: true, force: true });
+    });
+
+    await expect(
+      runSelfAuditStage(stageInput({ selfAudit: true, dispatch })),
+    ).resolves.toEqual({
+      ran: true,
+      verdict: "AUDIT_NOT_RUN",
+      treeId: releasedTree,
+    });
+
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    const recorded = selfAuditsFor(loadRunState(stateRoot, PRD_SLUG), GH_ISSUE);
+    expect(recorded).toEqual([
+      {
+        candidateTreeId: releasedTree,
+        verdict: "AUDIT_NOT_RUN",
+        runId: RUN_ID,
+      },
+    ]);
+    expect("auditedTreeId" in recorded[0]!).toBe(false);
+  });
+
+  it("[behavior:#301:B-05] proceeds to QA on the released tree whatever killed the audit", async () => {
+    for (const [label, message] of [
+      ["infrastructure", EXIT_1],
+      ["non-infrastructure", "something broke inside the pipeline"],
+    ] as const) {
+      resetRunState();
+      // Neither await rejects: the audit's own death is not the run's death.
+      await expect(
+        runSelfAuditStage(
+          stageInput({
+            selfAudit: true,
+            infrastructureRetries: 1,
+            dispatch: async () => {
+              throw new Error(message);
+            },
+          }),
+        ),
+        label,
+      ).resolves.toEqual({
+        ran: true,
+        verdict: "AUDIT_NOT_RUN",
+        treeId: releasedTree,
+      });
+    }
+
+    // And with no audited value the graded candidate is the released pair, the
+    // base-gate object included by identity — so the hub's changed-tree branch
+    // cannot be entered off an AUDIT_NOT_RUN.
+    const released = { treeId: releasedTree, commitSha: "a".repeat(40) };
+    const releasedBaseGate = { candidateTreeId: releasedTree };
+    const graded = resolveGradedCandidate({ released, releasedBaseGate });
+    expect(graded).toEqual({ ...released, baseGate: releasedBaseGate });
+    expect(graded.baseGate).toBe(releasedBaseGate);
+  });
+
+  it("[behavior:#301:B-07] dispatches nothing when a persisted outcome already names the tree in hand", async () => {
+    const spentCases: Array<{
+      label: string;
+      entry: {
+        candidateTreeId: string;
+        auditedTreeId?: string;
+        verdict: PersistedSelfAuditVerdict;
+      };
+    }> = [
+      {
+        label: "AUDIT_UNCHANGED on this tree",
+        entry: {
+          candidateTreeId: releasedTree,
+          auditedTreeId: releasedTree,
+          verdict: "AUDIT_UNCHANGED",
+        },
+      },
+      {
+        // A run resumed after AUDIT_CHANGED re-hashes the *audited* tree as its
+        // released tree, so the pre-audit id is no longer the id in hand.
+        label: "AUDIT_CHANGED whose audited tree is this one",
+        entry: {
+          candidateTreeId: "b".repeat(40),
+          auditedTreeId: releasedTree,
+          verdict: "AUDIT_CHANGED",
+        },
+      },
+      {
+        label: "AUDIT_NOT_RUN on this tree",
+        entry: {
+          candidateTreeId: releasedTree,
+          verdict: "AUDIT_NOT_RUN",
+        },
+      },
+    ];
+
+    for (const { label, entry } of spentCases) {
+      resetRunState();
+      seedOutcome(entry);
+      const dispatch = vi.fn(async () => {});
+
+      await expect(
+        runSelfAuditStage(stageInput({ selfAudit: true, dispatch })),
+        label,
+      ).resolves.toEqual({ ran: false, spent: entry.verdict });
+
+      expect(dispatch, label).toHaveBeenCalledTimes(0);
+      // Nothing recorded either: a spent invocation is not re-spent and not
+      // double-counted in the totals the summary reports.
+      expect(
+        selfAuditsFor(loadRunState(stateRoot, PRD_SLUG), GH_ISSUE),
+        label,
+      ).toHaveLength(1);
+    }
+
+    // An entry naming some other tree in both fields is somebody else's
+    // invocation, so this tree still gets its one audit.
+    resetRunState();
+    seedOutcome({
+      candidateTreeId: "c".repeat(40),
+      auditedTreeId: "d".repeat(40),
+      verdict: "AUDIT_UNCHANGED",
+    });
+    const dispatch = vi.fn(async () => {});
+
+    await expect(
+      runSelfAuditStage(stageInput({ selfAudit: true, dispatch })),
+    ).resolves.toEqual({
+      ran: true,
+      verdict: "AUDIT_UNCHANGED",
+      treeId: releasedTree,
+    });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(selfAuditsFor(loadRunState(stateRoot, PRD_SLUG), GH_ISSUE)).toHaveLength(
+      2,
+    );
+  });
+
+  it("[behavior:#301:B-08] builds the outcome event from a stage result, with the audited tree only when there is one", async () => {
+    const unchanged = await runSelfAuditStage(
+      stageInput({ selfAudit: true, dispatch: async () => {} }),
+    );
+    expect(unchanged.ran).toBe(true);
+
+    const graded = buildSelfAuditOutcomeEvent({
+      ghIssue: GH_ISSUE,
+      sliceNumber: "03",
+      round: 2,
+      runId: RUN_ID,
+      candidateTreeId: releasedTree,
+      auditedTreeId: (unchanged as { treeId: string }).treeId,
+      verdict: "AUDIT_UNCHANGED",
+    });
+    expect(graded).toEqual({
+      type: "self-audit-outcome",
+      ghIssue: GH_ISSUE,
+      sliceNumber: "03",
+      round: 2,
+      runId: RUN_ID,
+      candidateTreeId: releasedTree,
+      auditedTreeId: releasedTree,
+      verdict: "AUDIT_UNCHANGED",
+    });
+
+    // The AUDIT_NOT_RUN shape omits the key rather than carrying it undefined,
+    // so a reader cannot mistake "no audited tree" for "audited tree unknown".
+    const notRun = buildSelfAuditOutcomeEvent({
+      ghIssue: GH_ISSUE,
+      sliceNumber: "03",
+      round: 2,
+      runId: RUN_ID,
+      candidateTreeId: releasedTree,
+      verdict: "AUDIT_NOT_RUN",
+    });
+    expect("auditedTreeId" in notRun).toBe(false);
+    expect(notRun.verdict).toBe("AUDIT_NOT_RUN");
+  });
+
+  it("[behavior:#301:P-01] declines with no spent member, no entry and nothing dispatched", async () => {
+    const declines: Array<[string, Parameters<typeof stageInput>[0]]> = [
+      ["not opted in", { dispatch: vi.fn(async () => {}) }],
+      [
+        "released evidence names another tree",
+        {
+          selfAudit: true,
+          candidateTreeId: "e".repeat(40),
+          dispatch: vi.fn(async () => {}),
+        },
+      ],
+    ];
+
+    for (const [label, overrides] of declines) {
+      resetRunState();
+      const result = await runSelfAuditStage(stageInput(overrides));
+
+      expect(result, label).toEqual({ ran: false });
+      // `spent` distinguishes the resume short-circuit from these two, so its
+      // absence here is the load-bearing part of the shape.
+      expect("spent" in result, label).toBe(false);
+      expect(overrides.dispatch, label).toHaveBeenCalledTimes(0);
+      const state = loadRunState(stateRoot, PRD_SLUG);
+      expect(selfAuditsFor(state, GH_ISSUE), label).toEqual([]);
+      expect(state.selfAudits, label).toBeUndefined();
+    }
+  });
+
+  it("[behavior:#301:P-02] still grades the two structural verdicts from the tree comparison alone", async () => {
+    const unchangedDispatch = vi.fn(async () => {});
+    await expect(
+      runSelfAuditStage(
+        stageInput({ selfAudit: true, dispatch: unchangedDispatch }),
+      ),
+    ).resolves.toEqual({
+      ran: true,
+      verdict: "AUDIT_UNCHANGED",
+      treeId: releasedTree,
+    });
+    expect(unchangedDispatch).toHaveBeenCalledTimes(1);
+    const unchangedEntry = selfAuditsFor(
+      loadRunState(stateRoot, PRD_SLUG),
+      GH_ISSUE,
+    )[0]!;
+    expect(unchangedEntry.candidateTreeId).toBe(releasedTree);
+    expect(unchangedEntry.auditedTreeId).toBe(releasedTree);
+
+    resetRunState();
+    const changedDispatch = vi.fn(async () => {
+      writeFileSync(join(worktree, "src", "work.ts"), "export const v = 9;\n");
+      git(worktree, ["add", "-A"]);
+      git(worktree, ["commit", "-m", "fix: the audit found a gap (#301)"]);
+    });
+    const changed = await runSelfAuditStage(
+      stageInput({ selfAudit: true, dispatch: changedDispatch }),
+    );
+
+    expect(changed).toMatchObject({ ran: true, verdict: "AUDIT_CHANGED" });
+    expect(changedDispatch).toHaveBeenCalledTimes(1);
+    const changedEntry = selfAuditsFor(
+      loadRunState(stateRoot, PRD_SLUG),
+      GH_ISSUE,
+    )[0]!;
+    // Recorded before the stage returned, and the pair differs — which is the
+    // whole content of the verdict.
+    expect(changedEntry.candidateTreeId).toBe(releasedTree);
+    expect(changedEntry.auditedTreeId).toBe((changed as { treeId: string }).treeId);
+    expect(changedEntry.auditedTreeId).not.toBe(changedEntry.candidateTreeId);
+  });
+
+  it("[behavior:#301:P-03] spends one invocation when the first attempt completes, and keeps the audited path dispatch-free", async () => {
+    const dispatch = vi.fn(async () => {});
+
+    await runSelfAuditStage(
+      stageInput({ selfAudit: true, dispatch, infrastructureRetries: 2 }),
+    );
+
+    // A budget is not a quota: an invocation that completed is the one this
+    // submission gets, whatever the budget allowed.
+    expect(dispatch).toHaveBeenCalledTimes(1);
+
+    // And the changed-tree path still cannot re-challenge: it declares no way to
+    // dispatch, so the bound is structural rather than a counter.
+    const source = readFileSync("src/self-audit.ts", "utf-8");
+    const inputDecl = source.slice(
+      source.indexOf("export interface AuditedTreeVerificationInput"),
+    );
+    expect(inputDecl.slice(0, inputDecl.indexOf("\n}"))).not.toMatch(
+      /\bdispatch\b\s*[?:]/,
+    );
+    const body = source.slice(
+      source.indexOf("export async function verifyAuditedTree"),
+    );
+    const verifyBody = body.slice(0, body.indexOf("\n}\n"));
+    expect(verifyBody).not.toContain("runSelfAuditStage(");
+    expect(verifyBody).not.toMatch(/\bdispatch\(/);
+  });
+});
+
+/**
+ * The dead-invocation taxonomy (#301 B-01, B-02, ADR 0025).
+ *
+ * Pure, so no repository and no worktree: the classifier reads a rejection and
+ * returns a cause, and the retry predicate reads a cause and returns a boolean.
+ */
+describe("classifySelfAuditFailure", () => {
+  it("[behavior:#301:B-01] classifies each rejection under ADR 0025's kinds", () => {
+    const cases: Array<{
+      label: string;
+      error: unknown;
+      kind: string;
+      killClass?: string;
+      exitCode?: number;
+    }> = [
+      {
+        label: "transient",
+        error: new TransientProviderError("model temporarily unavailable"),
+        kind: "transient-exhausted",
+      },
+      {
+        label: "tool-call cap",
+        error: new Error("Agent generator exceeded 40 tool calls and was killed"),
+        kind: "orchestrator-kill",
+        killClass: "tool-call-cap",
+      },
+      {
+        label: "wall-clock ceiling",
+        error: new Error(
+          "Agent generator hit the wall-clock ceiling of 1800s and was killed",
+        ),
+        kind: "orchestrator-kill",
+        killClass: "wall-clock-ceiling",
+      },
+      {
+        label: "idle timeout",
+        error: new Error("Agent generator idle for 600s — killed"),
+        kind: "orchestrator-kill",
+        killClass: "idle-timeout",
+      },
+      {
+        label: "provider exit",
+        error: new Error("Agent generator exited with code 1"),
+        kind: "provider-exit",
+        exitCode: 1,
+      },
+      {
+        label: "internal",
+        error: new Error("manifest is unreadable"),
+        kind: "internal-error",
+      },
+    ];
+
+    for (const { label, error, kind, killClass, exitCode } of cases) {
+      const cause = classifySelfAuditFailure(error);
+      expect(cause.kind, label).toBe(kind);
+      expect(cause.killClass, label).toBe(killClass);
+      expect(cause.exitCode, label).toBe(exitCode);
+      // The summary is narrated with every retry, so a blank one is a bug.
+      expect(cause.summary.trim(), label).not.toBe("");
+    }
+
+    // The transient check has to survive a provider bundled as a duplicate
+    // module instance, which is why it matches on `Error.name` rather than on
+    // `instanceof` — an impostor carrying the name classifies the same way.
+    const impostor = new Error("outage");
+    impostor.name = "TransientProviderError";
+    expect(classifySelfAuditFailure(impostor).kind).toBe("transient-exhausted");
+    // A non-Error rejection still classifies rather than throwing.
+    expect(classifySelfAuditFailure("just a string").kind).toBe("internal-error");
+
+    // And the classifier is local by necessity: the hub imports this module, so
+    // importing the hub's own classifier back would be a cycle.
+    const source = readFileSync("src/self-audit.ts", "utf-8");
+    expect(source).toContain(
+      'import { isTransientProviderError } from "./agent-provider.js";',
+    );
+    expect(
+      [...source.matchAll(/from\s+"([^"]+)"/g)].map((match) => match[1]),
+    ).not.toContain("./orchestrator.js");
+  });
+
+  it("[behavior:#301:B-02] treats three kinds as worth re-dispatching and two as not", () => {
+    const infrastructure = [
+      { kind: "provider-exit", summary: "s", exitCode: 1 },
+      { kind: "orchestrator-kill", summary: "s", killClass: "wall-clock-ceiling" },
+      { kind: "orchestrator-kill", summary: "s", killClass: "idle-timeout" },
+      { kind: "orchestrator-kill", summary: "s", killClass: "unspecified" },
+      { kind: "transient-exhausted", summary: "s" },
+    ] as const;
+    for (const cause of infrastructure) {
+      expect(isInfrastructureSelfAuditCause(cause), cause.kind).toBe(true);
+    }
+
+    // A cap is an opted-in bound doing its job (ADR 0036), not flakiness; an
+    // internal error's blast radius a retry cannot change.
+    expect(
+      isInfrastructureSelfAuditCause({
+        kind: "orchestrator-kill",
+        summary: "s",
+        killClass: "tool-call-cap",
+      }),
+    ).toBe(false);
+    expect(
+      isInfrastructureSelfAuditCause({ kind: "internal-error", summary: "s" }),
+    ).toBe(false);
   });
 });
 
@@ -763,7 +1378,10 @@ describe("docs/adr/0069-bounded-generator-self-audit-before-qa-dispatch.md", () 
     expect(adr).toMatch(/exactly one\*{0,2} generator re-dispatch/);
 
     // And the bound is the standing argument against an audit-of-the-audit.
-    expect(adr).toContain("One invocation per QA submission");
+    // #301 B-12 amended what the bound counts — completed invocations, so an
+    // infrastructure retry replaces a dead one — and the bound itself, one per
+    // QA submission, is the part that has to survive that amendment.
+    expect(adr).toContain("One **completed** invocation per QA submission");
     expect(adr).toContain("audit-of-the-audit");
   });
 
@@ -783,7 +1401,8 @@ describe("docs/adr/0069-bounded-generator-self-audit-before-qa-dispatch.md", () 
     expect(adr).toContain("## Decision");
     expect(adr).toContain("## Consequences");
     expect(adr).toContain("swarm_handoff.sh");
-    expect(adr).toContain("One invocation per QA submission");
+    // The bound survives #301 B-12's amendment of what it counts.
+    expect(adr).toContain("invocation per QA submission");
     expect(adr).toMatch(/exactly one\*{0,2} generator re-dispatch/);
 
     // The changed-tree mechanism: a catalog-derived cheap-gate re-run on the

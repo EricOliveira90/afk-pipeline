@@ -13,6 +13,7 @@
  * `ctx.dispatch`, so the whole stage is exercised without a provider.
  */
 import { join, relative } from "node:path";
+import { isTransientProviderError } from "./agent-provider.js";
 import type { CandidateGatePhaseResult } from "./candidate-gate-phase.js";
 import { assertGateEvidenceReleasesEvaluation } from "./candidate-gate-phase.js";
 import {
@@ -28,7 +29,9 @@ import {
   type GateResult,
 } from "./gate-runner.js";
 import {
+  loadRunState,
   recordSelfAuditOutcome,
+  selfAuditsFor,
   type PersistedSelfAuditVerdict,
 } from "./run-state.js";
 
@@ -111,12 +114,164 @@ export function classifySelfAuditVerdict(input: {
   };
 }
 
+/* ---------------------------------------------------------------------------
+ * The dead-invocation taxonomy (#301, ADR 0025)
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Why one audit invocation died, under ADR 0025's agent-failure-cause kinds
+ * (`docs/adr/0025-agent-failure-causes.md:40-46`).
+ *
+ * Four of the five kinds, not five: `verdict` and `design-decision` cannot
+ * happen here, because an audit writes no review artifact and makes no design
+ * decision. An envelope that fails closed as CONFIGURATION is an
+ * `internal-error`.
+ */
+export type SelfAuditFailureKind =
+  | "provider-exit"
+  | "orchestrator-kill"
+  | "transient-exhausted"
+  | "internal-error";
+
+/** Which per-invocation bound tripped, on an `orchestrator-kill`. */
+export type SelfAuditKillClass =
+  | "tool-call-cap"
+  | "wall-clock-ceiling"
+  | "idle-timeout"
+  | "unspecified";
+
+export interface SelfAuditFailureCause {
+  kind: SelfAuditFailureKind;
+  /** Operator-facing one-liner; narrated with each retry and never blank. */
+  summary: string;
+  /** `provider-exit` only — the agent provider's exit code. */
+  exitCode?: number;
+  /** `orchestrator-kill` only — which bound tripped. */
+  killClass?: SelfAuditKillClass;
+}
+
+/**
+ * Kill-class signatures, matched against the provider's rejection message.
+ * Dash-agnostic for the reason the hub's own table gives
+ * (`src/orchestrator.ts:1850-1856`): `claude.ts`/`kiro.ts` build these strings
+ * with an em dash and `codex.ts` with a hyphen.
+ */
+const AUDIT_KILL_SIGNATURES: ReadonlyArray<
+  readonly [RegExp, SelfAuditKillClass]
+> = [
+  [/exceeded \d+ tool calls/i, "tool-call-cap"],
+  [/wall-clock ceiling/i, "wall-clock-ceiling"],
+  [/idle for .*killed/i, "idle-timeout"],
+  [/was killed/i, "unspecified"],
+];
+
+const AUDIT_KILL_CLASS_LABEL: Record<SelfAuditKillClass, string> = {
+  "idle-timeout": "idle timeout",
+  "wall-clock-ceiling": "wall-clock ceiling",
+  "tool-call-cap": "tool-call cap",
+  unspecified: "kill class not recorded",
+};
+
+/**
+ * Classify a rejected audit invocation (#301 B-01).
+ *
+ * Pure: no filesystem, no run state, no clock. A situation-specific classifier
+ * over the same provider messages rather than an import of the hub's private
+ * `classifyNegotiateFailure` — which would be an import cycle — exactly as
+ * `classifyReviewFailure` (`src/artifacts.ts:135`) already does for guardian
+ * reviews, and as the hub's own comment cites as the same approach.
+ *
+ * The transient check is structural (`isTransientProviderError` matches on
+ * `Error.name`), so classification survives a provider bundled as a duplicate
+ * module instance. Kill signatures are read before an exit code, because a
+ * killed invocation's message may carry both and the bound that tripped is the
+ * more specific fact.
+ */
+export function classifySelfAuditFailure(
+  error: unknown,
+): SelfAuditFailureCause {
+  const message = messageOf(error);
+  if (isTransientProviderError(error)) {
+    return {
+      kind: "transient-exhausted",
+      summary: `the audit invocation exhausted its transient-outage retries: ${message}`,
+    };
+  }
+  for (const [pattern, killClass] of AUDIT_KILL_SIGNATURES) {
+    if (pattern.test(message)) {
+      return {
+        kind: "orchestrator-kill",
+        killClass,
+        summary:
+          `the audit invocation was killed ` +
+          `(${AUDIT_KILL_CLASS_LABEL[killClass]}): ${message}`,
+      };
+    }
+  }
+  const exit = /exited with code (\d+)/i.exec(message);
+  if (exit?.[1] !== undefined) {
+    return {
+      kind: "provider-exit",
+      exitCode: Number.parseInt(exit[1], 10),
+      summary: `the audit provider exited with code ${exit[1]}: ${message}`,
+    };
+  }
+  return {
+    kind: "internal-error",
+    summary: `the audit invocation failed inside the pipeline: ${message}`,
+  };
+}
+
+/**
+ * Whether a dead audit invocation is worth re-dispatching (#301 B-02).
+ *
+ * Mirrors `isInfrastructureCause` (`src/orchestrator.ts:1841-1848`) and its
+ * reason: a `tool-call-cap` kill is excluded even though it is an
+ * `orchestrator-kill`, because the cap only exists when a caller opted in
+ * (ADR 0036), so tripping it is the configured bound doing its job rather than
+ * infrastructure flaking — and a verbatim retry would spend another full budget
+ * re-hitting it. An `internal-error` is a pipeline-internal throw, whose blast
+ * radius a retry cannot change.
+ */
+export function isInfrastructureSelfAuditCause(
+  cause: SelfAuditFailureCause,
+): boolean {
+  if (cause.killClass === "tool-call-cap") return false;
+  return (
+    cause.kind === "provider-exit" ||
+    cause.kind === "orchestrator-kill" ||
+    cause.kind === "transient-exhausted"
+  );
+}
+
+/**
+ * Attempts this stage may spend: `infrastructureRetries + 1`.
+ *
+ * A degenerate budget — absent, negative, fractional, `NaN`, `Infinity` or a
+ * non-number — reads as `0` retries rather than throwing, because this stage may
+ * never block a run by its own failure, its own input validation included
+ * (ADR 0069 Consequences). One dispatch is always attempted.
+ */
+function auditAttemptBudget(retries: unknown): number {
+  const usable =
+    typeof retries === "number" && Number.isSafeInteger(retries) && retries >= 0
+      ? retries
+      : 0;
+  return usable + 1;
+}
+
 export interface SelfAuditStageInput {
   /** Repo root owning the run-state file the outcome is recorded in. */
   repoRoot: string;
   prdSlug: string;
   /** The slice's GitHub issue — the key the outcome is recorded under. */
   ghIssue: string;
+  /**
+   * The run that is spending this invocation — `runIdFor(logger.runDir)` at the
+   * hub's one call site (#301 B-06). Passed in rather than derived here, so the
+   * stage never invents run identity.
+   */
+  runId: string;
   /** The slice's own worktree: what the audit may write, and what is re-hashed. */
   worktreeDir: string;
   /** Repo-relative slice artifact directory holding the locked pair and handoff. */
@@ -148,10 +303,24 @@ export interface SelfAuditStageInput {
   log?: (message: string) => void;
   /** Project byte-budget override; stricter-only (B-06). */
   inlineSizeBudgetBytes?: number;
+  /**
+   * The run's `--infrastructure-retries` budget (#301 B-03). Attempts are
+   * `infrastructureRetries + 1`; absent, and every degenerate value, reads as
+   * `0` — one dispatch, no retry. Passed by the hub as
+   * `config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES` so the
+   * audit honours the same operator budget as ADR 0025's other retries without
+   * this module importing the hub's constant.
+   */
+  infrastructureRetries?: number;
 }
 
 export type SelfAuditStageResult =
-  | { ran: false }
+  /**
+   * No audit happened. `spent` is present only on the resume short-circuit
+   * (#301 B-07), naming the verdict a persisted outcome already recorded for the
+   * tree in hand; the two declines carry no such member.
+   */
+  | { ran: false; spent?: SelfAuditVerdict }
   | { ran: true; verdict: SelfAuditVerdict; treeId: string };
 
 /**
@@ -165,8 +334,12 @@ export type SelfAuditStageResult =
  * degrades to `AUDIT_NOT_RUN` on the tree the gates released instead of ending
  * the slice.
  *
- * Exactly one dispatch per QA submission, bounded by construction: there is no
- * loop here, no retry, and no second challenge for a tree the audit rewrote.
+ * Exactly one *completed* invocation per QA submission (#301 B-03): a dead
+ * invocation whose cause classifies as infrastructure is re-dispatched under the
+ * run's `--infrastructure-retries` budget and the loop exits on the first
+ * attempt that completes, so a retry replaces a dead invocation rather than
+ * adding a second completed one, and a tree the audit rewrote still receives no
+ * second challenge.
  */
 export async function runSelfAuditStage(
   input: SelfAuditStageInput,
@@ -183,7 +356,41 @@ export async function runSelfAuditStage(
     return { ran: false };
   }
 
-  const invocation = await dispatchAudit(input, releasedTreeId);
+  // A persisted outcome naming the tree in hand is a spent invocation (#301
+  // B-07). Derived from the run-state file rather than re-derived from the tree,
+  // the way `ResumeFacts.resumeAttempts` derives its count: a run killed after
+  // the audit dispatched must not buy a second one on resume. Both id fields are
+  // matched because a run resumed after an `AUDIT_CHANGED` re-hashes the audited
+  // tree as its released tree, so the pre-audit id is no longer the id in hand.
+  const spent = selfAuditsFor(
+    loadRunState(input.repoRoot, input.prdSlug),
+    input.ghIssue,
+  ).find(
+    (entry) =>
+      entry.candidateTreeId === releasedTreeId ||
+      entry.auditedTreeId === releasedTreeId,
+  );
+  if (spent !== undefined) {
+    input.log?.(
+      `self-audit: spent — a persisted ${spent.verdict} outcome already names tree ${releasedTreeId}`,
+    );
+    return { ran: false, spent: spent.verdict };
+  }
+
+  const attemptLimit = auditAttemptBudget(input.infrastructureRetries);
+  let invocation = await dispatchAudit(input, releasedTreeId);
+  for (let attempt = 1; attempt < attemptLimit; attempt += 1) {
+    if (invocation.result.completed) break;
+    const cause = classifySelfAuditFailure(invocation.error);
+    if (!isInfrastructureSelfAuditCause(cause)) break;
+    // The shared retry vocabulary the other retry sites use (cf.
+    // `src/orchestrator.ts:5312-5322`), through this stage's existing narration
+    // sink: no new typed warn event and no new warn reason (#301 non-goal).
+    input.log?.(
+      `self-audit: infrastructure retry ${attempt}/${attemptLimit - 1} — ${cause.summary}`,
+    );
+    invocation = await dispatchAudit(input, releasedTreeId);
+  }
   const classification = classifySelfAuditVerdict({
     preAuditTreeId: releasedTreeId,
     ...(invocation.postAuditTreeId === undefined
@@ -193,24 +400,22 @@ export async function runSelfAuditStage(
   });
   input.log?.(`self-audit: ${classification.verdict} — ${classification.reason}`);
 
-  // Both *graded* verdicts are recorded here (#300 B-01): the verdict is a fact
+  // Every verdict a dispatching stage reaches is recorded (#301 B-04), the two
+  // graded ones (#300 B-01) and `AUDIT_NOT_RUN` alike: the verdict is a fact
   // about the audit, not about whatever the changed tree's gate re-run later
   // decides, so it is written before this function returns and whatever
-  // `verifyAuditedTree` goes on to conclude. `AUDIT_NOT_RUN` stays unrecorded —
-  // the dead-invocation taxonomy is #301's. No schema change and no version
-  // bump: `PersistedSelfAuditOutcome` already carries both entries as-is, with
-  // `auditedTreeId` the post-audit tree, equal to `candidateTreeId` only on
-  // `AUDIT_UNCHANGED`.
-  if (
-    classification.verdict === "AUDIT_UNCHANGED" ||
-    classification.verdict === "AUDIT_CHANGED"
-  ) {
-    recordSelfAuditOutcome(input.repoRoot, input.prdSlug, input.ghIssue, {
-      candidateTreeId: releasedTreeId,
-      auditedTreeId: classification.treeId,
-      verdict: classification.verdict,
-    });
-  }
+  // `verifyAuditedTree` goes on to conclude. `auditedTreeId` rides only on the
+  // graded verdicts — after a dead or unresolvable invocation there is nothing
+  // honest to name there — and `runId` names the run that spent the invocation,
+  // which is what makes the entry spent on resume rather than merely present.
+  recordSelfAuditOutcome(input.repoRoot, input.prdSlug, input.ghIssue, {
+    candidateTreeId: releasedTreeId,
+    ...(classification.verdict === "AUDIT_NOT_RUN"
+      ? {}
+      : { auditedTreeId: classification.treeId }),
+    verdict: classification.verdict,
+    runId: input.runId,
+  });
   return {
     ran: true,
     verdict: classification.verdict,
@@ -219,10 +424,14 @@ export async function runSelfAuditStage(
 }
 
 /**
- * Assemble, dispatch once, and re-hash — reporting what happened rather than
+ * Assemble, dispatch one attempt, and re-hash — reporting what happened rather than
  * throwing it. An envelope that fails closed as CONFIGURATION is reported as an
  * invocation that did not complete, so a manifest bug costs the run its audit
  * and nothing more.
+ *
+ * The rejection itself rides back beside the report, unwrapped: the retry
+ * decision is `classifySelfAuditFailure`'s to make and a message string alone
+ * would lose the structural `TransientProviderError` check (#301 B-01).
  */
 async function dispatchAudit(
   input: SelfAuditStageInput,
@@ -230,6 +439,8 @@ async function dispatchAudit(
 ): Promise<{
   result: SelfAuditInvocationResult;
   postAuditTreeId?: string;
+  /** The rejection, when the invocation did not complete. */
+  error?: unknown;
 }> {
   try {
     const envelope = assembleSelfAuditEnvelope({
@@ -247,6 +458,7 @@ async function dispatchAudit(
   } catch (error) {
     return {
       result: { completed: false, detail: messageOf(error) },
+      error,
     };
   }
   try {
