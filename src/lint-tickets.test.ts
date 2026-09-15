@@ -24,17 +24,21 @@ import { describe, expect, it } from "vitest";
 import {
   applyWaivers,
   checkAbsentNames,
+  checkLineCitations,
   checkMixedImpasseOutcome,
   checkRecordingChannel,
   checkSummarisedLists,
   checkUnknownNames,
   identifiersIn,
+  isLoadBearingSection,
+  lineCitationsIn,
   lintTicket,
   looksLikePath,
   outcomeFilesUnder,
   parseArgv,
   parseTicket,
   relevantUnusedWaivers,
+  sectionsOf,
   waiverCovers,
 } from "../scripts/lint-tickets.mjs";
 
@@ -66,6 +70,7 @@ const vocabulary = {
   recordingVerbs: ["recorded", "archived", "log", "reports"],
   recordingPhrases: ["preserved as evidence"],
   summaryPhrases: ["etc.", "such as"],
+  loadBearingSections: ["acceptance", "what to build", "code anchors", "scope"],
 };
 
 const ticket = (body: string, number = 1, title = "PRD9-S1: A slice") => ({
@@ -461,6 +466,223 @@ describe("check 5 — a mixed IMPASSE outcome file", () => {
   });
 });
 
+describe("sectionsOf", () => {
+  it("keeps a ### subheading inside the ## section that contains it", () => {
+    // #86 lists its per-slice anchors under `### Verified for this slice`,
+    // inside `## Code anchors`. Treating ### as a boundary would put those
+    // anchors in a section with no declared name and check 6 would miss them.
+    const sections = sectionsOf(
+      [
+        "Preamble.",
+        "## Code anchors",
+        "Method.",
+        "### Verified for this slice",
+        "- `src/gate-runner.ts:92`",
+        "## Blocked by",
+        "- #81",
+      ].join("\n"),
+    );
+    expect(sections.map((s: { heading: string }) => s.heading)).toEqual([
+      "",
+      "Code anchors",
+      "Blocked by",
+    ]);
+    expect(sections[1]?.lines).toContain("- `src/gate-runner.ts:92`");
+    expect(sections[1]?.lines).toContain("### Verified for this slice");
+  });
+});
+
+describe("isLoadBearingSection", () => {
+  it("matches a declared prefix through real heading decoration", () => {
+    // Every one of these is a heading that exists in this repo's own corpus.
+    expect(
+      isLoadBearingSection(
+        "Code anchors — verified against `integration/pre-prd4` on 2026-09-08",
+        vocabulary,
+      ),
+    ).toBe(true);
+    expect(isLoadBearingSection("Scope narrowed 2026-09-12 — see PRD D14", vocabulary)).toBe(true);
+    expect(isLoadBearingSection("Acceptance criteria", vocabulary)).toBe(true);
+  });
+
+  it("needs a word edge, so a declared prefix is not a substring match", () => {
+    expect(isLoadBearingSection("Scoped access", vocabulary)).toBe(false);
+    expect(isLoadBearingSection("Scope-narrowing note", vocabulary)).toBe(false);
+    expect(isLoadBearingSection("", vocabulary)).toBe(false);
+  });
+
+  it("leaves the diagnostic sections of a bug ticket alone", () => {
+    for (const heading of [
+      "Problem",
+      "Symptom",
+      "What happened",
+      "Suspected cause",
+      "Root cause",
+      "The code path",
+      "Evidence",
+      "Suggested fix",
+      "Proposed fix",
+    ])
+      expect(isLoadBearingSection(heading, vocabulary), heading).toBe(false);
+  });
+});
+
+describe("lineCitationsIn", () => {
+  it("takes a path with a line, a range, a permalink and the English form", () => {
+    expect(
+      lineCitationsIn(
+        "See src/orchestrator.ts:1528, src/gate-policy.ts:51-53, AGENTS.md#L74 and line 394.",
+      ),
+    ).toEqual([
+      "src/orchestrator.ts:1528",
+      "src/gate-policy.ts:51-53",
+      "AGENTS.md#L74",
+      "line 394",
+    ]);
+  });
+
+  it("takes a backticked bare colon-number, which is a continuation and nothing else", () => {
+    // #86 spells its second anchor `:169`, so a check that only read full
+    // paths would report half of the citations on that line.
+    expect(lineCitationsIn("`src/candidate-gate-phase.ts:86` and `:169`")).toEqual([
+      "src/candidate-gate-phase.ts:86",
+      ":169",
+    ]);
+  });
+
+  it("is not fooled by a colon-number that is not a line number", () => {
+    expect(lineCitationsIn("a 1:3 ratio, port 8080, 09:41 UTC, node:22, a deadlines 4 note")).toEqual(
+      [],
+    );
+  });
+});
+
+describe("check 6 — a line-number citation in a load-bearing section", () => {
+  const anchored = (heading: string, ...lines: string[]) =>
+    ticket(["## What to build", "", "Something.", "", `## ${heading}`, "", ...lines].join("\n"), 86);
+
+  it("gates a citation under a load-bearing heading and names the citation itself", () => {
+    // The #86 defect: the anchors the generator was told to reuse were line
+    // numbers, and the 2026-09-13 suite split moved them.
+    const findings = checkLineCitations(
+      anchored(
+        "Code anchors — verified against `integration/pre-prd4` on 2026-09-08",
+        "- `declaration.required` is read at `src/candidate-gate-phase.ts:86` and `:169`.",
+      ),
+      vocabulary,
+    );
+    expect(findings.map((f) => f.token)).toEqual([
+      "src/candidate-gate-phase.ts:86",
+      ":169",
+    ]);
+    expect(findings.every((f) => f.severity === "gate" && f.check === "6")).toBe(true);
+    expect(findings[0]?.where).toBe(
+      'section "Code anchors — verified against `integration/pre-prd4` on 2026-09-08"',
+    );
+  });
+
+  it("says in the finding what load-bearing means and what to write instead", () => {
+    // A ticket author reads this message and nothing else, so it has to carry
+    // both the rule and the remedy.
+    const [finding] = checkLineCitations(
+      anchored("Acceptance criteria", "- [ ] The refusal fires at `src/preflight.ts:107`."),
+      vocabulary,
+    );
+    expect(finding?.message).toContain("load-bearing");
+    expect(finding?.message).toContain("tells the implementer what to do");
+    expect(finding?.message).toContain("ticket-lint-vocabulary.json");
+    expect(finding?.message).toContain("describe(...)");
+    expect(finding?.message).toContain("ticket-lint-waivers.json");
+  });
+
+  it("leaves the same citation alone in a diagnostic section", () => {
+    // A bug report's evidence is a dated observation about the tree at filing
+    // time. Gating it would make the lint loudest where it is least useful,
+    // which is the failure ADR 0049 refused a source parser to avoid.
+    expect(
+      checkLineCitations(
+        ticket(
+          [
+            "## Suspected cause",
+            "",
+            "The throw at `src/orchestrator.ts:3679` runs before the guard.",
+            "",
+            "## Evidence",
+            "",
+            "See run.log line 212.",
+          ].join("\n"),
+          337,
+        ),
+        vocabulary,
+      ),
+    ).toEqual([]);
+  });
+
+  it("reports one finding per distinct citation per section", () => {
+    const findings = checkLineCitations(
+      anchored(
+        "Code anchors",
+        "- `src/gate-runner.ts:92` is the call site.",
+        "- `src/gate-runner.ts:92` again, and `src/qa-review.ts:64`.",
+      ),
+      vocabulary,
+    );
+    expect(findings.map((f) => f.token)).toEqual([
+      "src/gate-runner.ts:92",
+      "src/qa-review.ts:64",
+    ]);
+  });
+
+  it("finds a citation in a criteria list that parseTicket cannot see", () => {
+    // #341 numbers its criteria `1.` rather than `- [ ]`, so checks 2-4 never
+    // read them. Check 6 works on sections, so it does.
+    const numbered = ticket(
+      ["## Acceptance criteria", "", "1. The channel `src/non-progress.ts:499` names is delivered."].join(
+        "\n",
+      ),
+      341,
+    );
+    expect(parseTicket(numbered.body).criteria).toEqual([]);
+    expect(checkLineCitations(numbered, vocabulary).map((f) => f.token)).toEqual([
+      "src/non-progress.ts:499",
+    ]);
+  });
+
+  it("is silent on a ticket whose anchors are stable semantic ones", () => {
+    // The shape the check is asking for, and the shape the four stale PRD 5
+    // tickets were repaired into on 2026-09-13.
+    expect(
+      checkLineCitations(
+        anchored(
+          "Code anchors",
+          "- `describe(\"the shared gate-ID expectation\")` in",
+          "  `src/qa-orchestration-gates.test.ts`",
+          "- the exported `collectRequiredGateFailures` in `src/candidate-gate-phase.ts`",
+          "- `pnpm run test:heavy:qa`",
+        ),
+        vocabulary,
+      ),
+    ).toEqual([]);
+  });
+
+  it("is waivable, and the waiver lapses when the citation changes", () => {
+    const [finding] = checkLineCitations(
+      anchored("Code anchors", "- the fixture asserts on `src/logger.ts:394`."),
+      vocabulary,
+    );
+    const waiver = {
+      issue: 86,
+      check: "6",
+      token: "src/logger.ts:394",
+      match: "the fixture asserts on",
+      reason: "The line number is the defect being reported.",
+    };
+    expect(waiverCovers(waiver, finding)).toBe(true);
+    expect(waiverCovers({ ...waiver, token: "src/logger.ts:400" }, finding)).toBe(false);
+    expect(applyWaivers([finding], { waivers: [waiver] }).gating).toEqual([]);
+  });
+});
+
 describe("lintTicket", () => {
   it("reports gating findings before warnings", () => {
     const findings = lintTicket(
@@ -678,12 +900,53 @@ describe("the committed vocabulary and waiver files", () => {
     expect(() => new RegExp(VOCABULARY.placeholderPattern)).not.toThrow();
   });
 
+  it("declares load-bearing sections in the form the matcher compares", () => {
+    // The matcher lowercases the heading and collapses its whitespace before
+    // comparing, so a declaration in any other form silently matches nothing.
+    expect(VOCABULARY.loadBearingSections.length).toBeGreaterThan(0);
+    for (const declared of VOCABULARY.loadBearingSections)
+      expect(declared, declared).toBe(declared.toLowerCase().trim().replace(/\s+/g, " "));
+    // Acceptance criteria are load-bearing by definition: they are what gets
+    // locked. If this stops holding, check 6 has been narrowed too far.
+    expect(isLoadBearingSection("Acceptance criteria", VOCABULARY)).toBe(true);
+  });
+
+  it("keeps the diagnostic half of a bug ticket out of check 6", () => {
+    // The measured false-positive control (#319): 47 of this repo's 255 issues
+    // cite a line somewhere and only 15 do it under a load-bearing heading.
+    // Declaring any of these would break that ratio, so the claim is asserted
+    // rather than left in a comment.
+    for (const heading of [
+      "Problem",
+      "Problem statement",
+      "Observed pain",
+      "Suspected cause",
+      "Cause",
+      "Root cause",
+      "Symptom",
+      "What happened",
+      "The code path",
+      "Evidence",
+      "Impact",
+      "Suggested direction",
+      "Suggested fix",
+      "Proposed fix",
+      "Proposed outcome",
+      "Solution",
+      "Full review",
+      "Further notes",
+      "References",
+      "Roadmap placement",
+    ])
+      expect(isLoadBearingSection(heading, VOCABULARY), heading).toBe(false);
+  });
+
   it("gives every recorded waiver a reason, a known check and a subject", () => {
     // The lint enforces this at run time too; here it fails in the suite, so a
     // reasonless waiver cannot sit in the file waiting for the next lint run.
     for (const waiver of WAIVERS.waivers) {
       expect(String(waiver.reason ?? "").trim(), JSON.stringify(waiver)).not.toBe("");
-      expect(["2a", "2b", "3", "5"], JSON.stringify(waiver)).toContain(waiver.check);
+      expect(["2a", "2b", "3", "5", "6"], JSON.stringify(waiver)).toContain(waiver.check);
       // A check-5 waiver is about an artifact, so it carries a path instead of
       // an issue number. Every other check is about a ticket.
       if (waiver.check === "5") {

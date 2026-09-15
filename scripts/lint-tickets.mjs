@@ -21,6 +21,9 @@
  *   Check 5  an IMPASSE outcome file that mixes CONTESTED findings with
  *            unresolved OPEN blockers — the shape that parks forever.
  *                                                                    GATES
+ *   Check 6  a source or test line-number citation under a load-bearing
+ *            heading — an anchor that does not survive a harmless move.
+ *                                                                    GATES
  *
  * Check 5 lints an artifact rather than a ticket, so it takes its input from
  * `--outcome <path>` instead of an issue number. It lives here anyway because
@@ -29,6 +32,31 @@
  * input, caught by a deterministic check rather than discovered by a run that
  * parks. A ticket's input model (`gh issue view --json number,title,body`)
  * cannot carry an outcome file, so the flag is the seam, not a second script.
+ *
+ * Check 6 (#319) is about anchor durability rather than anchor meaning. On
+ * 2026-09-13 the Wave A suite split moved `qa-orchestration.test.ts` into two
+ * files without changing one line of behavior, and four already-authored PRD 5
+ * tickets went stale on the spot — one of them because it cited line numbers
+ * that had moved. Those four were routine to repair; had the same citation been
+ * inside #87's preserved *locked* contract, repair would have violated the lock
+ * and the run would have had to stop for a human. So the check gates the
+ * anchor shape before a ticket is ever locked.
+ *
+ * It gates by *section*, not by criterion, and both halves of that are load
+ * bearing:
+ *
+ *   - Load-bearing means the section tells the implementer what to do.
+ *     `ticket-lint-vocabulary.json` `loadBearingSections` declares them, in
+ *     ADR 0049's idiom: a hand-maintained list, not something inferred from
+ *     prose. A citation under "Suspected cause" or "Evidence" is a dated
+ *     observation about the tree at filing time and is left alone; the same
+ *     citation under "Code anchors" or "What to build" is an instruction, and
+ *     an instruction that rots silently is the defect.
+ *   - Sections rather than criteria, because the citations that actually cost
+ *     this repo were never in a criterion. #86's were in "Code anchors", #195's
+ *     in "What to build", #87's in a scope-narrowing addendum. `parseTicket`
+ *     also sees only `- [ ]` criteria, so a ticket that numbers its criteria
+ *     `1.` (#341) is invisible to checks 2-4 but not to this one.
  *
  * Check 1 of the original four — compound predicates in one criterion ("X and
  * Y and Z" that can half-pass) — is deliberately **not** implemented. Detecting
@@ -100,6 +128,41 @@ export function parseTicket(body) {
     }
   }
   return { criteria, other: otherLines.join("\n") };
+}
+
+/**
+ * Split a ticket body into its `##` sections, in order.
+ *
+ * A `###` heading is *not* a boundary — it stays inside its parent `##`, which
+ * is what `parseTicket` already assumes and what the corpus does (#86 keeps its
+ * per-slice anchor list under `### Verified for this slice`, inside
+ * `## Code anchors`). Text before the first `##` is one section with an empty
+ * heading.
+ */
+export function sectionsOf(body) {
+  const sections = [{ heading: "", lines: [] }];
+  for (const line of String(body ?? "").split(/\r?\n/)) {
+    const heading = /^##\s+(.*)$/.exec(line);
+    if (heading) sections.push({ heading: heading[1].trim().replace(/\s+/g, " "), lines: [] });
+    else sections[sections.length - 1].lines.push(line);
+  }
+  return sections;
+}
+
+/**
+ * Whether a heading names a section that instructs the implementer.
+ *
+ * Declared prefixes, matched at a word edge, because real headings carry
+ * decoration the declaration should not have to know about: "Code anchors —
+ * verified against `integration/pre-prd4` on 2026-09-08" is the "code anchors"
+ * section, and "Scope narrowed 2026-09-12 — see PRD D14" is a scope section.
+ */
+export function isLoadBearingSection(heading, vocabulary) {
+  const key = String(heading ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+  if (key === "") return false;
+  return (vocabulary.loadBearingSections ?? []).some((declared) =>
+    new RegExp(`^${escape(String(declared).toLowerCase())}(?![\\w-])`).test(key),
+  );
 }
 
 const FILENAME = /^[\w.\-/\\]+\.(?:json|md|log|ts|mjs|yaml|yml)$/i;
@@ -410,6 +473,80 @@ export function checkMixedImpasseOutcome(outcome, source) {
   ];
 }
 
+/**
+ * Every line-number citation in a piece of text, normalised.
+ *
+ * Four shapes, all of them unambiguous — none of this is prose parsing:
+ *
+ *   `src/orchestrator.ts:1528`      a path with a source-ish extension
+ *   `src/gate-policy.ts:51-53`      …and its range form
+ *   `AGENTS.md#L74`                 a GitHub permalink fragment
+ *   `` `:169` ``                    a backticked bare colon-number, which is a
+ *                                   continuation of the citation before it
+ *                                   (#86 spells its second anchor this way) and
+ *                                   is never anything else
+ *   `line 394` / `lines 146`        the English form
+ *
+ * A bare unbackticked `:169` is deliberately not a shape: on its own it is a
+ * ratio, a time or a port. It is reported anyway whenever it shares a line with
+ * a full citation, because the finding quotes the whole line.
+ */
+const LINE_CITATION =
+  /[\w.\-]+(?:[/\\][\w.\-]+)*\.(?:ts|tsx|mts|cts|js|mjs|cjs|json|jsonc|md|ya?ml|sh|txt)(?::|#L)\d+(?:\s*[-–]\s*\d+)?|`:\d+`|\blines?\s+\d+\b/gi;
+
+export function lineCitationsIn(text) {
+  const found = [];
+  for (const match of String(text ?? "").matchAll(LINE_CITATION)) {
+    const token = match[0].replace(/`/g, "");
+    if (!found.includes(token)) found.push(token);
+  }
+  return found;
+}
+
+/**
+ * Check 6 — a line-number citation in a section that instructs the implementer.
+ *
+ * The #319 defect, stated as a rule: an anchor has to survive a change that
+ * preserves behavior. A file path plus a `describe(...)`/`it(...)` name, an
+ * exported symbol or a command all do; `src/foo.ts:412` does not, and nothing
+ * in the pipeline notices when it stops pointing at what it meant.
+ *
+ * One finding per distinct citation per section, so a waiver can name the
+ * citation it excuses and stops applying the moment that citation changes.
+ */
+export function checkLineCitations(ticket, vocabulary) {
+  const findings = [];
+  for (const section of sectionsOf(ticket.body)) {
+    if (!isLoadBearingSection(section.heading, vocabulary)) continue;
+    const seen = new Set();
+    for (const line of section.lines) {
+      for (const token of lineCitationsIn(line)) {
+        if (seen.has(token)) continue;
+        seen.add(token);
+        findings.push({
+          issue: ticket.number,
+          check: "6",
+          severity: "gate",
+          where: `section "${section.heading}"`,
+          token,
+          text: line.trim(),
+          message:
+            `cites the line number \`${token}\` in a load-bearing section — a ` +
+            `section that tells the implementer what to do, per ` +
+            `\`loadBearingSections\` in ${VOCABULARY_PATH}; the same citation ` +
+            `in explanatory prose (a symptom, a cause, filing evidence) is ` +
+            `left alone. A line number does not survive a behavior-preserving ` +
+            `move (#319), so name a stable anchor instead — the file plus a ` +
+            `\`describe(...)\`/\`it(...)\` title, an exported symbol, or a ` +
+            `command — or record a waiver in ${WAIVERS_PATH} saying why the ` +
+            `line number itself is the evidence`,
+        });
+      }
+    }
+  }
+  return findings;
+}
+
 /** Every finding for one ticket, gating ones first. */
 export function lintTicket(ticket, vocabulary) {
   const findings = [
@@ -417,6 +554,7 @@ export function lintTicket(ticket, vocabulary) {
     ...checkUnknownNames(ticket, vocabulary),
     ...checkRecordingChannel(ticket, vocabulary),
     ...checkSummarisedLists(ticket, vocabulary),
+    ...checkLineCitations(ticket, vocabulary),
   ];
   return findings.sort((a, b) => {
     if (a.severity !== b.severity) return a.severity === "gate" ? -1 : 1;
@@ -551,10 +689,12 @@ function main() {
     console.error(
       "Usage: node scripts/lint-tickets.mjs [--dir <dir>] [--repo <owner/name>]\n" +
         "                                   [--outcome <file-or-dir>]... <issue>...\n" +
-        "\nChecks 2, 3 and 5 gate (waivable in " +
+        "\nChecks 2, 3, 5 and 6 gate (waivable in " +
         WAIVERS_PATH +
         "); check 4 warns.\n" +
         "Check 5 lints IMPASSE outcome files named by --outcome, not tickets.\n" +
+        "Check 6 gates a source/test line number under a load-bearing heading:\n" +
+        "name a describe/it title, an exported symbol or a command instead.\n" +
         "Check 1 (compound predicates that can half-pass) is an authoring-\n" +
         "checklist item, not a lint: split such a criterion by hand.",
     );
