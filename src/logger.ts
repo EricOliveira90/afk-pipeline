@@ -274,6 +274,69 @@ export function readQualityStageOutcomes(
   return deriveQualityStageOutcomes(readRunEvents(runDir)?.events ?? []);
 }
 
+/**
+ * What a run's generator self-audits added up to (#301 B-09).
+ *
+ * `graded` is the two verdicts an audit actually reached a tree comparison on.
+ * `changedRatePercent` is absent rather than `0` when nothing was graded,
+ * because "no audit was graded" and "no graded audit changed anything" are
+ * different facts and a zero would report the second for the first.
+ */
+export interface SelfAuditOutcomeTotals {
+  unchanged: number;
+  changed: number;
+  notRun: number;
+  /** `unchanged + changed` — the rate's denominator. */
+  graded: number;
+  /** Absent when `graded` is 0. */
+  changedRatePercent?: number;
+}
+
+/**
+ * The one derivation behind {@link readSelfAuditOutcomes} and the summary's
+ * `## Self-Audit` section, so the file and the stream cannot disagree (#301
+ * B-09) — the same pairing `deriveQualityStageOutcomes` /
+ * {@link readQualityStageOutcomes} already uses.
+ *
+ * `AUDIT_NOT_RUN` is counted and reported but excluded from the rate's
+ * denominator: the rate answers "is the audit earning its call" (ADR 0069
+ * Consequences), which an invocation that never ran cannot dilute.
+ *
+ * Measurement, never a gate (ADR 0063): nothing here is compared against a
+ * threshold and no caller branches on it.
+ */
+function deriveSelfAuditOutcomes(
+  events: readonly RunEvent[],
+): SelfAuditOutcomeTotals {
+  const outcomes = events.flatMap((event) =>
+    event.type === "self-audit-outcome" ? [event] : [],
+  );
+  const count = (verdict: string): number =>
+    outcomes.filter((outcome) => outcome.verdict === verdict).length;
+  const unchanged = count("AUDIT_UNCHANGED");
+  const changed = count("AUDIT_CHANGED");
+  const graded = unchanged + changed;
+  return {
+    unchanged,
+    changed,
+    notRun: count("AUDIT_NOT_RUN"),
+    graded,
+    ...(graded === 0
+      ? {}
+      : { changedRatePercent: Math.round((changed / graded) * 100) }),
+  };
+}
+
+/**
+ * Every generator self-audit a run recorded an outcome for, totalled. Zero
+ * totals for a run directory with no events, no `self-audit-outcome` event or no
+ * `events.jsonl` at all — an absent section, never a throw, for the reason
+ * {@link readQualityStageOutcomes} gives.
+ */
+export function readSelfAuditOutcomes(runDir: string): SelfAuditOutcomeTotals {
+  return deriveSelfAuditOutcomes(readRunEvents(runDir)?.events ?? []);
+}
+
 export interface RunLog {
   prdSlug: string;
   startedAt: Date;
@@ -811,6 +874,38 @@ ${stagePolicyEvents
   )
   .join("\n")}
 ${qualityStageRows}`;
+    /**
+     * The audit's own accounting (#301 B-10): one total per outcome term and the
+     * changed rate over the graded ones, from the same derivation
+     * `readSelfAuditOutcomes` exposes.
+     *
+     * Rendered only when the run actually recorded an outcome, so sections stay
+     * additive and never present-but-empty, and a run without `--self-audit`
+     * renders a byte-identical summary (P-05). Reported, never gated (ADR 0063):
+     * the rate is written down and compared against nothing.
+     */
+    const selfAuditTotals = deriveSelfAuditOutcomes(runEvents);
+    const selfAuditRecorded = runEvents.some(
+      (event) => event.type === "self-audit-outcome",
+    );
+    const changedRateLine =
+      selfAuditTotals.changedRatePercent === undefined
+        ? "Changed rate: n/a"
+        : `Changed rate: ${selfAuditTotals.changedRatePercent}% ` +
+          `(${selfAuditTotals.changed} of ${selfAuditTotals.graded} graded audits)`;
+    const selfAuditSection = !selfAuditRecorded
+      ? ""
+      : `
+## Self-Audit
+
+| Outcome | Count |
+|---------|-------|
+| AUDIT_UNCHANGED | ${selfAuditTotals.unchanged} |
+| AUDIT_CHANGED | ${selfAuditTotals.changed} |
+| AUDIT_NOT_RUN | ${selfAuditTotals.notRun} |
+
+${changedRateLine}
+`;
     const dependencyRows = this.dependencyHolds
       .map(
         (hold) =>
@@ -864,7 +959,7 @@ Finished: ${finishedAt!.toISOString()}
 ${rows}
 ${totalsRow}
 ${dependencySection}${adoptionSection}
-${gateSection}${advisorySection}${coverageSection}${isolationSection}${finalReuseSection}${resolutionSection}${waiverSection}${qualityStageSection}
+${gateSection}${advisorySection}${coverageSection}${isolationSection}${finalReuseSection}${resolutionSection}${waiverSection}${qualityStageSection}${selfAuditSection}
 
 Pre-ship sanity gate: ${sanityGateLabel(sanityGate)}
 Architect review: ${architectVerdict ?? "N/A"}${architectDetail ? ` — ${architectDetail}` : ""}

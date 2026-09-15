@@ -8,6 +8,7 @@ import {
 } from "./logger.js";
 import {
   buildQualityStageAttemptEvent,
+  buildSelfAuditOutcomeEvent,
   buildQualityStagePolicyEvent,
   EVENTS_FILE,
   EVENTS_SCHEMA_VERSION,
@@ -118,6 +119,13 @@ export class RunJournal {
     attempt: Parameters<typeof buildQualityStageAttemptEvent>[0],
   ) {
     this.event(buildQualityStageAttemptEvent(attempt));
+  }
+
+  /** One landed generator self-audit outcome (#301 B-08). */
+  recordSelfAuditOutcomeEvent(
+    outcome: Parameters<typeof buildSelfAuditOutcomeEvent>[0],
+  ) {
+    this.event(buildSelfAuditOutcomeEvent(outcome));
   }
 
   private append(payload: RunEventPayload, ts: string) {

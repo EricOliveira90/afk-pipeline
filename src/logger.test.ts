@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import {
   readAdvisoryGateOutcomes,
   readQualityStageOutcomes,
+  readSelfAuditOutcomes,
 } from "./logger.js";
 import {
   RunJournal as Logger,
@@ -19,6 +20,7 @@ import {
 } from "./run-journal.js";
 import {
   EVENTS_SCHEMA_VERSION,
+  buildSelfAuditOutcomeEvent,
   type RunEventPayload,
 } from "./run-events.js";
 import {
@@ -1609,5 +1611,317 @@ describe("[behavior:#97:B-10] run-summary.md's per-slice quality-stage rows", ()
     const md = summaryWith("rows-absent", [POLICY]);
     expect(md).toContain("`cleaner`: enabled");
     expect(md).not.toContain("| Slice | Stage |");
+  });
+});
+
+/**
+ * The audit's own accounting (#301 B-08, B-09, B-10, B-11, P-05).
+ *
+ * The event is the only record of a landed outcome the summary can read, so the
+ * builder, the derivation and the render are asserted over the same stream a run
+ * would produce rather than over three hand-written fixtures.
+ */
+describe("self-audit outcome accounting", () => {
+  const CANDIDATE = "a".repeat(40);
+  const AUDITED = "b".repeat(40);
+  const RUN_ID = "20260915-120000-abcdef";
+
+  const outcome = (
+    verdict: "AUDIT_UNCHANGED" | "AUDIT_CHANGED" | "AUDIT_NOT_RUN",
+    overrides: { round?: number; auditedTreeId?: string } = {},
+  ): RunEventPayload =>
+    buildSelfAuditOutcomeEvent({
+      ghIssue: "301",
+      sliceNumber: "03",
+      round: overrides.round ?? 1,
+      runId: RUN_ID,
+      candidateTreeId: CANDIDATE,
+      ...(verdict === "AUDIT_NOT_RUN"
+        ? {}
+        : {
+            auditedTreeId:
+              overrides.auditedTreeId ??
+              (verdict === "AUDIT_CHANGED" ? AUDITED : CANDIDATE),
+          }),
+      verdict,
+    });
+
+  function streamWith(slug: string, events: readonly RunEventPayload[]): Logger {
+    const log = new Logger(makeRepo(), slug);
+    for (const event of events) log.event(event);
+    return log;
+  }
+
+  /** The stream B-09 and B-10 both read: 3 unchanged, 1 changed, 2 not-run. */
+  const MIXED: readonly RunEventPayload[] = [
+    outcome("AUDIT_UNCHANGED", { round: 1 }),
+    outcome("AUDIT_UNCHANGED", { round: 2 }),
+    outcome("AUDIT_UNCHANGED", { round: 3 }),
+    outcome("AUDIT_CHANGED", { round: 4 }),
+    outcome("AUDIT_NOT_RUN", { round: 5 }),
+    outcome("AUDIT_NOT_RUN", { round: 6 }),
+  ];
+
+  it("[behavior:#301:B-08] builds the payload with the audited tree only when there is one, and serializes one line", () => {
+    const graded = buildSelfAuditOutcomeEvent({
+      ghIssue: "301",
+      sliceNumber: "03",
+      round: 2,
+      runId: RUN_ID,
+      candidateTreeId: CANDIDATE,
+      auditedTreeId: AUDITED,
+      verdict: "AUDIT_CHANGED",
+    });
+    expect(graded).toEqual({
+      type: "self-audit-outcome",
+      ghIssue: "301",
+      sliceNumber: "03",
+      round: 2,
+      runId: RUN_ID,
+      candidateTreeId: CANDIDATE,
+      auditedTreeId: AUDITED,
+      verdict: "AUDIT_CHANGED",
+    });
+
+    // After a dead invocation there is no audited tree, so the key is absent
+    // rather than present-and-undefined.
+    const notRun = buildSelfAuditOutcomeEvent({
+      ghIssue: "301",
+      sliceNumber: "03",
+      round: 2,
+      runId: RUN_ID,
+      candidateTreeId: CANDIDATE,
+      verdict: "AUDIT_NOT_RUN",
+    });
+    expect("auditedTreeId" in notRun).toBe(false);
+    expect(notRun).toEqual({
+      type: "self-audit-outcome",
+      ghIssue: "301",
+      sliceNumber: "03",
+      round: 2,
+      runId: RUN_ID,
+      candidateTreeId: CANDIDATE,
+      verdict: "AUDIT_NOT_RUN",
+    });
+
+    // The member is additive, so the events schema does not move.
+    expect(EVENTS_SCHEMA_VERSION).toBe(1);
+
+    const log = new Logger(makeRepo(), "audit-event-line");
+    log.recordSelfAuditOutcomeEvent({
+      ghIssue: "301",
+      sliceNumber: "03",
+      round: 2,
+      runId: RUN_ID,
+      candidateTreeId: CANDIDATE,
+      auditedTreeId: AUDITED,
+      verdict: "AUDIT_CHANGED",
+    });
+    const payloads = recordedPayloads(log);
+    expect(
+      payloads.filter((payload) => payload.type === "self-audit-outcome"),
+    ).toEqual([graded]);
+  });
+
+  it("[behavior:#301:B-09] derives the per-verdict totals and the changed rate over the graded ones", () => {
+    const log = streamWith("audit-totals", MIXED);
+
+    expect(readSelfAuditOutcomes(log.runDir)).toEqual({
+      unchanged: 3,
+      changed: 1,
+      notRun: 2,
+      graded: 4,
+      // 1 of 4, and AUDIT_NOT_RUN is excluded from the denominator: an audit
+      // that never happened is not evidence about the gates before it.
+      changedRatePercent: 25,
+    });
+  });
+
+  it("[behavior:#301:B-09] reports an absent rate rather than zero when nothing was graded", () => {
+    const notRunOnly = streamWith("audit-not-run-only", [
+      outcome("AUDIT_NOT_RUN", { round: 1 }),
+      outcome("AUDIT_NOT_RUN", { round: 2 }),
+    ]);
+
+    const totals = readSelfAuditOutcomes(notRunOnly.runDir);
+    expect(totals).toEqual({ unchanged: 0, changed: 0, notRun: 2, graded: 0 });
+    // Absent, not `0`: a rate of zero would read as "the audit found nothing",
+    // which is the opposite of "there is nothing to divide by".
+    expect("changedRatePercent" in totals).toBe(false);
+
+    // And a run directory with no events.jsonl is zero totals, never a throw: a
+    // PR body must not depend on a log file existing.
+    expect(readSelfAuditOutcomes(join(makeRepo(), "nope"))).toEqual({
+      unchanged: 0,
+      changed: 0,
+      notRun: 0,
+      graded: 0,
+    });
+  });
+
+  function summaryWith(slug: string, events: readonly RunEventPayload[]): string {
+    const log = new Logger(makeRepo(), slug);
+    log.restoreCompleted(id("301", "Audit accounting", "afk/301"));
+    for (const event of events) log.event(event);
+    return log.writeSummary();
+  }
+
+  it("[behavior:#301:B-10] renders the per-outcome table and the changed rate", () => {
+    const md = summaryWith("audit-section", MIXED);
+    const section = md.slice(md.indexOf("## Self-Audit"));
+
+    expect(md).toContain("## Self-Audit");
+    expect(section).toContain("| Outcome | Count |");
+    expect(section).toContain("| AUDIT_UNCHANGED | 3 |");
+    expect(section).toContain("| AUDIT_CHANGED | 1 |");
+    expect(section).toContain("| AUDIT_NOT_RUN | 2 |");
+    // The denominator is spelled out, so a reader can see what the rate is over
+    // without recomputing it from the table.
+    expect(section).toContain("Changed rate: 25% (1 of 4 graded audits)");
+  });
+
+  it("[behavior:#301:B-10] renders the section with an n/a rate when nothing was graded", () => {
+    const md = summaryWith("audit-section-na", [
+      outcome("AUDIT_NOT_RUN", { round: 1 }),
+    ]);
+    const section = md.slice(md.indexOf("## Self-Audit"));
+
+    expect(section).toContain("| AUDIT_NOT_RUN | 1 |");
+    expect(section).toContain("Changed rate: n/a");
+    expect(section).not.toContain("0%");
+  });
+
+  it("[behavior:#301:B-11] keeps the totals and the rate a measurement rather than a gate", () => {
+    const logger = readFileSync("src/logger.ts", "utf-8");
+    const orchestrator = readFileSync("src/orchestrator.ts", "utf-8");
+    const gateRunner = readFileSync("src/gate-runner.ts", "utf-8");
+    const identifiers = [
+      "readSelfAuditOutcomes(",
+      "deriveSelfAuditOutcomes(",
+      "changedRatePercent",
+    ];
+
+    // The module that decides gates knows nothing about any of this.
+    for (const identifier of identifiers) {
+      expect(gateRunner, identifier).not.toContain(identifier);
+    }
+    // The hub records the outcome and never reads the rate back.
+    expect(orchestrator).not.toContain("changedRatePercent");
+
+    // In `src/logger.ts` every occurrence lies inside the one derivation or the
+    // summary's section render — not in a branch that decides anything else.
+    const derivationStart = logger.lastIndexOf(
+      "/**",
+      logger.indexOf("export interface SelfAuditOutcomeTotals"),
+    );
+    const derivationEnd =
+      logger.indexOf("\n}", logger.indexOf("export function readSelfAuditOutcomes")) +
+      2;
+    const renderStart = logger.lastIndexOf(
+      "/**",
+      logger.indexOf("const selfAuditTotals ="),
+    );
+    const renderEnd = logger.indexOf("const dependencyRows");
+    for (const bound of [derivationStart, renderStart, renderEnd]) {
+      expect(bound).toBeGreaterThan(-1);
+    }
+    for (const identifier of identifiers) {
+      const positions = [
+        ...logger.matchAll(
+          new RegExp(identifier.replace("(", "\\("), "g"),
+        ),
+      ].map((match) => match.index);
+      expect(positions.length, identifier).toBeGreaterThan(0);
+      for (const position of positions) {
+        const inDerivation =
+          position >= derivationStart && position <= derivationEnd;
+        const inRender = position >= renderStart && position <= renderEnd;
+        expect(inDerivation || inRender, `${identifier}@${position}`).toBe(true);
+      }
+    }
+
+    // The only comparison the rate takes part in is a presence check. A
+    // threshold would make it a gate whatever it was called.
+    for (const match of logger.matchAll(
+      /changedRatePercent\s*(?:===|!==|>=|<=|>|<)\s*([^\s;)]+)/g,
+    )) {
+      expect(match[1]).toBe("undefined");
+    }
+    // And no gate declaration names an audit rate anywhere the summary is built.
+    for (const source of [logger, orchestrator, gateRunner]) {
+      expect(source).not.toMatch(/id:\s*"[^"]*audit[^"]*rate/i);
+    }
+  });
+
+  it("[behavior:#301:B-12] amends ADR 0069's bound in place, keeping the accepted decision", () => {
+    const adr = readFileSync(
+      "docs/adr/0069-bounded-generator-self-audit-before-qa-dispatch.md",
+      "utf-8",
+    );
+    const normalized = adr.replace(/\s+/g, " ");
+
+    // The sentence this slice replaced whole, rather than contradicted.
+    expect(normalized).not.toContain(
+      "One invocation per QA submission, bounded by construction: there is no " +
+        "loop in the stage, no retry, and no second challenge for a tree the " +
+        "audit rewrote.",
+    );
+    // The bound now counts completed invocations, with the budget named.
+    expect(normalized).toContain("One **completed** invocation per QA submission");
+    expect(normalized).toContain("--infrastructure-retries");
+    expect(normalized).toContain("AUDIT_NOT_RUN");
+    // Provenance, the resume short-circuit, and the reporting-only rate.
+    expect(normalized).toContain("run-ID provenance");
+    expect(normalized).toContain("spent");
+    expect(normalized).toContain("report and never gate");
+    // What the amendment must not have touched: the SwarmForge provenance, the
+    // accepted decision's own headings, and the argument against a second pass.
+    expect(normalized).toContain("swarm_handoff.sh");
+    expect(adr).toContain("## Decision");
+    expect(adr).toContain("## Consequences");
+    expect(normalized).toContain("no second challenge");
+  });
+
+  it("[behavior:#301:B-13] defines the three outcome terms in CONTEXT.md's Pipeline concepts", () => {
+    const context = readFileSync("CONTEXT.md", "utf-8");
+    const conceptsAt = context.indexOf("### Pipeline concepts");
+    expect(conceptsAt).toBeGreaterThan(-1);
+    const section = context.slice(conceptsAt);
+
+    const entryAt = section.indexOf("**Self-audit outcome**:");
+    expect(entryAt).toBeGreaterThan(-1);
+    const entry = section.slice(entryAt, section.indexOf("\n\n", entryAt));
+    for (const term of ["AUDIT_UNCHANGED", "AUDIT_CHANGED", "AUDIT_NOT_RUN"]) {
+      expect(entry, term).toContain(term);
+    }
+    expect(entry).toContain("\n_Avoid_: ");
+    expect(entry).toContain("ADR 0069");
+  });
+
+  it("[behavior:#301:P-05] renders no Self-Audit section for a run that recorded no outcome", () => {
+    const md = summaryWith("audit-absent", [
+      {
+        type: "quality-stage-policy",
+        stage: "cleaner",
+        enabled: true,
+        gateIds: ["clean:format"],
+        source: "afk.config.json",
+      },
+    ]);
+
+    // Additive, never present-but-empty: a run without `--self-audit` renders
+    // the same summary it rendered before this slice existed.
+    expect(md).not.toContain("## Self-Audit");
+    expect(md).not.toContain("Changed rate:");
+    expect(md).not.toContain("AUDIT_UNCHANGED");
+    // The neighbouring sections keep their text and their order. The gate
+    // section renders only for a blocking attempt, and this stream has none —
+    // which is itself the additive rule holding for the section beside the new one.
+    expect(md).toContain("## Quality Stages");
+    expect(md).toContain("`cleaner`: enabled");
+    expect(md).not.toContain("## Base Gates");
+    expect(EVENTS_SCHEMA_VERSION).toBe(1);
+    // And the reader beside the new one keeps its signature and its behavior.
+    expect(readQualityStageOutcomes(join(makeRepo(), "nope"))).toEqual([]);
   });
 });

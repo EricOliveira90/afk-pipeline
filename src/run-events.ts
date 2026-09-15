@@ -459,6 +459,36 @@ export type RunEventPayload =
       /** The subset of `gateIds` served from the gate cache (D17's `reused`). */
       cacheReusedGateIds: string[];
     }
+  | {
+      /**
+       * One landed generator self-audit outcome (#301 B-08, ADR 0069).
+       *
+       * Emitted once per audit that actually reached a verdict — a declined
+       * stage and a spent-on-resume stage emit nothing — so a total over this
+       * stream counts audits rather than stage entries.
+       *
+       * Measurement, never a gate (ADR 0063): the per-verdict totals and the
+       * changed rate the run summary derives from these events threshold
+       * nothing, branch nothing and gate nothing. `auditedTreeId` is absent when
+       * the invocation left no tree anyone hashed, which is exactly the
+       * `AUDIT_NOT_RUN` case.
+       *
+       * Additive, so `EVENTS_SCHEMA_VERSION` stays 1, the way
+       * `quality-stage-attempt` above arrived.
+       */
+      type: "self-audit-outcome";
+      ghIssue: string;
+      sliceNumber: string;
+      /** The generator round whose candidate was audited. */
+      round: number;
+      /** The run that spent the invocation — the run directory's name. */
+      runId: string;
+      /** The tree the required cheap gates released and the audit was handed. */
+      candidateTreeId: string;
+      /** The tree the audit left behind, when it could be resolved. */
+      auditedTreeId?: string;
+      verdict: "AUDIT_UNCHANGED" | "AUDIT_CHANGED" | "AUDIT_NOT_RUN";
+    }
   | { type: "run-ended"; outcome: "SUCCEEDED" | "FAILED" | "ABORTED" }
   | { type: "slice-outcome"; slice: SliceLifecycle }
   | {
@@ -645,6 +675,37 @@ export function buildQualityStageAttemptEvent(attempt: {
     endedAt: attempt.endedAt,
     durationMs: attempt.durationMs,
     cacheReusedGateIds: [...attempt.cacheReusedGateIds],
+  };
+}
+
+/**
+ * The one derivation of the `self-audit-outcome` payload (#301 B-08).
+ *
+ * Modelled on {@link buildQualityStageAttemptEvent} and pure for the same
+ * reason. `auditedTreeId` is omitted rather than set to `undefined`, so a
+ * serialized line carries only what the audit actually left behind — an
+ * `AUDIT_NOT_RUN` line names no audited tree at all.
+ */
+export function buildSelfAuditOutcomeEvent(outcome: {
+  ghIssue: string;
+  sliceNumber: string;
+  round: number;
+  runId: string;
+  candidateTreeId: string;
+  auditedTreeId?: string;
+  verdict: "AUDIT_UNCHANGED" | "AUDIT_CHANGED" | "AUDIT_NOT_RUN";
+}): Extract<RunEventPayload, { type: "self-audit-outcome" }> {
+  return {
+    type: "self-audit-outcome",
+    ghIssue: outcome.ghIssue,
+    sliceNumber: outcome.sliceNumber,
+    round: outcome.round,
+    runId: outcome.runId,
+    candidateTreeId: outcome.candidateTreeId,
+    ...(outcome.auditedTreeId !== undefined
+      ? { auditedTreeId: outcome.auditedTreeId }
+      : {}),
+    verdict: outcome.verdict,
   };
 }
 
