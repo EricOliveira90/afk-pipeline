@@ -33,7 +33,20 @@
  * `ROLLED_BACK` or `ROLLBACK_FAILED` ({@link rollBackRecoveryAttempt}), and one
  * fail-closed dispatch hold ({@link recoveryDispatchRefusal}). #334 wires the
  * first two into a launch through {@link reconcileRecoveryLineage}, which every
- * run calls before it dispatches anything; the `COMPLETED` outcome is #335.
+ * run calls before it dispatches anything.
+ *
+ * #335 closes the lineage. {@link completeRecoveryAttempt} is the only writer of
+ * the `COMPLETED` event, and it writes one only after three preconditions hold —
+ * a replacement pair that validates through {@link readLockedAcceptedPair}, a
+ * mechanical lock gate that returns `null`, and a non-blank provenance stamp — and
+ * only inside one {@link transactRunState} body that rechecks the trailing event
+ * and the scope fingerprint under the lock. Every other ending delegates to #333's
+ * writer or writes nothing at all; this slice adds no restore, no rollback and no
+ * terminal-event append of its own. {@link recoveryPreDispatchRefusal} then holds
+ * dispatch fail-closed if the completed replacement pair drifts afterwards, and
+ * {@link admitStaleRenegotiation} answers a repeat against a completed
+ * renegotiation as an idempotent no-op rather than a second attempt. Reporting and
+ * dispatch wiring are #336's.
  */
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -131,7 +144,29 @@ export type RecoveryRefusalCode =
   /** An attempt's last event is `ROLLBACK_FAILED`: dispatch is held (#333 B-07). */
   | "rollback-failed-hold"
   /** The facts changed between snapshot publication and the locked recheck. */
-  | "facts-changed-before-lock";
+  | "facts-changed-before-lock"
+  /**
+   * The mechanical lock gate refused the replacement pair, or the caller supplied
+   * no provenance stamp for the lock exit (#335 B-01).
+   *
+   * One code for both, because they are the same fact from the completion's point
+   * of view: the lock the replacement pair would be accepted under was not
+   * granted. A missing gate or a blank stamp is a refusal, never a skip — the
+   * alternative is a `COMPLETED` event nobody checked and nobody signed.
+   */
+  | "lock-gate-refused"
+  /**
+   * A target's renegotiation completed, but the pair now in the slice directory is
+   * no longer the replacement that `COMPLETED` event recorded (#335 B-04).
+   */
+  | "completed-pair-drifted"
+  /** An exact repeat against a completed renegotiation: nothing to do (#335 B-05). */
+  | "replay-completed-no-op"
+  /**
+   * A repeat against a completed renegotiation that names a different target or a
+   * different reason than the completed attempt did (#335 B-10).
+   */
+  | "replay-conflict";
 
 /** A resolved recovery target: the canonical pair, never a bare selector. */
 export interface RecoveryTargetIdentity {
@@ -590,7 +625,30 @@ export type AdmissionOutcome =
       snapshot: PublishedPairSnapshot;
     }
   | {
+      /**
+       * An exact repeat against an already-completed renegotiation (#335 B-05).
+       *
+       * `admitted: false` because nothing was admitted, but a member of its own
+       * rather than an ordinary refusal: a refusal says "this request was not
+       * allowed", while this says "this request was already satisfied, and
+       * satisfying it again would publish a snapshot of a replacement pair and
+       * open a second attempt to renegotiate what was already renegotiated". The
+       * two need different operator lines, so they need different outcomes.
+       */
       admitted: false;
+      /** Discriminates this member from an ordinary refusal at a glance. */
+      replayed: true;
+      code: Extract<RecoveryRefusalCode, "replay-completed-no-op">;
+      message: string;
+      /** The `COMPLETED` attempt the repeat resolved to. */
+      attemptId: string;
+      /** Never published on this path; declared so the union stays uniform. */
+      snapshot?: undefined;
+    }
+  | {
+      admitted: false;
+      /** Absent here: only the replay no-op above sets it. */
+      replayed?: undefined;
       code: RecoveryRefusalCode;
       message: string;
       /** Present when a snapshot was published before the refusal; it is inert. */
@@ -625,6 +683,101 @@ export interface AdmitStaleRenegotiationArgs {
   afterTemporaryWritten?: () => void;
 }
 
+/** A completed renegotiation whose replacement pair is the one now on disk. */
+interface CompletedReplacement {
+  ghIssue: string;
+  event: PersistedRecoveryLineageEvent;
+}
+
+/**
+ * The trailing `COMPLETED` event the pair now in a slice directory belongs to
+ * (#335 B-05/B-10/B-11), or `undefined` if no completed attempt claims it.
+ *
+ * Keyed on the *pair* rather than on the requested target, because the pair is
+ * what replay idempotence is about: a request repeated after a completion finds a
+ * slice directory holding the replacement, not the pair that was accepted, and
+ * re-admitting it would snapshot the replacement as if it were the original. A
+ * pair whose fingerprints match no completed replacement — the ordinary case, and
+ * the different-valid-pair case of B-11 — is not a replay at all and admits
+ * normally.
+ *
+ * Searched across every target in the lineage, sorted for determinism, because
+ * "which completed attempt does this pair belong to" is a question the pair
+ * answers on its own; comparing that attempt's recorded target against the
+ * request's is then what tells an exact repeat from a conflicting one.
+ */
+function completedReplacementFor(
+  state: RunState,
+  pair: AcceptedPairBytes | undefined,
+): CompletedReplacement | undefined {
+  if (pair === undefined) return undefined;
+  for (const ghIssue of Object.keys(state.recoveryLineage ?? {}).sort(
+    compareGhIssue,
+  )) {
+    const events = recoveryLineageFor(state, ghIssue);
+    const last = events[events.length - 1];
+    if (
+      last?.state === "COMPLETED" &&
+      last.replacementContractFingerprint === pair.contractFingerprint &&
+      last.replacementManifestFingerprint === pair.manifestFingerprint
+    ) {
+      return { ghIssue, event: last };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Answer a repeat against a completed renegotiation (#335 B-05/B-10).
+ *
+ * Identity is the whole {@link CanonicalRecoveryRequest} plus the extension set,
+ * compared as *values* against what the completed event recorded. An exact repeat
+ * is the idempotent no-op; anything else is a conflict, because a completed
+ * replacement pair can only have been accepted for the one request that produced
+ * it, and admitting a different request against it would renegotiate a
+ * replacement under a reason nobody accepted it for.
+ *
+ * The extension set is compared as "the completed attempt admitted none", which is
+ * all it can be until `--extend-scope` ships (#278) and all this slice's requests
+ * can ask for. It is compared rather than assumed so the check does not silently
+ * become vacuous when extensions arrive.
+ */
+function replayOutcome(
+  replay: CompletedReplacement,
+  facts: RecoveryEligibilityFacts,
+  sliceDir: string,
+): AdmissionOutcome {
+  const completed = replay.event;
+  const held =
+    `Recovery attempt ${completed.attemptId} completed a renegotiation of slice ` +
+    `${completed.target.number} (#${completed.target.ghIssue}) and the pair in ` +
+    `${sliceDir} is still the replacement it accepted`;
+  if (
+    completed.target.number === facts.target.number &&
+    completed.target.ghIssue === facts.target.ghIssue &&
+    completed.reason === facts.reason &&
+    completed.extensions.length === 0
+  ) {
+    return {
+      admitted: false,
+      replayed: true,
+      code: "replay-completed-no-op",
+      message:
+        `${held}, and this request repeats it exactly; no snapshot was published, ` +
+        `no lineage event was appended and neither accepted-pair file was rewritten`,
+      attemptId: completed.attemptId,
+    };
+  }
+  return {
+    admitted: false,
+    code: "replay-conflict",
+    message:
+      `${held} for reason "${completed.reason}"; this request names slice ` +
+      `${facts.target.number} (#${facts.target.ghIssue}) for reason "${facts.reason}", ` +
+      `which is not the request that completion accepted. Nothing was published or appended`,
+  };
+}
+
 /**
  * Admit one stale-pair renegotiation request, or refuse it (#277 B-08/B-09).
  *
@@ -632,14 +785,18 @@ export interface AdmitStaleRenegotiationArgs {
  *
  *  1. Load run state and run read-only eligibility. A refusal here has touched
  *     nothing at all.
- *  2. Resolve both branch tips. These are recorded facts, not eligibility
+ *  2. Answer a repeat against an already-completed renegotiation, before anything
+ *     is published (#335 B-05/B-10/B-11). Deciding it here is what makes the
+ *     no-op a no-op: one step later a snapshot of the replacement pair would
+ *     already be on disk.
+ *  3. Resolve both branch tips. These are recorded facts, not eligibility
  *     outcomes — an attempt whose tips cannot be named could never be reconciled.
- *  3. Publish the byte-verified snapshot. Outside the lock because it is the slow
+ *  4. Publish the byte-verified snapshot. Outside the lock because it is the slow
  *     part, and safe outside it because an unreferenced snapshot is inert.
- *  4. `beforeLockAcquired` — the interleave seam.
- *  5. Take the run-state lock, reload, and recheck every fact steps 1-3 read.
+ *  5. `beforeLockAcquired` — the interleave seam.
+ *  6. Take the run-state lock, reload, and recheck every fact steps 1-4 read.
  *     Any drift is a pre-admission refusal that writes nothing.
- *  6. Append exactly one `PENDING` event. This is the first admitted mutation.
+ *  7. Append exactly one `PENDING` event. This is the first admitted mutation.
  */
 export function admitStaleRenegotiation(
   args: AdmitStaleRenegotiationArgs,
@@ -670,6 +827,16 @@ export function admitStaleRenegotiation(
       code: "attempt-already-pending",
       message: `A recovery attempt for slice ${facts.target.number} (#${facts.target.ghIssue}) is already PENDING; resolve it before admitting another`,
     };
+  }
+
+  const replay = completedReplacementFor(
+    state,
+    // Eligibility already read and validated this pair, so the read cannot fail
+    // here; the guard is what makes that a fact of the code and not a comment.
+    readLockedAcceptedPair(args.sliceDir),
+  );
+  if (replay !== undefined) {
+    return replayOutcome(replay, facts, args.sliceDir);
   }
 
   const sliceHead = resolveCommit(args.repoRoot, facts.sliceBranch);
@@ -1257,7 +1424,17 @@ export type RecoveryFailureTrigger =
   | "evaluator-non-acceptance"
   | "deterministic-validation-refusal"
   | "lock-gate-refusal"
-  | "cancellation";
+  | "cancellation"
+  /**
+   * A completion's locked recheck found the scope fingerprint no longer equal to
+   * the one the `PENDING` event recorded (#335 B-03).
+   *
+   * Its own trigger rather than a reuse of `deterministic-validation-refusal`,
+   * because nothing about the replacement pair was wrong: the run the attempt was
+   * admitted against changed underneath it, which is a different thing for an
+   * operator to read and a different thing to act on.
+   */
+  | "completion-cas-lost";
 
 /**
  * The caller's original failure, carried through the rollback untouched.
@@ -1301,19 +1478,33 @@ function rollbackableEvent(
     : undefined;
 }
 
+/** The three members a `COMPLETED` event carries and no other state may (#335 B-12). */
+export interface RecoveryCompletionRecord {
+  /** SHA-256 of the replacement `contract.md` the attempt accepted. */
+  replacementContractFingerprint: string;
+  /** SHA-256 of the replacement `acceptance-manifest.json`. */
+  replacementManifestFingerprint: string;
+  /** The lock exit's provenance stamp, opaque to this module (ADR 0055 §4). */
+  lockProvenance: string;
+}
+
 /**
  * The next event, built from the trailing one so `attemptId` is copied verbatim.
  *
  * The three rollback-failure members are stripped before the spread rather than
  * left to be overwritten: a `ROLLED_BACK` event appended after a failed rollback
  * would otherwise inherit that failure's observations, and run state rejects a
- * `ROLLED_BACK` event carrying them (#333 B-06).
+ * `ROLLED_BACK` event carrying them (#333 B-06). The same strip is what lets a
+ * `COMPLETED` event be built here too, since run state rejects one carrying them
+ * as well (#335 B-12) — one builder for every terminal event, so no two of them
+ * can disagree about which members are copied forward.
  */
 function nextRecoveryEvent(
   trailing: PersistedRecoveryLineageEvent,
   next:
     | { state: "ROLLED_BACK" }
-    | ({ state: "ROLLBACK_FAILED"; rollbackError: string } & ObservedPairFingerprints),
+    | ({ state: "ROLLBACK_FAILED"; rollbackError: string } & ObservedPairFingerprints)
+    | ({ state: "COMPLETED" } & RecoveryCompletionRecord),
 ): PersistedRecoveryLineageEvent {
   const {
     rollbackError: _error,
@@ -1445,6 +1636,365 @@ export function rollBackRecoveryAttempt<F extends RecoveryFailure>(
   );
 }
 
+/** Every reason a completion ends without a `COMPLETED` event (#335 B-01/B-03). */
+export type CompleteRecoveryAttemptRefusalCode = Extract<
+  RecoveryRefusalCode,
+  | "no-pending-attempt"
+  | "accepted-pair-invalid"
+  | "lock-gate-refused"
+  | "facts-changed-before-lock"
+>;
+
+export interface CompleteRecoveryAttemptArgs {
+  repoRoot: string;
+  /** PRD slug — artifact identity. */
+  prdSlug: string;
+  /** Run slug: which run-state file this attempt was admitted in (ADR 0002). */
+  runSlug?: string;
+  /** The target's artifact directory, holding the replacement pair. */
+  sliceDir: string;
+  ghIssue: string;
+  /**
+   * The mechanical lock gate: migration-prefix and run-specific checks. Returns
+   * `null` to admit, or a reason string to refuse.
+   *
+   * Required and *injected*, structurally the same shape as
+   * `ContractTransactionContext.onContractLocked`, rather than imported: the gate's
+   * owner sits outside this slice's file scope, and the module it lives beside is a
+   * Review-rails internal this module may not import (ARCHITECTURE.md "Internals
+   * (do not import)"). Injection also makes "the completion reaches exactly one
+   * gate" a type-level fact instead of a convention.
+   */
+  lockGate: (contractPath: string) => string | null;
+  /**
+   * The provenance stamp for this lock exit, opaque and non-blank (ADR 0055 §4).
+   *
+   * Supplied by the caller rather than formatted here for the same reason the gate
+   * is injected: the wording belongs to the stamp's owner, and a completion that
+   * formatted its own would be a second source of truth for it. Blank or missing is
+   * refused exactly as a refusing gate is — "every lock exit stamps, no special
+   * cases" is not satisfied by a stamp nobody supplied.
+   */
+  provenance: string;
+  /**
+   * Test seam: fires after the preconditions are evaluated and before the
+   * completion takes the ADR 0056 lock, mirroring
+   * {@link AdmitStaleRenegotiationArgs.beforeLockAcquired} and for the same
+   * reason — the interleave being proven is this module's sequencing.
+   */
+  beforeLockAcquired?: () => void;
+}
+
+export type CompleteRecoveryAttemptResult =
+  | {
+      /** One `COMPLETED` event was appended, and nothing else was written. */
+      completed: true;
+      attemptId: string;
+      event: PersistedRecoveryLineageEvent;
+    }
+  | {
+      completed: false;
+      code: CompleteRecoveryAttemptRefusalCode;
+      message: string;
+      /** The attempt the refusal is about, when one was trailing to name. */
+      attemptId?: string;
+      /**
+       * The failure the attempt was ended with and #333's outcome for it. Both
+       * absent on the one ending that writes nothing anywhere — the trailing event
+       * is no longer this attempt's, so there is no attempt here left to end.
+       */
+      failure?: RecoveryFailure;
+      rollback?: RollBackRecoveryAttemptResult<RecoveryFailure>;
+    };
+
+/** How a trailing event reads in a refusal message, or that there is none. */
+function describeTrailingRecoveryEvent(
+  trailing: PersistedRecoveryLineageEvent | undefined,
+): string {
+  return trailing === undefined
+    ? "the lineage is empty"
+    : `attempt ${trailing.attemptId} trails in state ${trailing.state}`;
+}
+
+/**
+ * End a completion the way every unsuccessful ending ends — through #333's writer.
+ *
+ * The read here is what authorizes the delegation, and it is not optional.
+ * {@link rollBackRecoveryAttempt} takes no `attemptId`: it reloads run state and
+ * acts on whatever unresolved event trails. Handing it a lineage that has moved on
+ * would restore *another* attempt's snapshot over this slice's pair, and after a
+ * `ROLLED_BACK` event {@link hasOpenRecoveryAttempt} is false, so a freshly
+ * admitted `PENDING` attempt really can be the thing trailing. Teaching the writer
+ * an `attemptId` is what P-02 forbids, so the caller checks instead — and when the
+ * check fails, nothing is restored, nothing is appended and no rollback is called.
+ */
+function endCompletionThroughRollback(args: {
+  repoRoot: string;
+  prdSlug: string;
+  runSlug: string;
+  sliceDir: string;
+  ghIssue: string;
+  attemptId: string;
+  code: CompleteRecoveryAttemptRefusalCode;
+  trigger: RecoveryFailureTrigger;
+  message: string;
+}): CompleteRecoveryAttemptResult {
+  const events = recoveryLineageFor(
+    loadRunState(args.repoRoot, args.runSlug),
+    args.ghIssue,
+  );
+  const trailing = events[events.length - 1];
+  if (
+    trailing === undefined ||
+    trailing.attemptId !== args.attemptId ||
+    trailing.state !== "PENDING"
+  ) {
+    return {
+      completed: false,
+      code: "facts-changed-before-lock",
+      message:
+        `${args.message}. The recovery lineage for #${args.ghIssue} no longer ends on ` +
+        `attempt ${args.attemptId} in state PENDING (${describeTrailingRecoveryEvent(trailing)}), ` +
+        `so no COMPLETED event was appended, nothing was restored and no rollback was called`,
+      attemptId: args.attemptId,
+    };
+  }
+
+  const failure: RecoveryFailure = {
+    trigger: args.trigger,
+    message: args.message,
+  };
+  const rollback = rollBackRecoveryAttempt({
+    repoRoot: args.repoRoot,
+    prdSlug: args.prdSlug,
+    runSlug: args.runSlug,
+    sliceDir: args.sliceDir,
+    ghIssue: args.ghIssue,
+    failure,
+  });
+  return {
+    completed: false,
+    code: args.code,
+    message: args.message,
+    attemptId: args.attemptId,
+    failure,
+    rollback,
+  };
+}
+
+/**
+ * Complete one admitted recovery attempt, or end it (#335 B-01/B-02/B-03).
+ *
+ * The sequence, and why it is this sequence:
+ *
+ *  1. Read run state once and refuse unless the target's lineage ends on a
+ *     `PENDING` event. That event names the attempt everything below is about; the
+ *     completion never mints or is told an id.
+ *  2. Evaluate the three preconditions, in this order and with no second path:
+ *     the replacement pair through {@link readLockedAcceptedPair}, then the
+ *     injected {@link CompleteRecoveryAttemptArgs.lockGate}, then a non-blank
+ *     {@link CompleteRecoveryAttemptArgs.provenance}. The gate runs only once the
+ *     pair validated, so a gate can never be what admits a pair the module's only
+ *     pair reader rejected.
+ *  3. `beforeLockAcquired` — the interleave seam.
+ *  4. On a precondition refusal, end the attempt through #333's writer. A refusal
+ *     is *terminal* for the attempt, not a lingering `PENDING`: leaving it open
+ *     would hold the target's dispatch on an attempt nobody is still working.
+ *  5. Otherwise take the ADR 0056 lock exactly once, reload, recheck the trailing
+ *     event and the scope fingerprint, and append exactly one `COMPLETED` event.
+ *  6. A recheck that lost the scope fingerprint while this attempt was still
+ *     trailing ends through the same writer, called *after* the transaction
+ *     returned and released the lock — the way {@link reconcileRecoveryLineage}
+ *     already calls it, and the only way that does not take the lock twice over.
+ *
+ * Nothing here moves a ref, and nothing here restores, rolls back or appends a
+ * `ROLLED_BACK`/`ROLLBACK_FAILED` event of its own (ADR 0039, #335 B-03).
+ */
+export function completeRecoveryAttempt(
+  args: CompleteRecoveryAttemptArgs,
+): CompleteRecoveryAttemptResult {
+  const runSlug = args.runSlug ?? args.prdSlug;
+  const admitted = recoveryLineageFor(
+    loadRunState(args.repoRoot, runSlug),
+    args.ghIssue,
+  );
+  const opened = admitted[admitted.length - 1];
+  if (opened === undefined || opened.state !== "PENDING") {
+    return {
+      completed: false,
+      code: "no-pending-attempt",
+      message:
+        `The recovery lineage for #${args.ghIssue} does not end on a PENDING attempt ` +
+        `(${describeTrailingRecoveryEvent(opened)}), so there is nothing to complete`,
+    };
+  }
+  const attemptId = opened.attemptId;
+
+  const replacement = readLockedAcceptedPair(args.sliceDir);
+  // The gate is reached only when the pair validated, and then exactly once, with
+  // the replacement contract's own path. A gate that is not a function is a
+  // refusal and not a call: a missing gate is never a skip (#335 B-01).
+  const gate =
+    replacement === undefined
+      ? undefined
+      : typeof args.lockGate === "function"
+        ? args.lockGate(join(args.sliceDir, CONTRACT_FILENAME))
+        : `no lock gate was supplied to the completion of attempt ${attemptId}`;
+  const provenance =
+    typeof args.provenance === "string" ? args.provenance.trim() : "";
+
+  /** All three preconditions, decided together so none can be reached alone. */
+  type Preconditions =
+    | { held: true; replacement: AcceptedPairBytes; provenance: string }
+    | {
+        held: false;
+        code: CompleteRecoveryAttemptRefusalCode;
+        trigger: RecoveryFailureTrigger;
+        message: string;
+      };
+  const preconditions: Preconditions =
+    replacement === undefined
+      ? {
+          held: false,
+          code: "accepted-pair-invalid",
+          trigger: "deterministic-validation-refusal",
+          message:
+            `${args.sliceDir} does not hold a valid LOCKED ${CONTRACT_FILENAME} / ` +
+            `${ACCEPTANCE_MANIFEST_FILENAME} pair, so recovery attempt ${attemptId} ` +
+            `has no replacement pair to complete on`,
+        }
+      : gate !== null && gate !== undefined
+        ? {
+            held: false,
+            code: "lock-gate-refused",
+            trigger: "lock-gate-refusal",
+            message:
+              `The mechanical lock gate refused the replacement pair in ${args.sliceDir} ` +
+              `for recovery attempt ${attemptId} (${gate})`,
+          }
+        : provenance === ""
+          ? {
+              held: false,
+              code: "lock-gate-refused",
+              trigger: "lock-gate-refusal",
+              message:
+                `No lock provenance was supplied for the completion of recovery attempt ` +
+                `${attemptId}; a lock exit that cannot say what stamped it is refused ` +
+                `exactly as a refusing gate is`,
+            }
+          : { held: true, replacement, provenance };
+
+  args.beforeLockAcquired?.();
+
+  const end = (
+    code: CompleteRecoveryAttemptRefusalCode,
+    trigger: RecoveryFailureTrigger,
+    message: string,
+  ): CompleteRecoveryAttemptResult =>
+    endCompletionThroughRollback({
+      repoRoot: args.repoRoot,
+      prdSlug: args.prdSlug,
+      runSlug,
+      sliceDir: args.sliceDir,
+      ghIssue: args.ghIssue,
+      attemptId,
+      code,
+      trigger,
+      message,
+    });
+
+  if (!preconditions.held) {
+    return end(
+      preconditions.code,
+      preconditions.trigger,
+      preconditions.message,
+    );
+  }
+
+  /** What the one locked body decided, so the caller can act after the lock. */
+  type LockedCompletion =
+    | { appended: true; event: PersistedRecoveryLineageEvent }
+    /** The recheck lost the scope fingerprint with this attempt still trailing. */
+    | { appended: false; casLost: true; message: string }
+    /** The trailing event is not this attempt's `PENDING` one: write nothing. */
+    | { appended: false; casLost: false; message: string };
+
+  const decided = transactRunState<LockedCompletion>(
+    args.repoRoot,
+    runSlug,
+    (locked) => {
+      const events = recoveryLineageFor(locked, args.ghIssue);
+      const current = events[events.length - 1];
+      if (
+        current === undefined ||
+        current.attemptId !== attemptId ||
+        current.state !== "PENDING" ||
+        // Checked rather than assumed even though `PENDING -> COMPLETED` is legal
+        // by construction: the transition table is the one authority on what may
+        // be appended, and a completion that skipped it would be a second one.
+        !isLegalRecoveryTransition(current.state, "COMPLETED")
+      ) {
+        return {
+          changed: false,
+          result: {
+            appended: false,
+            casLost: false,
+            message:
+              `The recovery lineage for #${args.ghIssue} no longer ends on attempt ` +
+              `${attemptId} in state PENDING (${describeTrailingRecoveryEvent(current)}); ` +
+              `no COMPLETED event was appended, nothing was restored and no rollback was called`,
+          },
+        };
+      }
+      const observed =
+        locked.scope === undefined
+          ? RECOVERY_FINGERPRINT_ABSENT
+          : runScopeFingerprint(locked.scope);
+      if (observed !== current.scopeFingerprint) {
+        return {
+          changed: false,
+          result: {
+            appended: false,
+            casLost: true,
+            message:
+              `The run's persisted scope changed before the completion of recovery attempt ` +
+              `${attemptId} held the run-state lock: the attempt was admitted against ` +
+              `${current.scopeFingerprint} and the lock observed ${observed}`,
+          },
+        };
+      }
+
+      const event = nextRecoveryEvent(current, {
+        state: "COMPLETED",
+        replacementContractFingerprint:
+          preconditions.replacement.contractFingerprint,
+        replacementManifestFingerprint:
+          preconditions.replacement.manifestFingerprint,
+        lockProvenance: preconditions.provenance,
+      });
+      appendRecoveryLineageEvent(locked, args.ghIssue, event);
+      return { changed: true, result: { appended: true, event } };
+    },
+  );
+
+  if (decided.appended) {
+    return { completed: true, attemptId, event: decided.event };
+  }
+  if (!decided.casLost) {
+    return {
+      completed: false,
+      code: "facts-changed-before-lock",
+      message: decided.message,
+      attemptId,
+    };
+  }
+  return end(
+    "facts-changed-before-lock",
+    "completion-cas-lost",
+    decided.message,
+  );
+}
+
 /** A held dispatch, naming the attempt a human has to resolve first (#333 B-07). */
 export interface RecoveryDispatchRefusal {
   code: Extract<RecoveryRefusalCode, "rollback-failed-hold">;
@@ -1482,6 +2032,75 @@ export function recoveryDispatchRefusal(
       ` for this slice; the accepted pair as admitted is still at ${last.snapshotPath}`,
     attemptId: last.attemptId,
     snapshotPath: last.snapshotPath,
+  };
+}
+
+/** A dispatch held because a completed replacement pair drifted (#335 B-04). */
+export interface RecoveryPreDispatchRefusal {
+  code: Extract<RecoveryRefusalCode, "completed-pair-drifted">;
+  message: string;
+  /** Read off the trailing `COMPLETED` event, not derived. */
+  attemptId: string;
+  /**
+   * The fingerprints actually found in the slice directory —
+   * {@link RECOVERY_FINGERPRINT_ABSENT} when it holds no valid `LOCKED` pair at
+   * all, for the reason a failed rollback records the same marker.
+   */
+  observedContractFingerprint: string;
+  observedManifestFingerprint: string;
+}
+
+/**
+ * Refuse agent dispatch when a completed replacement pair no longer matches (#335 B-04).
+ *
+ * The sibling of {@link recoveryDispatchRefusal}, and deliberately a separate
+ * predicate over a separate trailing state: that one holds an unresolved
+ * `ROLLBACK_FAILED`, this one holds a resolved `COMPLETED` whose replacement pair
+ * has since changed. A target whose lineage does not end on `COMPLETED` is not this
+ * predicate's business and gets `undefined` — merging the two into one "is dispatch
+ * allowed" answer would make either hold's reason unreadable.
+ *
+ * Within its own domain it fails closed: the pair has to be a valid `LOCKED` pair
+ * *and* fingerprint-identical to what the `COMPLETED` event recorded. A reopened,
+ * unparseable, mutated or missing pair all refuse, because a generator dispatched
+ * against a pair nobody accepted is exactly the outcome the completion event exists
+ * to make checkable. The message names the attempt and both observed fingerprints,
+ * because "which attempt" and "what is there instead" are what a human needs.
+ *
+ * The pair is re-read here rather than passed in, so the answer is about the bytes
+ * on disk at dispatch time and not about a read that happened earlier. Exported for
+ * #336's dispatch reporting to call; this slice wires it into no dispatch site.
+ */
+export function recoveryPreDispatchRefusal(
+  state: RunState,
+  ghIssue: string,
+  sliceDir: string,
+): RecoveryPreDispatchRefusal | undefined {
+  const events = recoveryLineageFor(state, ghIssue);
+  const last = events[events.length - 1];
+  if (last?.state !== "COMPLETED") return undefined;
+  const pair = readLockedAcceptedPair(sliceDir);
+  const observedContractFingerprint =
+    pair?.contractFingerprint ?? RECOVERY_FINGERPRINT_ABSENT;
+  const observedManifestFingerprint =
+    pair?.manifestFingerprint ?? RECOVERY_FINGERPRINT_ABSENT;
+  if (
+    observedContractFingerprint === last.replacementContractFingerprint &&
+    observedManifestFingerprint === last.replacementManifestFingerprint
+  ) {
+    return undefined;
+  }
+  return {
+    code: "completed-pair-drifted",
+    message:
+      `Recovery attempt ${last.attemptId} for #${ghIssue} completed on a replacement pair ` +
+      `fingerprinted ${last.replacementContractFingerprint} / ` +
+      `${last.replacementManifestFingerprint}, but ${sliceDir} now holds ` +
+      `${observedContractFingerprint} / ${observedManifestFingerprint}, so no agent is ` +
+      `dispatched for this slice until the accepted pair is the one that was completed`,
+    attemptId: last.attemptId,
+    observedContractFingerprint,
+    observedManifestFingerprint,
   };
 }
 

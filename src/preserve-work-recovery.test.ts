@@ -884,16 +884,26 @@ describe("recovery lineage transitions", () => {
       ]![0],
     );
 
-    // Resolve the first attempt so a retry is admissible at all. This slice
-    // ships the transition validator but none of the terminal writers (#335),
-    // so the fixture records the legal `PENDING -> COMPLETED` itself.
+    // Resolve the first attempt so a retry is admissible at all. The fixture
+    // records the legal `PENDING -> COMPLETED` itself rather than calling #335's
+    // writer, because what B-11 is about is the *second* admission.
     expect(isLegalRecoveryTransition("PENDING", "COMPLETED")).toBe(true);
     const document = stateDocument(fixture);
     const events = (document.recoveryLineage as Record<
       string,
       PersistedRecoveryLineageEvent[]
     >)[GH_ISSUE]!;
-    events.push({ ...events[0]!, state: "COMPLETED" });
+    // The three completion members #335 B-12 requires on `COMPLETED`, with
+    // replacement fingerprints that are not the pair now on disk: a completion
+    // accepts a *replacement* pair, and #335's replay check keys on exactly that
+    // comparison — matching fingerprints here would make the retry a replay.
+    events.push({
+      ...events[0]!,
+      state: "COMPLETED",
+      replacementContractFingerprint: "9".repeat(64),
+      replacementManifestFingerprint: "a".repeat(64),
+      lockProvenance: "fixture-recorded completion",
+    });
     writeFileSync(fixture.statePath, `${JSON.stringify(document, null, 2)}\n`);
 
     const second = admit(fixture);
@@ -2318,8 +2328,11 @@ describe("what the rollback outcomes must not disturb", () => {
         "): void {",
       ].join("\n"),
     );
-    expect(occurrences(MODULE_CODE, "appendRecoveryLineageEvent(")).toBe(2);
-    expect(occurrences(MODULE_CODE, "transactRunState<")).toBe(2);
+    // Three call sites, one per writer: admission's `PENDING`, the rollback's
+    // terminal event, and #335's `COMPLETED`. The claim is one append per
+    // transaction, not a frozen number.
+    expect(occurrences(MODULE_CODE, "appendRecoveryLineageEvent(")).toBe(3);
+    expect(occurrences(MODULE_CODE, "transactRunState<")).toBe(3);
   }, 30_000);
 
   it("[behavior:#333:P-05] keeps the transition map and all five existing seams as they were", () => {
@@ -2678,16 +2691,20 @@ describe("what a reconciled target appends", () => {
     // Behavioural evidence that one sequence runs is #333 B-09's; this is the
     // structural half: the module still holds exactly one restore call site
     // inside one rollback writer, and reconciliation calls that writer.
+    // Still exactly one restore call site, inside the one rollback writer: #335
+    // added a completion path that delegates to that writer rather than a second
+    // restore. The append, transaction and transition counters each gained the
+    // completion's one call site (#335 B-02) and nothing else.
     expect(occurrences(MODULE_CODE, "restoreAcceptedPairFromSnapshot(")).toBe(2);
-    expect(occurrences(MODULE_CODE, "appendRecoveryLineageEvent(")).toBe(2);
-    expect(occurrences(MODULE_CODE, "transactRunState<")).toBe(2);
-    expect(occurrences(MODULE_CODE, "isLegalRecoveryTransition(")).toBe(2);
-    // One rollback writer, called from exactly one place in this module — the
-    // reconciliation added the call, not a second writer.
+    expect(occurrences(MODULE_CODE, "appendRecoveryLineageEvent(")).toBe(3);
+    expect(occurrences(MODULE_CODE, "transactRunState<")).toBe(3);
+    expect(occurrences(MODULE_CODE, "isLegalRecoveryTransition(")).toBe(3);
+    // One rollback writer, called from exactly two places in this module —
+    // reconciliation and the completion. Both added a call, not a second writer.
     expect(MODULE_CODE).toContain(
       "export function rollBackRecoveryAttempt<F extends RecoveryFailure>(",
     );
-    expect(occurrences(MODULE_CODE, "rollBackRecoveryAttempt(")).toBe(1);
+    expect(occurrences(MODULE_CODE, "rollBackRecoveryAttempt(")).toBe(2);
   });
 });
 
