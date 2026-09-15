@@ -8348,7 +8348,8 @@ describe("the generator self-audit call site", () => {
 });
 
 /**
- * The changed-tree path in the hub (#300 B-05, B-06, B-07, B-09, B-10, P-06).
+ * The changed-tree path in the hub (#300 B-02, B-05, B-06, B-07, B-09, B-10,
+ * P-06).
  *
  * A source-order scan for the same reason the #299 scan is one: `--self-audit`
  * is default off, so no spawned scenario reaches the audited branch, and every
@@ -8383,6 +8384,29 @@ describe("the audited-tree gate re-run call site", () => {
     const guardAt = source.indexOf('"AUDIT_CHANGED"', auditAt);
     expect(guardAt).toBeGreaterThan(auditAt);
     expect(guardAt).toBeLessThan(verifyAt);
+  });
+
+  it("[behavior:#300:B-02] mints the audited checkpoint at a path of its own", () => {
+    // The distinctness `verifyAuditedTree` documents but cannot enforce: it
+    // mints at whatever directory it is handed, and the only caller is here.
+    // Reusing the round's own directory would make `createCandidateCheckpoint`
+    // throw "target already exists" (`src/gate-runner.ts:351-353`) on every
+    // changed-tree round, because the round's checkpoint stays registered until
+    // the attempt's `finally` removes it — a total failure of the path this
+    // slice exists to add. So the argument is checked as text: derived from the
+    // round's directory, and never that directory itself.
+    const repairAt = source.indexOf('outcome === "REPAIR"');
+    const callSite = source.slice(verifyAt, repairAt);
+    const argument = /\n\s*checkpointDir: (.+),\n/.exec(callSite)?.[1];
+    expect(argument, callSite).toBeDefined();
+    expect(argument!).toContain("checkpointDir");
+    // Whatever remains once the round's own binding and the interpolation
+    // syntax are struck out is what makes the path a different one; nothing
+    // remaining means the two paths are the same path.
+    const distinguisher = argument!
+      .replace(/[`${}\s]/g, "")
+      .replace("checkpointDir", "");
+    expect(distinguisher, argument).not.toBe("");
   });
 
   it("[behavior:#300:B-07] spends no generator round between the audit and the QA dispatch", () => {

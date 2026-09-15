@@ -249,13 +249,6 @@ describe("runSelfAuditStage", () => {
 
   it("[behavior:#300:P-01] leaves the declined and unchanged paths exactly as they are", async () => {
     const declinedDispatch = vi.fn(async () => {});
-    // A `createCheckpoint` of the shape `verifyAuditedTree` is handed: no
-    // audited checkpoint is minted on either of these paths, so the changed-tree
-    // machinery costs a default run nothing.
-    const createCheckpoint = vi.fn((dir: string) => ({
-      treeId: dir,
-      commitSha: dir,
-    }));
 
     await expect(
       runSelfAuditStage(stageInput({ dispatch: declinedDispatch })),
@@ -283,15 +276,18 @@ describe("runSelfAuditStage", () => {
         verdict: "AUDIT_UNCHANGED",
       },
     ]);
-    // Neither path mints an audited checkpoint or runs an extra gate, so
-    // `resolveGradedCandidate` is handed no audited value and yields the
-    // pre-audit pair.
-    expect(createCheckpoint).toHaveBeenCalledTimes(0);
+    // Neither path mints an audited checkpoint or runs an extra gate. That is
+    // not observable here — `SelfAuditStageInput` declares no `createCheckpoint`
+    // and this stage never reaches the minting seam — so it is asserted where it
+    // can fail: the B-05 scan pins the single `verifyAuditedTree(` call site
+    // behind its `AUDIT_CHANGED` guard. What is observable here is the
+    // consequence: with no audited value, the graded candidate *is* the
+    // pre-audit pair, base-gate object included, by reference.
     const released = { treeId: releasedTree, commitSha: "c".repeat(40) };
     const releasedBaseGate = { candidateTreeId: releasedTree };
-    expect(
-      resolveGradedCandidate({ released, releasedBaseGate }),
-    ).toEqual({ ...released, baseGate: releasedBaseGate });
+    const graded = resolveGradedCandidate({ released, releasedBaseGate });
+    expect(graded).toEqual({ ...released, baseGate: releasedBaseGate });
+    expect(graded.baseGate).toBe(releasedBaseGate);
   });
 
   it("[behavior:#300:P-03] records the changed verdict at schema v7 with no new field", async () => {
@@ -401,8 +397,6 @@ describe("selectAuditedGateDeclarations", () => {
 describe("verifyAuditedTree", () => {
   const AUDITED_TREE = "c".repeat(40);
   const AUDITED_COMMIT = "d".repeat(40);
-  /** The round's own checkpoint directory: the audited mint may not reuse it. */
-  const ROUND_CHECKPOINT_DIR = "/afk/checkpoints/round-1";
   let evidenceRoot: string;
 
   beforeEach(() => {
@@ -496,10 +490,14 @@ describe("verifyAuditedTree", () => {
 
     const result = await verifyAuditedTree(h.input);
 
-    // A path of its own: `createCandidateCheckpoint` throws when its target
-    // already exists, and the round's checkpoint is still registered.
+    // Minted once, at the directory it was handed and nowhere else. Whether
+    // *that* directory differs from the round's own is decided at the hub's call
+    // site, not here — `createCandidateCheckpoint` throws when its target
+    // already exists and the round's checkpoint stays registered until the
+    // attempt's `finally` — so the distinctness is asserted where it can fail,
+    // by the `[behavior:#300:B-02]` call-site scan in `src/orchestrator.test.ts`.
     expect(h.createCheckpoint).toHaveBeenCalledTimes(1);
-    expect(h.createCheckpoint.mock.calls[0]![0]).not.toBe(ROUND_CHECKPOINT_DIR);
+    expect(h.createCheckpoint.mock.calls[0]![0]).toBe(h.input.checkpointDir);
     // Registered before the gates run, so the tree under grading is named on
     // this branch and on the failure branch alike (B-10).
     expect(h.onCandidateTree).toHaveBeenCalledTimes(1);
@@ -611,19 +609,23 @@ describe("resolveGradedCandidate", () => {
     ).toEqual(audited);
 
     // `AUDIT_UNCHANGED`, `AUDIT_NOT_RUN`, a declined stage and an audited
-    // `REPAIR` are all this case, and all of them get the pre-audit pair — and
-    // the pre-audit base-gate object *by reference*, so nothing downstream can
-    // tell this apart from the run it would have had before #300.
-    for (const value of [undefined]) {
-      const resolved = resolveGradedCandidate({
-        released,
-        releasedBaseGate,
-        audited: value,
-      });
-      expect(resolved.treeId).toBe(released.treeId);
-      expect(resolved.commitSha).toBe(released.commitSha);
-      expect(resolved.baseGate).toBe(releasedBaseGate);
-    }
+    // `REPAIR` are four situations upstream but one input here — no audited
+    // value — and they get the pre-audit pair with the pre-audit base-gate object
+    // *by reference*, so nothing downstream can tell this apart from the run it
+    // would have had before #300.
+    const resolved = resolveGradedCandidate({
+      released,
+      releasedBaseGate,
+      audited: undefined,
+    });
+    expect(resolved.treeId).toBe(released.treeId);
+    expect(resolved.commitSha).toBe(released.commitSha);
+    expect(resolved.baseGate).toBe(releasedBaseGate);
+    // And an omitted member is the same input as an explicit `undefined`, which
+    // is the shape the hub's non-changed paths actually pass.
+    expect(resolveGradedCandidate({ released, releasedBaseGate })).toEqual(
+      resolved,
+    );
   });
 });
 

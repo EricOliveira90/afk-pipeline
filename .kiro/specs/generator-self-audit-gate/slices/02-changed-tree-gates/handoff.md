@@ -7,7 +7,10 @@
   `candidateTreeId` (released) and `auditedTreeId` (post-audit) differ.
 - `B-02`: `src/self-audit.ts:verifyAuditedTree` — mints the audited checkpoint
   through `createCheckpoint`, reports it through `onCandidateTree`, re-runs the
-  selected declarations through `runGates`, returns `PASS` or `REPAIR`.
+  selected declarations through `runGates`, returns `PASS` or `REPAIR`. The
+  distinct-path half of the behavior lives at the hub's call site
+  (`checkpointDir: \`${checkpointDir}-audited\``) and is asserted there, by
+  `src/orchestrator.test.ts` `[behavior:#300:B-02]`.
 - `B-03`: `src/self-audit.ts:selectAuditedGateDeclarations` — pure filter of the
   round's `preQaDeclarations` by the catalog's required ids, same objects.
 - `B-04`: `src/self-audit.ts:verifyAuditedTree` (pass path) +
@@ -73,6 +76,14 @@
   behind on every changed-tree round is not a behavior anyone chose.
 - The audited checkpoint materializes only when a selected declaration carries a
   `command`, mirroring the pre-audit checkpoint's own predicate.
+- Round 2 (QA-01, QA-02, QA-03): each of the three flagged assertions was moved
+  to the seam where its claim can fail rather than restated. Distinctness of the
+  audited checkpoint path is a call-site fact, so it is asserted as a call-site
+  text scan; the P-01 non-minting claim is a type-and-call-site fact, so its
+  unreachable spy was dropped and the observable consequence
+  (`resolveGradedCandidate` yielding the pre-audit pair by reference) kept; the
+  B-08 four-case loop became straight-line assertions plus the
+  omitted-vs-explicit-`undefined` pair the hub actually passes.
 
 ## Gotchas / learnings
 
