@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "round": 2,
+  "responses": [
+    {
+      "findingId": "F-08",
+      "position": "CONDITION_MET",
+      "evidence": "B-03's given now supplies a case (c) group — a stage input omitting infrastructureRetries entirely plus ones carrying -1, 1.5 and Number.NaN, each with a dispatch that always rejects with \"exited with code 1\" — and its observableResult declares the [behavior:B-03] assertions that each of those four inputs dispatches exactly once, does not reject, narrates no \"self-audit: infrastructure retry\" line, and returns { ran: true, verdict: \"AUDIT_NOT_RUN\", treeId: <released tree id> }, stating explicitly that an implementation which throws on -1 or NaN, or treats undefined as unbounded retry, fails there. The matching test-plan bullet was added to contract.md ahead of the tool-call-cap bullet, and B-03's contract text now enumerates the rejected value classes (negative, fractional, NaN, Infinity, non-number) and states that each dispatches once and lands AUDIT_NOT_RUN through B-04 rather than rejecting, citing docs/adr/0069-bounded-generator-self-audit-before-qa-dispatch.md:73-77."
+    },
+    {
+      "findingId": "F-09",
+      "position": "CONDITION_MET",
+      "evidence": "The granularity was read out of the source and is whole-issue-list, so no granularity change is needed and no ## Changes to existing behavior bullet is added. sanitizeSelfAudits sets dropped = true and breaks on any malformed entry (src/run-state.ts:1055-1069) and then if (dropped || entries.length === 0) continue; (src/run-state.ts:1078) omits that ghIssue key from the returned record; the helper's doc comment states the rule in those terms (src/run-state.ts:1031-1035: \"A malformed entry degrades the whole issue's list to absent rather than only itself, for the reason the round sanitizer gives: dropping one entry would understate how many audit invocations a slice has already spent\"). B-06's contract statement now cites those lines and says the runId check joins the existing condition at src/run-state.ts:1062-1069 with no discard-granularity change for the pre-existing candidateTreeId, verdict or auditedTreeId checks; B-06's manifest then/observableResult say the same and require the runId-less case to be asserted alongside the existing blank-candidateTreeId case, so a per-entry rewrite of the sanitizer fails."
+    },
+    {
+      "findingId": "F-10",
+      "position": "CONDITION_MET",
+      "evidence": "B-12's then now names a decidable literal absence instead of an \"unqualified phrase\": with the ADR text whitespace-normalized, the exact present sentence at docs/adr/0069-bounded-generator-self-audit-before-qa-dispatch.md:52-53 — \"One invocation per QA submission, bounded by construction: there is no loop in the stage, no retry, and no second challenge for a tree the audit rewrote.\" — no longer appears as a substring, having been replaced whole, while \"no second challenge\", swarm_handoff.sh, ## Decision and ## Consequences still do. The observableResult declares not.toContain of that one sentence plus toContain of the amended bound's \"completed\", \"--infrastructure-retries\" and \"AUDIT_NOT_RUN\", so a correctly qualified amendment such as \"no retry of a completed invocation\" passes. B-12's contract statement was updated to the same literal, verbatim-in-full replacement, and the matching test-plan bullet no longer mentions the phrase \"no retry\"."
+    }
+  ]
+}

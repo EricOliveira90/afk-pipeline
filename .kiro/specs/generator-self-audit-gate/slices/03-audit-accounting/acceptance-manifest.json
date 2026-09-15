@@ -1,0 +1,284 @@
+{
+  "version": 2,
+  "fileScope": {
+    "kind": "paths",
+    "paths": [
+      "src/self-audit.ts",
+      "src/self-audit.test.ts",
+      "src/run-state.ts",
+      "src/run-state.test.ts",
+      "src/run-events.ts",
+      "src/run-journal.ts",
+      "src/logger.ts",
+      "src/logger.test.ts",
+      "src/orchestrator.ts",
+      "src/orchestrator.test.ts",
+      "src/eval-boundary.test.ts",
+      "docs/adr/0069-bounded-generator-self-audit-before-qa-dispatch.md",
+      "context.md"
+    ]
+  },
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "GH #301 AC1 (\"An audit invocation failure classifies under the existing agent-failure-cause taxonomy\"), ADR 0025 lines 40-46",
+      "given": "rejections carrying a TransientProviderError, a tool-call-cap kill message, a wall-clock-ceiling kill message, an idle-kill message, an \"exited with code 1\" message, and a plain Error",
+      "when": "the pure classifySelfAuditFailure exported from src/self-audit.ts classifies each one",
+      "then": "the kinds are transient-exhausted, orchestrator-kill with killClass tool-call-cap, orchestrator-kill with killClass wall-clock-ceiling, orchestrator-kill with killClass idle-timeout, provider-exit with exitCode 1, and internal-error, each carrying a non-blank summary",
+      "observableResult": "a [behavior:B-01] unit test in src/self-audit.test.ts asserts the kind, killClass and exitCode of each of the six classified causes and that every summary is non-blank, and src/self-audit.ts imports isTransientProviderError from ./agent-provider.js and nothing from ./orchestrator.js",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "typecheck",
+        "tests"
+      ]
+    },
+    {
+      "id": "B-02",
+      "source": "GH #301 AC2 (\"Only infrastructure-classified causes retry the audit invocation\"), src/orchestrator.ts:1841-1848",
+      "given": "each cause kind classifySelfAuditFailure can produce",
+      "when": "the pure isInfrastructureSelfAuditCause exported from src/self-audit.ts is called with it",
+      "then": "provider-exit, non-cap orchestrator-kill and transient-exhausted are true, and a tool-call-cap orchestrator-kill and internal-error are false",
+      "observableResult": "a [behavior:B-02] unit test in src/self-audit.test.ts asserts true for the three infrastructure kinds and false for the tool-call-cap kill and internal-error, and a [behavior:B-02] case shows a tool-call-cap rejection is dispatched at most once even with infrastructureRetries set",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "typecheck",
+        "tests"
+      ]
+    },
+    {
+      "id": "B-03",
+      "source": "GH #301 AC2 (an infrastructure-classified dead invocation is re-dispatched under the run's --infrastructure-retries budget); docs/adr/0025-agent-failure-causes.md:55-60; src/self-audit.ts:147, :171-219, :186; src/orchestrator.ts:5312-5322, :6288-6289, :6433; docs/adr/0069-bounded-generator-self-audit-before-qa-dispatch.md:73-77",
+      "given": "runSelfAuditStage with an injected dispatch spy and a log sink spy, driven with (a) a stage input with infrastructureRetries: 2 whose dispatch rejects with \"Agent generator exited with code 1\" twice and then completes leaving the tree unchanged, (b) inputs with infrastructureRetries: 2 whose dispatch rejects with a tool-call-cap kill or whose envelope assembly throws, and (c) degenerate-budget inputs: one omitting infrastructureRetries entirely and ones carrying -1, 1.5 and Number.NaN, each with a dispatch that always rejects with \"exited with code 1\"",
+      "when": "runSelfAuditStage is awaited on each input",
+      "then": "attempts are infrastructureRetries + 1 and the loop stops on the first completed invocation, so case (a) dispatches three times and returns AUDIT_UNCHANGED with exactly one run-state entry; a non-infrastructure cause dispatches once and never retries, so each case (b) input dispatches exactly once; and every degenerate budget in case (c) reads as 0 rather than throwing — absent, negative, fractional, NaN, Infinity or a non-number all dispatch exactly once and land AUDIT_NOT_RUN through B-04 rather than rejecting, because this stage may never block a run by its own input validation; each retry narrates through the existing log sink as \"self-audit: infrastructure retry N/M — <cause summary>\"; and the hub passes infrastructureRetries: config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES at its one call site so src/self-audit.ts never imports the hub's constant",
+      "observableResult": "src/self-audit.test.ts's [behavior:B-03] tests assert the dispatch spy call counts (3 for case (a); 1 for each case (b) input; exactly 1 for each of the four case (c) inputs) and that no case (c) or (b) call rejects, with each case (c) result being { ran: true, verdict: \"AUDIT_NOT_RUN\", treeId: <released tree id> }; they assert the two \"self-audit: infrastructure retry\" log lines naming 1/2 and 2/2 in case (a) and no such line in cases (b) and (c); and a [behavior:B-03] source scan of src/orchestrator.ts asserts the runSelfAuditStage({ … }); call passes infrastructureRetries: config.infrastructureRetries ?? DEFAULT_INFRASTRUCTURE_RETRIES. An implementation that throws on -1 or NaN, or that treats undefined as unbounded retry, fails the case (c) assertions",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-04",
+      "source": "GH #301 AC3 (\"Audit retry exhaustion records AUDIT_NOT_RUN in run state\")",
+      "given": "a stage input with infrastructureRetries: 1 whose dispatch always rejects with \"exited with code 1\", and separately one whose dispatch completes but whose post-audit tree cannot be resolved",
+      "when": "runSelfAuditStage is awaited against a temporary run-state directory",
+      "then": "recordSelfAuditOutcome has appended exactly one entry with verdict AUDIT_NOT_RUN, candidateTreeId the released tree id, the stage input's runId, and no auditedTreeId key",
+      "observableResult": "[behavior:B-04] unit tests in src/self-audit.test.ts read selfAuditsFor(loadRunState(...), ghIssue) and assert one entry whose verdict is \"AUDIT_NOT_RUN\", whose candidateTreeId is the released id, whose runId equals the input runId, and for which \"auditedTreeId\" in entry is false; the exhausted case also asserts exactly two dispatch calls",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "typecheck",
+        "tests"
+      ]
+    },
+    {
+      "id": "B-05",
+      "source": "GH #301 AC4 (\"After AUDIT_NOT_RUN, the candidate proceeds to QA dispatch\"), ADR 0041",
+      "given": "a stage whose dispatch always rejects, and separately one whose dispatch rejects with a non-infrastructure cause",
+      "when": "runSelfAuditStage is awaited and its result is passed to resolveGradedCandidate with no audited value",
+      "then": "neither await rejects, both results are { ran: true, verdict: \"AUDIT_NOT_RUN\", treeId: <the released tree id> }, and the graded candidate is the released treeId, commitSha and base-gate object by reference",
+      "observableResult": "[behavior:B-05] unit tests in src/self-audit.test.ts assert the resolved result object for both cases and assert resolveGradedCandidate returns the released base-gate object by identity (toBe), so the hub's changed-tree branch cannot be entered",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "typecheck",
+        "tests"
+      ]
+    },
+    {
+      "id": "B-06",
+      "source": "GH #301 AC5 (the audit outcome entry in run state carries run-ID provenance); src/run-state.ts:49-66, :71, :258, :368-374, :1028-1035, :1036-1082; src/stop-sentinel.ts:106; src/orchestrator.ts:5973; src/eval-boundary.test.ts:127",
+      "given": "the run-state module, a v8 run-state file whose selfAudits entry carries a nonblank runId, and separately v7-shaped files whose entry omits runId or carries a blank one",
+      "when": "RUN_STATE_VERSION, the version union and PersistedSelfAuditOutcome are read and each file is loaded",
+      "then": "PersistedSelfAuditOutcome carries a required runId: string, RUN_STATE_VERSION is 8 and the version union is 3 | 4 | 5 | 6 | 7 | 8 with the version-history comment extended in its existing style; the bump is unconditional because otherwise a v7 file whose entries predate provenance is indistinguishable from one whose entries carry it; the v8 entry loads with its runId intact; and an entry without a usable runId yields no selfAudits member for that issue — the sanitizer's existing whole-issue-list granularity, not a new rule: the runId check joins the malformed-entry condition at src/run-state.ts:1062-1069, which sets dropped = true and breaks, after which if (dropped || entries.length === 0) continue; (src/run-state.ts:1078) drops that ghIssue key, exactly as the helper's doc comment states (src/run-state.ts:1031-1035, \"A malformed entry degrades the whole issue's list to absent rather than only itself\"). No discard granularity changes for the pre-existing candidateTreeId, verdict or auditedTreeId checks. SelfAuditStageInput gains a required runId: string bound at the hub's one call site to runIdFor(logger.runDir), so the stage never derives run identity itself",
+      "observableResult": "src/run-state.test.ts's [behavior:B-06] tests assert RUN_STATE_VERSION === 8, that a v8 fixture round-trips its entry's runId, and that each runId-less or blank-runId fixture loads with selfAuditsFor(state, ghIssue) empty and state.selfAudits having no key for that issue while every other member is intact — the same whole-list outcome the existing blank-candidateTreeId case already produces, asserted alongside it so a per-entry rewrite of the sanitizer fails; pnpm run typecheck refuses a PersistedSelfAuditOutcome or SelfAuditStageInput literal without runId; and a [behavior:B-06] source scan of src/orchestrator.ts asserts the runSelfAuditStage({ … }); call passes runId: runIdFor(logger.runDir)",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-07",
+      "source": "GH #301 AC6 (\"A resumed run treats a persisted audit outcome as spent\"), PRD story 8",
+      "given": "run-state files holding, in turn, an AUDIT_UNCHANGED entry whose two tree ids are the released id, an AUDIT_CHANGED entry whose auditedTreeId is the released id and whose candidateTreeId is not, an AUDIT_NOT_RUN entry naming the released id, and an entry naming a different tree in both fields",
+      "when": "runSelfAuditStage is awaited on the released tree",
+      "then": "the first three return { ran: false, spent: <that entry's verdict> } with zero dispatches and no second entry, and the fourth dispatches once and appends a second entry",
+      "observableResult": "[behavior:B-07] unit tests in src/self-audit.test.ts assert the returned spent verdict, a dispatch spy count of 0, and selfAuditsFor length still 1 for each of the three spent cases, and a dispatch count of 1 with length 2 for the non-matching case",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "typecheck",
+        "tests"
+      ]
+    },
+    {
+      "id": "B-08",
+      "source": "GH #301 AC7 (\"The run summary reports a total per audit outcome\") — the event the total is derived from",
+      "given": "a self-audit outcome payload with an auditedTreeId and separately one without, and a RunJournal in a temporary run directory",
+      "when": "buildSelfAuditOutcomeEvent builds each payload and recordSelfAuditOutcomeEvent records one",
+      "then": "the payload is { type: \"self-audit-outcome\", ghIssue, sliceNumber, round, runId, candidateTreeId, verdict } with auditedTreeId present only in the first case, EVENTS_SCHEMA_VERSION is still 1, and events.jsonl holds exactly one self-audit-outcome line carrying those fields",
+      "observableResult": "[behavior:B-08] unit tests in src/logger.test.ts and src/self-audit.test.ts assert the built payload shape in both cases, the absent auditedTreeId key, EVENTS_SCHEMA_VERSION === 1, and the single serialized events.jsonl line; and a [behavior:B-08] source scan of src/orchestrator.ts asserts exactly one recordSelfAuditOutcomeEvent( call between the runSelfAuditStage( occurrence and the first await runQAStage(, guarded by the result's ran narrowing and passing sliceNumber: slice.number and round",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "typecheck",
+        "tests"
+      ]
+    },
+    {
+      "id": "B-09",
+      "source": "GH #301 AC7 and AC8 (\"The run summary reports the changed-rate\")",
+      "given": "an event stream with three AUDIT_UNCHANGED, one AUDIT_CHANGED and two AUDIT_NOT_RUN events; a stream with only AUDIT_NOT_RUN events; and a run directory with no events.jsonl",
+      "when": "deriveSelfAuditOutcomes and the exported readSelfAuditOutcomes run over them",
+      "then": "the first yields { unchanged: 3, changed: 1, notRun: 2, graded: 4, changedRatePercent: 25 }, the second yields graded 0 with changedRatePercent absent, and the third yields zero totals without throwing",
+      "observableResult": "[behavior:B-09] unit tests in src/logger.test.ts assert the three derived totals objects, that AUDIT_NOT_RUN is excluded from the rate denominator, and that readSelfAuditOutcomes on an empty run directory returns zero totals rather than throwing",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "typecheck",
+        "tests"
+      ]
+    },
+    {
+      "id": "B-10",
+      "source": "GH #301 AC7 and AC8 — the rendered run summary",
+      "given": "a run whose journal recorded three AUDIT_UNCHANGED, one AUDIT_CHANGED and two AUDIT_NOT_RUN events, and separately a run with only AUDIT_NOT_RUN events",
+      "when": "the run summary is written",
+      "then": "run-summary.md holds a ## Self-Audit section with an | Outcome | Count | table naming the three outcome terms with counts 3, 1 and 2 and the line \"Changed rate: 25% (1 of 4 graded audits)\", and the second run's section reads \"Changed rate: n/a\"",
+      "observableResult": "[behavior:B-10] unit tests in src/logger.test.ts read the written run-summary.md and assert the heading, the three table rows with their counts, and each changed-rate line",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests"
+      ]
+    },
+    {
+      "id": "B-11",
+      "source": "GH #301 AC9 (\"The audit rate influences no gate decision\"), ADR 0063 lines 31-45",
+      "given": "src/logger.ts, src/orchestrator.ts and src/gate-runner.ts read as text",
+      "when": "occurrences of readSelfAuditOutcomes(, deriveSelfAuditOutcomes( and changedRatePercent are collected",
+      "then": "none sits inside a conditional, comparison or GateDeclaration literal outside the summary render, src/gate-runner.ts contains none of them, and no gate id names an audit rate",
+      "observableResult": "a [behavior:B-11] source scan test asserts src/gate-runner.ts contains none of the three identifiers, that src/orchestrator.ts contains no changedRatePercent occurrence, and that every src/logger.ts occurrence lies inside the derivation and the section render rather than a branch",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests"
+      ]
+    },
+    {
+      "id": "B-12",
+      "source": "GH #301 AC2 and PRD Implementation Decisions (prd.md:95-97: only infrastructure causes retry and exhaustion lands AUDIT_NOT_RUN); docs/adr/0069-bounded-generator-self-audit-before-qa-dispatch.md:52-53, :69-72",
+      "given": "docs/adr/0069-bounded-generator-self-audit-before-qa-dispatch.md read as text after this slice's in-place amendment, whitespace-normalized",
+      "when": "its text is scanned",
+      "then": "the exact present sentence at :52-53 — \"One invocation per QA submission, bounded by construction: there is no loop in the stage, no retry, and no second challenge for a tree the audit rewrote.\" — no longer appears as a substring, having been replaced whole; the text states that the one-invocation bound counts completed invocations, that an infrastructure-classified dead invocation is re-dispatched under the run's --infrastructure-retries budget with exhaustion recording AUDIT_NOT_RUN, the run-ID provenance on the persisted outcome, that a persisted outcome for the tree in hand is spent on resume, and that the per-verdict totals and the changed rate report and never gate; and it still carries swarm_handoff.sh, ## Decision, ## Consequences and the phrase \"no second challenge\", so the accepted decision, the SwarmForge provenance and the structural verdict keep their present text. The ADR is amended rather than overridden because the parent specification requires the retry",
+      "observableResult": "src/logger.test.ts's [behavior:B-12] text test reads the ADR, whitespace-normalizes it, and asserts not.toContain of that one exact sentence together with toContain of \"completed\" in the amended bound sentence, \"--infrastructure-retries\", \"AUDIT_NOT_RUN\", \"swarm_handoff.sh\", \"## Decision\", \"## Consequences\" and \"no second challenge\"; a correctly qualified amendment passes and an unamended ADR fails",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-13",
+      "source": "GH #301 AC10 (\"CONTEXT.md defines AUDIT_UNCHANGED, AUDIT_CHANGED, and AUDIT_NOT_RUN\")",
+      "given": "CONTEXT.md read as text",
+      "when": "its ### Pipeline concepts section is scanned",
+      "then": "one entry defines AUDIT_UNCHANGED, AUDIT_CHANGED and AUDIT_NOT_RUN in the file's **Term**: shape, carries an _Avoid_: line, and cites ADR 0069",
+      "observableResult": "a [behavior:B-13] source scan test asserts the three outcome terms, the _Avoid_: line and the ADR 0069 citation all appear after the ### Pipeline concepts heading in CONTEXT.md",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests"
+      ]
+    },
+    {
+      "id": "P-01",
+      "source": "PRD story 2 and ADR 0069 lines 73-77 — the opt-out path costs a run nothing",
+      "given": "a stage input with selfAudit not true, and separately one whose qaBaseGate.candidateTreeId differs from the checkpoint tree id",
+      "when": "runSelfAuditStage is awaited",
+      "then": "both return { ran: false } with no spent member, zero dispatches, no run-state entry and no self-audit-outcome event",
+      "observableResult": "[behavior:P-01] unit tests in src/self-audit.test.ts assert the { ran: false } result with \"spent\" in result false, a dispatch spy count of 0 and an absent selfAudits member for both declines",
+      "preservation": true,
+      "gateIds": [
+        "acceptance:behaviors",
+        "typecheck",
+        "tests"
+      ]
+    },
+    {
+      "id": "P-02",
+      "source": "#299 B-09/B-10 and #300 B-01/B-02 — the two graded verdicts keep today's behavior",
+      "given": "a dispatch that leaves the worktree tree identical, and separately one that rewrites it",
+      "when": "runSelfAuditStage is awaited and slice 2's changed-tree helpers are exercised",
+      "then": "the verdicts are AUDIT_UNCHANGED with both persisted tree ids equal and AUDIT_CHANGED with them differing, one dispatch each, recorded before the stage returns; and verifyAuditedTree, selectAuditedGateDeclarations and resolveGradedCandidate keep their present signatures and outcomes",
+      "observableResult": "[behavior:P-02] unit tests in src/self-audit.test.ts assert both verdicts, both persisted tree-id pairs and a dispatch count of 1 each, and slice 2's existing verifyAuditedTree, selectAuditedGateDeclarations and resolveGradedCandidate suites pass unchanged",
+      "preservation": true,
+      "gateIds": [
+        "acceptance:behaviors",
+        "typecheck",
+        "tests"
+      ]
+    },
+    {
+      "id": "P-03",
+      "source": "ADR 0069 lines 52-60 and #300 B-07 — one completed invocation per QA submission, no second challenge, no generator round",
+      "given": "a stage whose dispatch completes on its first attempt with infrastructureRetries: 2, and src/self-audit.ts and src/orchestrator.ts read as text",
+      "when": "runSelfAuditStage is awaited and the sources are scanned",
+      "then": "the dispatch spy recorded exactly one call, AuditedTreeVerificationInput declares no dispatch member, verifyAuditedTree's body contains no runSelfAuditStage( or dispatch( call, and no logger.bumpEvalRound( occurrence sits between runSelfAuditStage( and the first await runQAStage(",
+      "observableResult": "[behavior:P-03] tests in src/self-audit.test.ts and src/orchestrator.test.ts assert the single dispatch call, the two source absences in src/self-audit.ts and the absent bumpEvalRound occurrence in the hub region",
+      "preservation": true,
+      "gateIds": [
+        "acceptance:behaviors",
+        "typecheck",
+        "tests"
+      ]
+    },
+    {
+      "id": "P-04",
+      "source": "src/run-state.ts:49-66 version-history doctrine — older files still load and the bump is unconditional",
+      "given": "v3, v6 and v7 run-state fixtures, and a run that dispatches no audit",
+      "when": "each file is loaded and a state is written",
+      "then": "each adapts in memory with approvedBaselines, appliedWaivers, finalEvaluations, qualityStages and per-slice records intact, and the written state carries version 8 with no selfAudits member",
+      "observableResult": "[behavior:P-04] unit tests in src/run-state.test.ts assert the adapted members of each fixture and assert a written no-audit state has version 8 and no selfAudits key; src/eval-boundary.test.ts's pinned RUN_STATE_VERSION assertion reads 8 and its EVENTS_SCHEMA_VERSION assertion still reads 1",
+      "preservation": true,
+      "gateIds": [
+        "acceptance:behaviors",
+        "typecheck",
+        "tests"
+      ]
+    },
+    {
+      "id": "P-05",
+      "source": "src/logger.ts:760-813 — sections are additive, never present-but-empty",
+      "given": "a run that recorded no self-audit-outcome event",
+      "when": "the run summary is written",
+      "then": "it contains no ## Self-Audit heading, EVENTS_SCHEMA_VERSION is still 1, and the dependency, adoption, gate, final-reuse and quality-stage sections keep their present text and order, with readQualityStageOutcomes keeping its signature and behavior",
+      "observableResult": "[behavior:P-05] unit tests in src/logger.test.ts assert the absent heading for an audit-free run, assert EVENTS_SCHEMA_VERSION === 1, and assert the existing quality-stage and gate section expectations still hold",
+      "preservation": true,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests"
+      ]
+    },
+    {
+      "id": "P-06",
+      "source": "#300 P-05 — the runSelfAuditStage call site keeps its single occurrence and position",
+      "given": "src/orchestrator.ts read as text",
+      "when": "runSelfAuditStage( occurrences are counted and ordered against the surrounding calls",
+      "then": "it occurs exactly once, after assertGateEvidenceReleasesEvaluation( and after the requiredFailures = collectRequiredGateFailures( assignment, and before the first await runQAStage(, with its injected dispatch keeping its present body and per-invocation bounds",
+      "observableResult": "the existing source-order scan at src/orchestrator.test.ts:8262-8289 passes unchanged, and a [behavior:P-06] assertion on that same scan's result asserts the single occurrence and the two orderings",
+      "preservation": true,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests"
+      ]
+    }
+  ]
+}

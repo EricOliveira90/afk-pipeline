@@ -1,0 +1,39 @@
+{
+  "version": 2,
+  "verdict": "ACCEPT",
+  "findings": [
+    {
+      "id": "F-08",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-03"],
+      "evidence": "manifest B-03 given: \"(c) degenerate-budget inputs: one omitting infrastructureRetries entirely and ones carrying -1, 1.5 and Number.NaN, each with a dispatch that always rejects with \\\"exited with code 1\\\"\"; manifest B-03 observableResult: \"exactly 1 for each of the four case (c) inputs) and that no case (c) or (b) call rejects, with each case (c) result being { ran: true, verdict: \\\"AUDIT_NOT_RUN\\\", treeId: <released tree id> }\"; contract test plan: \"Given a stage input omitting `infrastructureRetries` entirely, and separately ones carrying `-1`, `1.5` and `Number.NaN` … then no call rejects, the dispatch spy recorded exactly one call in each case, no `self-audit: infrastructure retry` line was narrated, and each result is `{ ran: true, verdict: \\\"AUDIT_NOT_RUN\\\", treeId: <released tree id> }`. (B-03)\"",
+      "expected": "B-03's given and observableResult, plus a matching test-plan bullet, must declare a [behavior:B-03] assertion over an absent infrastructureRetries and at least one value that is not a non-negative safe integer, showing zero retries and a non-rejecting stage.",
+      "observed": "The revision supplies exactly that: a case (c) input group of four (absent, -1, 1.5, Number.NaN), each with an always-rejecting dispatch, and declared assertions that each dispatches exactly once, narrates no retry line, does not reject, and returns { ran: true, verdict: \"AUDIT_NOT_RUN\", treeId: <released tree id> }. The test plan carries the matching bullet ahead of the tool-call-cap bullet, and the contract statement now enumerates the rejected value classes and states each dispatches once and lands AUDIT_NOT_RUN through B-04 rather than rejecting, citing docs/adr/0069-bounded-generator-self-audit-before-qa-dispatch.md:73-77. An implementation that throws on -1 or NaN, or that treats undefined as unbounded retry, now fails a declared observable.",
+      "clearCondition": "B-03's `given` and `observableResult` (and the matching test-plan bullet) declare a [behavior:B-03] assertion that a stage input omitting `infrastructureRetries` and one carrying a non-negative-safe-integer value each dispatch exactly once and do not reject.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-09",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-06"],
+      "evidence": "contract B-06: \"That condition's granularity is already whole-issue-list and stays so: a malformed entry sets `dropped = true` and `break`s, and `if (dropped || entries.length === 0) continue;` (`src/run-state.ts:1078`) then drops that `ghIssue` key entirely\"; manifest B-06 observableResult: \"the same whole-list outcome the existing blank-candidateTreeId case already produces, asserted alongside it so a per-entry rewrite of the sanitizer fails\"",
+      "expected": "The pair must state the discard granularity the existing sanitizer actually has, as observed in src/run-state.ts, or authorize a granularity change in ## Changes to existing behavior.",
+      "observed": "The revision states the granularity and cites it, and the citations check out against the source: the malformed-entry condition sits at src/run-state.ts:1062-1069 and sets `dropped = true` then `break`s; `if (dropped || entries.length === 0) continue;` is at :1078, so the ghIssue key is omitted from the returned record; the doc comment at :1032-1034 states the rule in the quoted terms. The granularity is therefore whole-issue-list already, the runId check merely joins an existing condition, no discard-granularity change is needed for the pre-existing candidateTreeId, verdict or auditedTreeId checks, and no ## Changes to existing behavior bullet is owed. The manifest additionally pins the runId-less case alongside the existing blank-candidateTreeId case, so a per-entry rewrite fails a declared assertion.",
+      "clearCondition": "Either B-06's `then`/`observableResult` states the discard granularity the existing sanitizer actually has (per-entry or whole-list) as observed in `src/run-state.ts`, or `## Changes to existing behavior` names the granularity change and the fields it affects.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-10",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-12"],
+      "evidence": "manifest B-12 then: \"the exact present sentence at :52-53 — \\\"One invocation per QA submission, bounded by construction: there is no loop in the stage, no retry, and no second challenge for a tree the audit rewrote.\\\" — no longer appears as a substring, having been replaced whole\"; manifest B-12 observableResult: \"reads the ADR, whitespace-normalizes it, and asserts not.toContain of that one exact sentence together with toContain of \\\"completed\\\" in the amended bound sentence, \\\"--infrastructure-retries\\\", \\\"AUDIT_NOT_RUN\\\", \\\"swarm_handoff.sh\\\", \\\"## Decision\\\", \\\"## Consequences\\\" and \\\"no second challenge\\\"\"",
+      "expected": "B-12's then must name the literal absence it means rather than the absence of an \"unqualified phrase\".",
+      "observed": "The revision names one exact whitespace-normalized sentence as the literal that must disappear, and that literal matches the present ADR text at docs/adr/0069-bounded-generator-self-audit-before-qa-dispatch.md:52-53 verbatim once the line break is normalized. The retained-text side is now the substring \"no second challenge\" rather than a paraphrased \"bound\", so a correctly qualified amendment such as \"no retry of a completed invocation\" passes while an unamended ADR fails. The contract statement and the test-plan bullet were brought to the same literal.",
+      "clearCondition": "B-12's `then` states the literal absence it means (e.g. the exact sentence at `:52-53` no longer appears) instead of the absence of an \"unqualified phrase\".",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    }
+  ]
+}
