@@ -1022,8 +1022,15 @@ export async function runShipGate(
   // worktree (ADR 0020, ADR 0035). There is no second kill path, and both the
   // bound-reached exit and every guardian-rejection exit invoke this same
   // binding — so `reviewDir` holds no live `cwd` when the gate leaves.
-  const terminateMutationStep = (): Promise<unknown> =>
-    quiesceWorktree(reviewDir);
+  //
+  // Setting the flag here rather than only in `abandonMutationStep` is what
+  // makes every terminating exit close the pre-spawn window, the bound-reached
+  // rejoin included: terminating a step that has not spawned yet and leaving it
+  // free to spawn afterwards would quiesce a worktree a command then enters.
+  const terminateMutationStep = (): Promise<unknown> => {
+    mutationAbandoned = true;
+    return quiesceWorktree(reviewDir);
+  };
   /**
    * Abandon, terminate, and await the in-flight step under the same bound the
    * rejoin exit uses, then let the caller's own reason propagate unchanged. A

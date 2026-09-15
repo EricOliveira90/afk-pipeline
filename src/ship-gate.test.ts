@@ -2446,6 +2446,44 @@ describe("runShipGate — the report-only mutation step", () => {
     expect(result.pr?.requested).toBe(true);
   });
 
+  it("[behavior:#303:B-12] never spawns a step still deriving its scope once the bound is spent", async () => {
+    vi.mocked(quiesceWorktree).mockClear();
+    const slug = "mutation-bound-unspawned";
+    const repo = makeChangedRepo(slug);
+    const fixture = makeJournal();
+    const runCommand = ghRunCommand();
+    const args = makeArgs(repo, slug, teeing(fixture), shipInvoke(slug), runCommand);
+    args.mutationReport = CONFIG;
+    const mutationRun = vi.fn(async () => "");
+    args.mutationRun = mutationRun;
+    // Held ahead of the runner, so the bound is reached while the step is still
+    // pre-spawn — the state the rejoin exit has to close as tightly as a
+    // guardian rejection does.
+    let releaseScope: (() => void) | undefined;
+    args.mutationScope = () =>
+      new Promise<readonly string[]>((resolve) => {
+        releaseScope = () => resolve(["src/cart.ts"]);
+      });
+    args.mutationNow = spentClock();
+
+    const result = await runShipGate(args);
+    // Released only after the gate has gone and its quiesce has run: a step
+    // that could still spawn here would put a command into a worktree the run
+    // has already torn down.
+    releaseScope!();
+    await flush();
+
+    expect(mutationRun).toHaveBeenCalledTimes(0);
+    expect(vi.mocked(quiesceWorktree)).toHaveBeenCalledWith(repo);
+    expect(loadRunState(repo, slug).mutationStep).toEqual({
+      runSlug: slug,
+      status: "MUTATION_NOT_RUN",
+      reason: "BOUND_REACHED",
+      survivors: [],
+    });
+    expect(result.verdict).toBe("SHIP");
+  });
+
   it("[behavior:#303:B-12] takes the bounded wait's origin after both guardian results are in hand", async () => {
     vi.mocked(quiesceWorktree).mockClear();
     const slug = "mutation-rejoin-origin";
