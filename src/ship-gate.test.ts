@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import {
+  appendFileSync,
   createWriteStream,
   existsSync,
   mkdirSync,
@@ -28,6 +29,23 @@ import {
   type ShipCommandRunner,
   type ShipGateJournal,
 } from "./ship-gate.js";
+import {
+  MUTATION_REPORT_HEADING,
+  MUTATION_STEP_BOUND_MS,
+} from "./mutation-report.js";
+import { quiesceWorktree } from "./worktree-processes.js";
+
+/**
+ * The one termination path the mutation step uses (#303 B-11/B-12) calls
+ * through to the real implementation; the spy exists only so a test can see
+ * *that* it was called, and on which worktree. Every other export stays real,
+ * so no other test in this file changes behavior.
+ */
+vi.mock("./worktree-processes.js", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("./worktree-processes.js")>();
+  return { ...actual, quiesceWorktree: vi.fn(actual.quiesceWorktree) };
+});
 
 const tempDirs: string[] = [];
 
@@ -2069,4 +2087,482 @@ describe("restoreCapturedReviewArtifacts", () => {
     ).toEqual({ restored: [], failed: [] });
     expect(writes).toEqual([]);
   });
+});
+
+/**
+ * The report-only mutation step at the ship gate (#303 B-11/B-12/B-15/B-16,
+ * P-01, P-03).
+ *
+ * The step runs against injected seams — `mutationRun` for the command,
+ * `mutationScope` for the derived file list, `mutationNow` for the clock — so no
+ * suite invokes a real mutation tool and no test waits real minutes on the
+ * bound. The gate itself is the real one, on a real fixture repo, so the
+ * concurrency and the exits are exercised rather than described.
+ */
+describe("runShipGate — the report-only mutation step", () => {
+  const REPORT_PATH = "reports/mutation.json";
+  const CONFIG = { command: "pnpm run mutate", reportPath: REPORT_PATH };
+  const SURVIVOR_JSON = {
+    files: {
+      "src/cart.ts": {
+        mutants: [
+          {
+            id: "42",
+            mutatorName: "ArithmeticOperator",
+            status: "Survived",
+            location: {
+              start: { line: 3, column: 11 },
+              end: { line: 3, column: 16 },
+            },
+          },
+          {
+            id: "43",
+            mutatorName: "BlockStatement",
+            status: "Killed",
+            location: {
+              start: { line: 1, column: 1 },
+              end: { line: 4, column: 1 },
+            },
+          },
+        ],
+      },
+    },
+  };
+  const SURVIVORS = [
+    {
+      id: "42",
+      file: "src/cart.ts",
+      mutator: "ArithmeticOperator",
+      position: { startLine: 3, startColumn: 11, endLine: 3, endColumn: 16 },
+    },
+  ];
+
+  /** A fixture whose feature tip really changed source files (B-10). */
+  function makeChangedRepo(slug: string): string {
+    const repo = makeRepo();
+    git(repo, ["checkout", "-b", `feat/${slug}`]);
+    mkdirSync(join(repo, "src"), { recursive: true });
+    writeFileSync(join(repo, "src", "cart.ts"), "export const t = 2;\n", "utf-8");
+    writeFileSync(join(repo, "src", "cart.test.ts"), "// covers cart\n", "utf-8");
+    writeFileSync(join(repo, "NOTES.md"), "notes\n", "utf-8");
+    git(repo, ["add", "."]);
+    git(repo, ["commit", "-m", "change source"]);
+    return repo;
+  }
+
+  function writeReportInto(repo: string): void {
+    mkdirSync(join(repo, "reports"), { recursive: true });
+    writeFileSync(join(repo, REPORT_PATH), JSON.stringify(SURVIVOR_JSON), "utf-8");
+  }
+
+  function shipInvoke(slug: string) {
+    return vi.fn(async (options: InvokeOptions) => {
+      const kind = options.role === "architect-review" ? "architect" : "pm";
+      writeReview(options, slug, kind, "SHIP");
+      return invokeResult();
+    });
+  }
+
+  function prBody(runCommand: ReturnType<typeof vi.fn>): string | undefined {
+    const call = runCommand.mock.calls.find(
+      ([command, args]) => command === "gh" && (args as string[])[1] === "create",
+    );
+    if (!call) return undefined;
+    const args = call[1] as string[];
+    return args[args.indexOf("--body") + 1];
+  }
+
+  function ghRunCommand() {
+    return vi.fn<ShipCommandRunner>((command, args) =>
+      command === "gh" && args[1] === "create"
+        ? "https://github.com/acme/repo/pull/42\n"
+        : "",
+    );
+  }
+
+  /** A clock that jumps a whole bound after handing out its first reading. */
+  function spentClock(): () => number {
+    let readings = 0;
+    return () => (readings++ === 0 ? 0 : MUTATION_STEP_BOUND_MS + 1);
+  }
+
+  const flush = async (): Promise<void> => {
+    for (let i = 0; i < 5; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
+
+  /**
+   * The shared fixture journal records events on a mock only; the real one also
+   * tees every event to `events.jsonl`, and that file is what the run summary
+   * and the draft PR body both read the step's outcome from (B-14/B-15). These
+   * tests need the tee to see the published text, so they add it — the tee's own
+   * shape is pinned on the real Logger in `logger.test.ts`.
+   */
+  function teeing(fixture: ReturnType<typeof makeJournal>): ShipGateJournal {
+    return {
+      ...fixture.journal,
+      event: (payload: RunEventPayload) => {
+        fixture.journal.event(payload);
+        appendFileSync(
+          join(fixture.journal.runDir, "events.jsonl"),
+          `${JSON.stringify(payload)}\n`,
+          "utf-8",
+        );
+      },
+    };
+  }
+
+  function mutationEvents(fixture: ReturnType<typeof makeJournal>) {
+    return fixture.event.mock.calls
+      .map(([payload]) => payload as RunEventPayload)
+      .filter((payload) => payload.type === "mutation-step");
+  }
+
+  it("[behavior:#303:B-11] starts the declared command on the review worktree before the first guardian resolves", async () => {
+    vi.mocked(quiesceWorktree).mockClear();
+    const slug = "mutation-concurrent";
+    const repo = makeChangedRepo(slug);
+    const fixture = makeJournal();
+    const mutationRun = vi.fn(
+      async (
+        _command: string,
+        _files: readonly string[],
+        options: { cwd: string },
+      ) => {
+        writeReportInto(options.cwd);
+        return "stryker: 47% mutation score\n";
+      },
+    );
+    let callsWhenFirstGuardianRan = -1;
+    const invoke = vi.fn(async (options: InvokeOptions) => {
+      if (callsWhenFirstGuardianRan < 0) {
+        callsWhenFirstGuardianRan = mutationRun.mock.calls.length;
+      }
+      const kind = options.role === "architect-review" ? "architect" : "pm";
+      writeReview(options, slug, kind, "SHIP");
+      return invokeResult();
+    });
+    const runCommand = ghRunCommand();
+    const args = makeArgs(repo, slug, teeing(fixture), invoke, runCommand);
+    args.mutationReport = CONFIG;
+    args.mutationRun = mutationRun;
+
+    const result = await runShipGate(args);
+
+    // Concurrent, not sequential: the command was already invoked by the time
+    // the first guardian review ran, so the step costs no extra wall clock.
+    expect(callsWhenFirstGuardianRan).toBe(1);
+    expect(mutationRun.mock.calls[0]![0]).toBe("pnpm run mutate");
+    // Scope derived from the one change-summary builder over base and tip, then
+    // filtered: the test file and the markdown are out (B-10).
+    expect(mutationRun.mock.calls[0]![1]).toEqual(["src/cart.ts"]);
+    expect(mutationRun.mock.calls[0]![2]).toEqual({ cwd: repo, encoding: "utf-8" });
+    expect(result.verdict).toBe("SHIP");
+  });
+
+  it("[behavior:#303:B-11] reports what the report file says, not what the command printed", async () => {
+    vi.mocked(quiesceWorktree).mockClear();
+    const slug = "mutation-report-file";
+    const repo = makeChangedRepo(slug);
+    const fixture = makeJournal();
+    const runCommand = ghRunCommand();
+    const args = makeArgs(repo, slug, teeing(fixture), shipInvoke(slug), runCommand);
+    args.mutationReport = CONFIG;
+    args.mutationScope = async () => ["src/cart.ts"];
+    args.mutationRun = async (_command, _files, options) => {
+      writeReportInto(options.cwd);
+      // Differently shaped from the report on purpose: a step that scraped
+      // stdout would publish this, and every tool spells its log its own way.
+      return "Ran 2 mutants; 1 survived (id 99 in src/nowhere.ts)\n";
+    };
+
+    const result = await runShipGate(args);
+
+    expect(loadRunState(repo, slug).mutationStep).toEqual({
+      runSlug: slug,
+      status: "MUTATION_REPORTED",
+      survivors: SURVIVORS,
+    });
+    expect(mutationEvents(fixture)).toEqual([
+      {
+        type: "mutation-step",
+        runSlug: slug,
+        status: "MUTATION_REPORTED",
+        survivors: SURVIVORS,
+      },
+    ]);
+    // B-15: the same derivation reaches the draft PR body, and the PR opens.
+    const body = prBody(runCommand)!;
+    expect(body).toContain(MUTATION_REPORT_HEADING);
+    expect(body).toContain("- `42` src/cart.ts:3:11 — ArithmeticOperator");
+    expect(body).not.toContain("id 99");
+    expect(body).not.toContain("47%");
+    // B-16: neither the verdict nor the PR decision moved.
+    expect(result.verdict).toBe("SHIP");
+    expect(result.pr).toMatchObject({ requested: true, overridden: false });
+  });
+
+  it("[behavior:#303:B-11] holds the gate until the step it started has been awaited", async () => {
+    vi.mocked(quiesceWorktree).mockClear();
+    const slug = "mutation-awaited";
+    const repo = makeChangedRepo(slug);
+    const fixture = makeJournal();
+    let release: (() => void) | undefined;
+    const runCommand = ghRunCommand();
+    const args = makeArgs(repo, slug, teeing(fixture), shipInvoke(slug), runCommand);
+    args.mutationReport = CONFIG;
+    args.mutationScope = async () => ["src/cart.ts"];
+    args.mutationRun = (_command, _files, options) =>
+      new Promise<string>((resolve) => {
+        release = () => {
+          writeReportInto(options.cwd);
+          resolve("done");
+        };
+      });
+
+    let settled = false;
+    const gate = runShipGate(args).then((value) => {
+      settled = true;
+      return value;
+    });
+    await flush();
+
+    // The guardians are long done; the only thing left is the step. A gate that
+    // returned here would publish a summary and a PR body with no answer in
+    // them while a process was still live inside the review worktree.
+    expect(settled).toBe(false);
+    expect(prBody(runCommand)).toBeUndefined();
+    release!();
+    const result = await gate;
+
+    expect(result.verdict).toBe("SHIP");
+    expect(prBody(runCommand)).toContain("- `42` src/cart.ts:3:11");
+    // The step's event lands before the draft PR starts, so the body derives
+    // from a stream that already holds it.
+    const payloads = fixture.event.mock.calls.map(
+      ([payload]) => payload as RunEventPayload & { phase?: string },
+    );
+    const mutationAt = payloads.findIndex((p) => p.type === "mutation-step");
+    const prAt = payloads.findIndex(
+      (p) => p.type === "run-phase-started" && p.phase === "draft-pr",
+    );
+    expect(mutationAt).toBeGreaterThan(-1);
+    expect(prAt).toBeGreaterThan(mutationAt);
+  });
+
+  it("[behavior:#303:B-12] terminates the step and reports BOUND_REACHED once the bound is spent", async () => {
+    vi.mocked(quiesceWorktree).mockClear();
+    const slug = "mutation-bound";
+    const repo = makeChangedRepo(slug);
+    const fixture = makeJournal();
+    const runCommand = ghRunCommand();
+    const args = makeArgs(repo, slug, teeing(fixture), shipInvoke(slug), runCommand);
+    args.mutationReport = CONFIG;
+    args.mutationScope = async () => ["src/cart.ts"];
+    // Never settles: only the bound can end this run's step.
+    args.mutationRun = () => new Promise<string>(() => {});
+    // The rejoin origin is read first; by the time the helper asks again the
+    // whole bound is spent, which is the deadline arithmetic under test.
+    args.mutationNow = spentClock();
+
+    const result = await runShipGate(args);
+
+    expect(loadRunState(repo, slug).mutationStep).toEqual({
+      runSlug: slug,
+      status: "MUTATION_NOT_RUN",
+      reason: "BOUND_REACHED",
+      survivors: [],
+    });
+    // Terminated through the one quiesce path, on the review worktree; the seam
+    // registered no process, which is what the empty report says.
+    expect(vi.mocked(quiesceWorktree)).toHaveBeenCalledWith(repo);
+    await expect(
+      vi.mocked(quiesceWorktree).mock.results[0]!.value as Promise<unknown>,
+    ).resolves.toMatchObject({ observed: [], terminated: [] });
+    // B-15/B-16: the reason is published under this outcome too, the draft PR
+    // still opens, and the ship verdict is untouched.
+    const body = prBody(runCommand)!;
+    expect(body).toContain(MUTATION_REPORT_HEADING);
+    expect(body).toContain("BOUND_REACHED");
+    expect(result.verdict).toBe("SHIP");
+    expect(result.pr?.requested).toBe(true);
+  });
+
+  it("[behavior:#303:P-01] runs nothing, publishes nothing and terminates nothing without the declaration", async () => {
+    vi.mocked(quiesceWorktree).mockClear();
+    const slug = "mutation-flag-absent";
+    const repo = makeChangedRepo(slug);
+    const fixture = makeJournal();
+    const runCommand = ghRunCommand();
+    const mutationRun = vi.fn(async () => "");
+    const args = makeArgs(repo, slug, teeing(fixture), shipInvoke(slug), runCommand);
+    // The seams are wired but the declaration is absent, which is what a run
+    // without `--mutation-report` looks like from in here.
+    args.mutationRun = mutationRun;
+    args.mutationScope = async () => ["src/cart.ts"];
+
+    const result = await runShipGate(args);
+
+    expect(mutationRun).not.toHaveBeenCalled();
+    expect(vi.mocked(quiesceWorktree)).not.toHaveBeenCalled();
+    expect(mutationEvents(fixture)).toEqual([]);
+    expect(loadRunState(repo, slug).mutationStep).toBeUndefined();
+    expect(prBody(runCommand)).not.toContain(MUTATION_REPORT_HEADING);
+    expect(result.verdict).toBe("SHIP");
+    expect(result.pr).toMatchObject({ requested: true });
+  });
+
+  describe.each([
+    ["serial", true],
+    ["parallel", false],
+  ])("[behavior:#303:P-03] a rejecting guardian in %s mode", (_mode, serial) => {
+    /**
+     * A guardian review that throws before any invocation: the one rejection
+     * `runGuardianReview` propagates rather than classifying, so the fork region
+     * really is left by a throw in both modes.
+     */
+    function rejectingArgs(slug: string, repo: string, sentinel: Error) {
+      const fixture = makeJournal();
+      const journal: ShipGateJournal = {
+        ...teeing(fixture),
+        agentLog: (sliceId, agent, round) => {
+          if (agent === "pm-review") throw sentinel;
+          return fixture.journal.agentLog(sliceId, agent, round);
+        },
+      };
+      const runCommand = vi.fn<ShipCommandRunner>(() => "");
+      const args = makeArgs(repo, slug, journal, shipInvoke(slug), runCommand);
+      args.options = { ...args.options, serialReviews: serial };
+      args.mutationReport = CONFIG;
+      args.mutationNow = spentClock();
+      return { args, fixture, runCommand };
+    }
+
+    it("[behavior:#303:P-03] abandons an already-started step, terminates it, and rethrows the guardian's own reason", async () => {
+      vi.mocked(quiesceWorktree).mockClear();
+      const slug = `mutation-reject-spawned-${serial ? "serial" : "parallel"}`;
+      const repo = makeChangedRepo(slug);
+      const sentinel = new Error("guardian log stream unavailable");
+      const { args, fixture, runCommand } = rejectingArgs(slug, repo, sentinel);
+      const mutationRun = vi.fn(() => new Promise<string>(() => {}));
+      args.mutationScope = async () => ["src/cart.ts"];
+      args.mutationRun = mutationRun;
+
+      await expect(runShipGate(args)).rejects.toBe(sentinel);
+
+      expect(mutationRun).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(quiesceWorktree)).toHaveBeenCalledWith(repo);
+      await expect(
+        vi.mocked(quiesceWorktree).mock.results[0]!.value as Promise<unknown>,
+      ).resolves.toMatchObject({ observed: [], terminated: [] });
+      // This exit publishes nothing: no event, no run-state record, no PR.
+      expect(mutationEvents(fixture)).toEqual([]);
+      expect(loadRunState(repo, slug).mutationStep).toBeUndefined();
+      expect(prBody(runCommand)).toBeUndefined();
+    });
+
+    it("[behavior:#303:P-03] never starts a step still deriving its scope when the guardian rejects", async () => {
+      vi.mocked(quiesceWorktree).mockClear();
+      const slug = `mutation-reject-unspawned-${serial ? "serial" : "parallel"}`;
+      const repo = makeChangedRepo(slug);
+      const sentinel = new Error("guardian log stream unavailable");
+      const { args, fixture, runCommand } = rejectingArgs(slug, repo, sentinel);
+      const mutationRun = vi.fn(async () => "");
+      let releaseScope: (() => void) | undefined;
+      args.mutationScope = () =>
+        new Promise<readonly string[]>((resolve) => {
+          releaseScope = () => resolve(["src/cart.ts"]);
+        });
+      args.mutationRun = mutationRun;
+
+      await expect(runShipGate(args)).rejects.toBe(sentinel);
+      // Released only once the gate has gone: the abandonment flag is read with
+      // no await before the invocation, so a step held here can never spawn a
+      // process into a worktree the exit has already quiesced.
+      releaseScope!();
+      await flush();
+
+      expect(mutationRun).toHaveBeenCalledTimes(0);
+      expect(vi.mocked(quiesceWorktree)).toHaveBeenCalledWith(repo);
+      expect(mutationEvents(fixture)).toEqual([]);
+      expect(loadRunState(repo, slug).mutationStep).toBeUndefined();
+      expect(prBody(runCommand)).toBeUndefined();
+    });
+
+    it("[behavior:#303:P-03] still rethrows the guardian's reason when termination itself fails", async () => {
+      vi.mocked(quiesceWorktree).mockClear();
+      const slug = `mutation-reject-quiesce-${serial ? "serial" : "parallel"}`;
+      const repo = makeChangedRepo(slug);
+      const sentinel = new Error("guardian log stream unavailable");
+      const { args } = rejectingArgs(slug, repo, sentinel);
+      args.mutationScope = async () => ["src/cart.ts"];
+      args.mutationRun = () => new Promise<string>(() => {});
+      vi.mocked(quiesceWorktree).mockRejectedValueOnce(new Error("quiesce failed"));
+
+      // A failed quiesce is the worktree teardown's report to make; replacing
+      // the guardian's reason with it would lose why the run stopped.
+      await expect(runShipGate(args)).rejects.toBe(sentinel);
+    });
+  });
+});
+
+describe("[behavior:#303:B-16] the mutation outcome decides nothing", () => {
+  const base = {
+    prdSlug: "demo",
+    specsDir: ".kiro/specs/demo",
+    architect: "SHIP" as const,
+    pm: "SHIP" as const,
+    openPrOnOverride: false,
+    closesIssues: ["303"],
+  };
+
+  it.each([
+    [
+      "survivors",
+      {
+        runSlug: "demo",
+        status: "MUTATION_REPORTED" as const,
+        survivors: [
+          {
+            id: "42",
+            file: "src/cart.ts",
+            mutator: "ArithmeticOperator",
+            position: { startLine: 3, startColumn: 11, endLine: 3, endColumn: 16 },
+          },
+        ],
+      },
+    ],
+    [
+      "no survivors",
+      { runSlug: "demo", status: "MUTATION_REPORTED" as const, survivors: [] },
+    ],
+    [
+      "a step that never ran",
+      {
+        runSlug: "demo",
+        status: "MUTATION_NOT_RUN" as const,
+        reason: "COMMAND_FAILED" as const,
+        survivors: [],
+      },
+    ],
+  ])(
+    "[behavior:#303:B-16] changes only the body text, never the decision, for %s",
+    (_label, mutationStep) => {
+      const without = buildPrCreationPlan(base);
+      const withStep = buildPrCreationPlan({ ...base, mutationStep });
+
+      expect(withStep.open).toBe(without.open);
+      expect(withStep.overridden).toBe(without.overridden);
+      expect(withStep.cappedExit).toBe(without.cappedExit);
+      expect(withStep.title).toBe(without.title);
+      // Additive: everything the body already said is still there, and the
+      // section sits above the closes list like every other reported block.
+      expect(withStep.body).toContain(MUTATION_REPORT_HEADING);
+      expect(withStep.body.indexOf(MUTATION_REPORT_HEADING)).toBeLessThan(
+        withStep.body.indexOf("Closes #303"),
+      );
+      expect(without.body).not.toContain(MUTATION_REPORT_HEADING);
+    },
+  );
 });
