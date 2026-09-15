@@ -7,7 +7,6 @@ import {
   EVAL_ROLES,
   SUPPORTED_EVAL_PACK_VERSIONS,
   readEvalPack,
-  roleDispatch,
   validateEvalCase,
 } from "./eval-pack.js";
 import { evalCaseDocument, writeEvalPackDir } from "./eval.fixtures.js";
@@ -251,16 +250,6 @@ describe("readEvalPack", () => {
     writeFileSync(join(empty, "README.md"), "not a case", "utf-8");
 
     expect(() => readEvalPack(empty)).toThrow(/holds no \*\.json eval case files/);
-  });
-
-  it("B-09 exposes the D9 row through the re-export on src/eval-pack.ts", () => {
-    // Re-exported here because `prd.md` D32's module table names this module as
-    // `roleDispatch`'s home, while the row itself lives beside the projection.
-    expect(roleDispatch("pm").invokeOptions).toEqual({
-      role: "pm-review",
-      agent: "pm-review",
-      bare: true,
-    });
   });
 });
 

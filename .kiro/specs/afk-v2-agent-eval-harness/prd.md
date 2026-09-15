@@ -493,10 +493,19 @@ New modules, none of them hubs:
 
 | Module | Exports |
 |---|---|
-| `src/eval-pack.ts` | `EVAL_PACK_VERSION`, `SUPPORTED_EVAL_PACK_VERSIONS`, `EVAL_ROLES`, `EvalRole`, `EvalCase`, `EvalExpected`, `EvalPack`, `readEvalPack(dir)`, `validateEvalCase(value, source)` (pure, for tests), `roleDispatch(role)` → the D9 row (`invokeOptions` template, `artifactFile`, `parse`, `project`) |
-| `src/eval-compare.ts` | `projectOutput(role, scratchDir): EvalExpected` (D9 lookup + parser + projection; throws → `ERROR`), `compareProjection(expected, actual): "MATCH" \| "MISMATCH"` — pure |
+| `src/eval-pack.ts` | `EVAL_PACK_VERSION`, `SUPPORTED_EVAL_PACK_VERSIONS`, `EVAL_ROLES`, `EvalRole`, `EvalCase`, `EvalExpected`, `EvalPack`, `readEvalPack(dir)`, `validateEvalCase(value, source)` (pure, for tests) |
+| `src/eval-compare.ts` | `roleDispatch(role): EvalRoleDispatch` → the D9 row (`invokeOptions` template, `artifactFile`, `parse`, `project`), `EvalRoleDispatch`, `projectOutput(role, scratchDir): EvalExpected` (D9 lookup + parser + projection; throws → `ERROR`), `compareProjection(expected, actual): "MATCH" \| "MISMATCH"` — pure |
 | `src/eval-report.ts` | `EVAL_REPORT_VERSION`, `EvalReport`, `EvalCaseResult`, `EvalOutcome`, `writeEvalReport(dir, report)`, `readEvalReport(path)`, `formatEvalSummary(report, reportPath): string`, `formatCaseLine(k, n, result): string` — pure except the two file functions |
 | `src/eval-command.ts` | `runEvalCli(args: readonly string[], repoRoot: string, provider: AgentProvider, deps: EvalCliDeps = DEFAULT_EVAL_DEPS): Promise<{ output: string; exitCode: 0 \| 1 \| 2 }>` — parses `--pack`, `--max-calls`, `--out`, `--dry-run`; `EvalCliDeps` carries `now()`, `mkScratchDir(id)` and `stdout(line)` so tests inject a clock, a temp root and capture streaming lines |
+
+`roleDispatch` sits in the `src/eval-compare.ts` row, not the `src/eval-pack.ts`
+one this table first named: the D9 row carries the six production parsers, and
+P-02's observable is that `eval-compare.ts`'s *own* import specifiers are where
+those parsers appear. Slice 01 shipped the definition there and re-exported it
+from `eval-pack.ts` to keep this table true; #286 dropped that re-export and
+moved the row here instead, so the symbol has one home (`eval-compare.ts` takes
+`EvalRole`/`EvalExpected` from `eval-pack.ts` with `import type`, so the runtime
+edge stays one-directional and there is no cycle).
 
 `runEvalCli` takes the provider as a parameter because each entry binds one
 (`runCleanFailedCli(args, provider?)` is the precedent) — the D32 signature

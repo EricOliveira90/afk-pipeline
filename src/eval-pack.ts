@@ -369,10 +369,3 @@ export function readEvalPack(dir: string): EvalPack {
 
   return { version: EVAL_PACK_VERSION, dir, cases };
 }
-
-// `roleDispatch` is the D9 row and lives beside the projection it carries
-// (`src/eval-compare.ts`), which is where the six production parsers are
-// imported. Re-exported here because the module table in `prd.md` D32 names
-// this module as its home; the type-only import on the other side keeps the
-// runtime edge one-directional.
-export { roleDispatch, type EvalRoleDispatch } from "./eval-compare.js";

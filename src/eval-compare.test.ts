@@ -8,6 +8,7 @@ import {
   roleDispatch,
 } from "./eval-compare.js";
 import type { EvalRole } from "./eval-pack.js";
+import * as evalPack from "./eval-pack.js";
 import {
   writeEvalContractReview,
   writeEvalFinalReview,
@@ -51,6 +52,22 @@ describe("roleDispatch", () => {
       expect(typeof row.parse).toBe("function");
       expect(typeof row.project).toBe("function");
     }
+  });
+
+  it("B-09 lives in this module and is not also reachable from src/eval-pack.ts", () => {
+    // One home (#286). The row carries the six production parsers, which is
+    // why it sits beside the projection rather than in the pack reader; slice
+    // 01 additionally re-exported it from `eval-pack.ts` to satisfy that
+    // module table in `prd.md` D32, and the row moved in the table instead.
+    // The static `roleDispatch` import at the top of this file is the positive
+    // evidence for the home; `EvalRoleDispatch` is a type, so `pnpm run
+    // typecheck` is what pins where that one lives.
+    expect(typeof roleDispatch).toBe("function");
+    const packExports = Object.keys(evalPack);
+    // The namespace is really the pack reader's, so the absence below is
+    // evidence and not an empty object.
+    expect(packExports).toContain("readEvalPack");
+    expect(packExports).not.toContain("roleDispatch");
   });
 });
 
