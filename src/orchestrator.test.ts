@@ -8307,4 +8307,42 @@ describe("the generator self-audit call site", () => {
       auditCalls.filter((at) => at! > requiredFailuresAt && at! < gateReleaseAt),
     ).toEqual([]);
   });
+
+  it("[behavior:#299:P-02] leaves the required-gate failure branch exiting exactly as it did", () => {
+    // The same span B-03 scans, read for what it still *does* rather than for
+    // what it must not gain: everything between the `requiredFailures`
+    // assignment and the gate-release assertion is the required-cheap-gate
+    // failure branch.
+    const requiredFailuresAt = source.indexOf(
+      "requiredFailures = collectRequiredGateFailures(",
+    );
+    const gateReleaseAt = source.indexOf(
+      "assertGateEvidenceReleasesEvaluation(",
+    );
+    expect(requiredFailuresAt).toBeGreaterThan(-1);
+    expect(gateReleaseAt).toBeGreaterThan(requiredFailuresAt);
+    const failureBranch = source.slice(requiredFailuresAt, gateReleaseAt);
+
+    // Today's exit, unchanged by this slice: the base-gate repair references
+    // and the retry note are still assembled, and the branch still returns
+    // through `finishIntervention(candidateLifecycle.exhaustDeterministicGates(
+    // { candidateTreeId: checkpoint.treeId, ... }))`.
+    for (const token of [
+      "const baseGateRepairReferences = [",
+      "stuckReferences.push(...baseGateRepairReferences);",
+      "retryNote =",
+      "return finishIntervention(",
+      "candidateLifecycle.exhaustDeterministicGates({",
+      "candidateTreeId: checkpoint.treeId,",
+      "supportingEvidence: baseGateRepairReferences,",
+    ]) {
+      expect(failureBranch, token).toContain(token);
+    }
+
+    // And nothing audits or grades a candidate that failed a required gate:
+    // neither the audit stage nor the deterministic QA dispatch appears on this
+    // path (#299 AC3).
+    expect(failureBranch).not.toContain("runSelfAuditStage(");
+    expect(failureBranch).not.toContain("await runQAStage(");
+  });
 });

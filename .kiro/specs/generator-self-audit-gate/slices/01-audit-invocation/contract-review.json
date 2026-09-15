@@ -1,0 +1,43 @@
+{
+  "version": 2,
+  "verdict": "ACCEPT",
+  "findings": [
+    {
+      "id": "F-11",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-09", "B-10"],
+      "evidence": "manifest B-09 observableResult: \"that selfAuditsFor(loadRunState(<that temporary run-state directory>), ghIssue) returns exactly one entry whose verdict is \\\"AUDIT_UNCHANGED\\\" and whose candidateTreeId and auditedTreeId both equal the released checkpoint tree id — so a stage that classifies AUDIT_UNCHANGED and never calls the writer fails here, which a src/run-state.test.ts writer round-trip cannot do\"; contract B-09: \"having recorded exactly one `AUDIT_UNCHANGED` entry for the slice's GitHub issue through `recordSelfAuditOutcome` (B-10) before it returns\"; contract test plan: \"A stage that classifies `AUDIT_UNCHANGED` without calling `recordSelfAuditOutcome` fails this scenario.\"",
+      "expected": "The slice's one persistence obligation — #299 AC10, restated in the scope lock — must be represented by an observation that fails when the stage completes an AUDIT_UNCHANGED classification without recording an entry.",
+      "observed": "The revision takes the clear condition's first route on the exact seam the finding named. B-09's given now carries \"the same temporary run-state directory B-02 declares\", its then carries the one-entry recording obligation with both tree ids equal to the released tree id, and its observableResult declares the reading observation on the stage's own entry point — so an unreferenced `recordSelfAuditOutcome` now fails B-09's test and acceptance:behaviors. B-10 keeps its ID, schema shape, version bump, reader, writer and the three literal-6 pins but no longer asserts the stage-level claim it could not fail on, and says so explicitly. The scope lock (\"the stage itself records `AUDIT_UNCHANGED` in run state (schema v7) before it returns\"), the test-plan scenario and the unchanged Definition-of-done line now agree, and no new harness or spawned scenario is added.",
+      "clearCondition": "B-09 (or B-10) declares a stage-level observation on the AUDIT_UNCHANGED path that reads selfAuditsFor(loadRunState(...), ghIssue) after awaiting runSelfAuditStage and asserts exactly one AUDIT_UNCHANGED entry whose candidateTreeId and auditedTreeId both equal the released checkpoint tree id.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-12",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-03", "B-09"],
+      "evidence": "contract B-03: \"No declared observation in this slice binds that argument to a real generator invocation in the candidate worktree — with `--self-audit` default off and a new spawned pipeline scenario an explicit non-goal, the orchestrator-to-provider wiring is carried by `pnpm run typecheck` accepting the callback's type and by nothing else. It is first exercised for real by an operator self-run launched with `--self-audit` ... #300 is the sibling slice that builds the changed-tree path over the same injected dispatch.\"; contract B-09: \"That sentence is carried by `pnpm run typecheck` alone in this slice; B-03 records why and names what exercises it later.\"",
+      "expected": "Where a claim is proven only by typecheck rather than by a declared observation, saying so keeps the generator from assuming a test covers it.",
+      "observed": "The revision takes the clear condition's second route and states the limitation in all four places a candidate reads: contract B-03, contract B-09's ADR 0002/0007 sentence, the test-plan scan scenario (\"no test in this slice claims otherwise\"), and both manifest observableResults (B-03, B-09, the latter under an explicit \"What the stage-local test does not claim\"). It names what exercises the wiring later — an operator self-run under `--self-audit`, #301's run-summary and status surfaces, and #300 over the same injected dispatch. Leaving B-03's scan as a pure source-order assertion rather than anchoring inside the injected callback's body is consistent with #299's operator decision part 1 and with #319's stable-token guidance, and B-03's gateIds now include `typecheck`, which is the gate the stated claim actually rests on.",
+      "clearCondition": "Either B-03's declared scan asserts the new call site passes a dispatch that reaches the generator invocation path, or the contract states that the orchestrator-to-provider wiring is carried by typecheck alone in this slice and names the sibling slice or later run that exercises it.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-13",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-03", "P-02"],
+      "evidence": "revised manifest B-03 observableResult: \"asserts the single occurrence and both orderings over those four anchors, excluding declaration occurrences exactly as stated in the when (per the operator decision, part 2)\", where the prior text had also asserted \"each anchor resolves to exactly the intended site by checking the required anchors are found\".",
+      "expected": "A source-order scan is only honest evidence if it fails when one of its anchors stops resolving; otherwise a comparison against a not-found index passes vacuously and the scan silently stops observing anything.",
+      "observed": "The revision keeps the declaration-exclusion half of the prior anchor discipline and drops the found-ness half. As now declared, the test asserts one `runSelfAuditStage(` occurrence plus two orderings over four anchors, with nothing requiring `assertGateEvidenceReleasesEvaluation(`, the `requiredFailures = collectRequiredGateFailures(` assignment form and `await runQAStage(` each to resolve. If any of those three anchors ever fails to match — a rename, or the assignment form changing shape — its index is the not-found sentinel, the ordering comparisons pass without constraining placement, and B-03 plus P-02 (whose observableResult delegates its whole no-audit-in-the-failure-branch claim to this scan) both go green on a call site that sits anywhere. This does not block the lock: all three anchors resolve in `src/orchestrator.ts` today, the candidate's edit is one inserted call, and the exactly-one-occurrence assertion still bites. It is worth restoring because this scan is the only observation of placement in the slice, and #319's \"anchor on stable tokens\" concern — cited in B-03's own source list — is precisely about anchors that quietly stop matching.",
+      "clearCondition": "B-03's observableResult again declares that the test asserts each of its three ordering anchors was found before comparing indices, so the scan fails rather than passing vacuously when an anchor stops resolving.",
+      "state": "OPEN",
+      "revisionCitation": {
+        "artifact": "acceptance-manifest.json",
+        "before": "      \"observableResult\": \"src/self-audit.test.ts's [behavior:B-03] test reads src/orchestrator.ts with readFileSync, computes those indices from the stated anchors (asserting each anchor resolves to exactly the intended site by checking the required anchors are found and that the declaration-form tokens are excluded), and fails if the audit call site is missing, duplicated, moved into the required-failure branch, or moved after the deterministic QA dispatch\",",
+        "after": "      \"observableResult\": \"src/orchestrator.test.ts's [behavior:B-03] unit test reads src/orchestrator.ts as text and asserts the single occurrence and both orderings over those four anchors, excluding declaration occurrences exactly as stated in the when (per the operator decision, part 2). The scan deliberately asserts nothing about the injected dispatch argument: no observation in this slice binds that callback to a real generator invocation in the candidate worktree, since --self-audit is default off and a new spawned pipeline scenario is an explicit non-goal. The orchestrator-to-provider wiring is carried by pnpm run typecheck accepting the callback's type and by nothing else; it is first exercised by an operator self-run launched with --self-audit, whose outcomes become readable through the run-summary totals and status surfaces #301 owns, over the same injected dispatch #300 extends to the changed-tree path\","
+      }
+    }
+  ]
+}

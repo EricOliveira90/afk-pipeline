@@ -1,0 +1,224 @@
+{
+  "version": 2,
+  "fileScope": {
+    "kind": "paths",
+    "paths": [
+      "src/self-audit.ts",
+      "src/self-audit.test.ts",
+      "src/context-envelope.ts",
+      "src/context-envelope.test.ts",
+      "prompts/generator-audit.md",
+      "src/cli-options.ts",
+      "src/cli-options.test.ts",
+      "src/orchestrator.ts",
+      "src/orchestrator.test.ts",
+      "src/run-state.ts",
+      "src/run-state.test.ts",
+      "src/eval-boundary.test.ts",
+      "src/qa-orchestration.test.ts",
+      "src/qa-orchestration-gates.test.ts",
+      "docs/adr/0069-bounded-generator-self-audit-before-qa-dispatch.md"
+    ]
+  },
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "GH #299 AC1 and PRD Implementation Decisions (one flag, default off)",
+      "given": "an argv list handed to parsePipelineRuntimeOptions in src/cli-options.ts",
+      "when": "the list contains the exact token --self-audit, or omits it, or carries a near miss such as --self-audit=true or --self-audits",
+      "then": "the exact token sets selfAudit to true, every other case leaves selfAudit undefined, and src/orchestrator.ts's PipelineConfig declares selfAudit?: boolean so the existing ...runtimeOptions spread in the three CLI entries carries it into runPipeline with no entry-file edit",
+      "observableResult": "src/cli-options.test.ts's [behavior:B-01] test asserts parsePipelineRuntimeOptions([\"--self-audit\"]).selfAudit === true and toBeUndefined() for [], [\"--self-audit=true\"] and [\"--self-audits\"], mirroring the existing recordPrompts test at src/cli-options.test.ts:139; pnpm run typecheck accepts a runPipeline config literal carrying selfAudit",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-02",
+      "source": "GH #299 AC1 (flag absent dispatches no audit) and AC3 (a failed required cheap gate receives no audit invocation)",
+      "given": "a runSelfAuditStage input whose selfAudit is not true, and separately one whose qaBaseGate.candidateTreeId differs from the checkpoint.treeId it was handed",
+      "when": "runSelfAuditStage is awaited with a dispatch spy and a temporary run-state directory",
+      "then": "it resolves to { ran: false }, calls the dispatch callback zero times, writes no selfAudits entry, and throws nothing",
+      "observableResult": "src/self-audit.test.ts's [behavior:B-02] test asserts the returned object equals { ran: false }, the spy's call count is 0, and selfAuditsFor(loadRunState(...), ghIssue) is empty, for both inputs",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-03",
+      "source": "GH #299 AC2 and AC3; GH #299 operator decision 2026-09-14 parts 1 and 2; ARCHITECTURE.md \"Hubs — do not grow these\"; src/orchestrator.ts:6337, :6341-6383, :6385, :6395-6403, :6415; #319 (anchor on stable tokens, not line numbers)",
+      "given": "src/orchestrator.ts read as text",
+      "when": "a scan collects the occurrence indices of \"runSelfAuditStage(\", \"assertGateEvidenceReleasesEvaluation(\", the assignment form of the required-gate-failure call (\"requiredFailures = collectRequiredGateFailures(\", not the exported declaration), and \"await runQAStage(\" (not the bare runQAStage( token, which matches the declaration first)",
+      "then": "there is exactly one \"runSelfAuditStage(\" occurrence; it sits after the gate-release assertion and before the first \"await runQAStage(\", i.e. inside runSliceExecute's gates-passed branch between the assertion at :6385 and the deterministic dispatch at :6415; and no occurrence sits between the requiredFailures assignment and the gate-release assertion, so the required-cheap-gate failure branch (:6341-6383) holds no audit call site and a candidate that failed a required gate is never audited",
+      "observableResult": "src/orchestrator.test.ts's [behavior:B-03] unit test reads src/orchestrator.ts as text and asserts the single occurrence and both orderings over those four anchors, excluding declaration occurrences exactly as stated in the when (per the operator decision, part 2). The scan deliberately asserts nothing about the injected dispatch argument: no observation in this slice binds that callback to a real generator invocation in the candidate worktree, since --self-audit is default off and a new spawned pipeline scenario is an explicit non-goal. The orchestrator-to-provider wiring is carried by pnpm run typecheck accepting the callback's type and by nothing else; it is first exercised by an operator self-run launched with --self-audit, whose outcomes become readable through the run-summary totals and status surfaces #301 owns, over the same injected dispatch #300 extends to the changed-tree path",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-04",
+      "source": "GH #299 AC4 and AC5, PRD Implementation Decisions (a new audit envelope manifest in the context-envelope layer)",
+      "given": "the new SELF_AUDIT_CONTEXT_MANIFEST exported from src/context-envelope.ts with role \"generator-audit\"",
+      "when": "validateContextEnvelopeManifest is called on it and its fields are read",
+      "then": "it does not throw, inlineSizeBudgetBytes is 65536 (the standard budget every other role manifest declares), allowedWriteScope names the slice worktree only, inputOrder is exactly [\"locked-contract\", \"acceptance-manifest\", \"candidate-handoff\", \"change-summary\"], and every accepted input artifact class occupies an inputOrder slot",
+      "observableResult": "src/context-envelope.test.ts's [behavior:B-04] test adds the manifest to the every-registered-manifest validation list at src/context-envelope.test.ts:2404-2410 and asserts the four inputOrder entries in order plus inlineSizeBudgetBytes === 65_536",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-05",
+      "source": "GH #299 AC4 (fixed input order) and AC5 (the standard inline budget)",
+      "given": "assembleSelfAuditEnvelope inputs carrying the locked contract, the acceptance manifest, the candidate handoff and the candidate change summary",
+      "when": "the envelope is assembled through assembleContextEnvelope, once with blocks rendered out of the manifest's declared order and once with an assembled prompt larger than the effective budget",
+      "then": "each bad case throws before any envelope evidence is returned, and the in-order within-budget case returns evidence listing the four artifact classes in the manifest's declared order",
+      "observableResult": "src/context-envelope.test.ts's [behavior:B-05] test asserts the two throwing cases with expect(...).toThrow() and asserts evidence.includedArtifactClasses deep-equals the four declared classes in order for the good case",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-06",
+      "source": "GH #299 AC6 (audit envelope overrides are stricter-only)",
+      "given": "an audit envelope whose assembled prompt exceeds 65536 bytes, and a second whose prompt fits well inside it",
+      "when": "assembleSelfAuditEnvelope is called with inlineSizeBudgetBytes above the manifest budget for the first, and with a budget of a few hundred bytes for the second",
+      "then": "both throw: the over-large override is clamped to the manifest's 65536 bytes rather than raising the ceiling, and the smaller override is honored",
+      "observableResult": "src/context-envelope.test.ts's [behavior:B-06] test asserts expect(() => assembleSelfAuditEnvelope({ ...input, inlineSizeBudgetBytes: 65_536 * 4 })).toThrow() for the oversized prompt and expect(...).toThrow() for the small-budget case, and that the same small-budget input assembles without throwing at the manifest budget",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-07",
+      "source": "GH #299 AC7 and PRD user story 12 (an unchanged resubmission is a legitimate outcome)",
+      "given": "prompts/generator-audit.md rendered by renderPrompt with its declared arguments",
+      "when": "the rendered text is inspected",
+      "then": "it states that resubmitting the candidate unchanged is a legitimate outcome, states the four audit obligations (re-read the locked contract, trace every done-criterion to code, trace it to test evidence, examine boundaries and failure cases), says a fix is committed only when the audit finds a gap, limits writes to the slice worktree, and leaves no unrendered {{...}} placeholder and no TEST_COMMAND token",
+      "observableResult": "src/self-audit.test.ts's [behavior:B-07] test asserts the rendered prompt contains each of those statements, does not match /\\{\\{[A-Za-z_]/, and does not contain \"TEST_COMMAND\", mirroring the cleaner prompt test at src/context-envelope.test.ts:3272",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-08",
+      "source": "GH #299 AC8 and AC9 (a pure classifier covering all three verdicts); ADR 0041 for the uncertain case",
+      "given": "pre-audit and post-audit tree identities plus an invocation result",
+      "when": "classifySelfAuditVerdict is called with equal ids, with different ids, with an invocation that did not complete, and with a completed invocation whose post-audit tree id could not be resolved",
+      "then": "the verdicts are AUDIT_UNCHANGED, AUDIT_CHANGED, AUDIT_NOT_RUN and AUDIT_NOT_RUN respectively; the returned tree id is the audited tree id only for AUDIT_CHANGED and the pre-audit tree id otherwise; and the function touches no filesystem, no run state and no clock",
+      "observableResult": "src/self-audit.test.ts's [behavior:B-08] test asserts the verdict and tree id of all four cases from literal inputs with no fixture repo, no fs mocking and no temporary directory, in the shape of src/final-evaluation.test.ts's decideFinalReuse tests",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-09",
+      "source": "GH #299 AC2, AC10 and AC11; GH #299 operator decision 2026-09-14 part 1; PRD Solution (\"Exactly one audit invocation per QA submission\"); ARCHITECTURE.md \"Placement rules\" (\"a record no reader checks is decoration\"); ADR 0002, ADR 0007",
+      "given": "runSelfAuditStage awaited against a dispatch that leaves the worktree tree identical to the released checkpoint tree id, the same temporary run-state directory B-02 declares, and structuredClone snapshots of the qaBaseGate and checkpoint objects taken before the call",
+      "when": "the stage runs the AUDIT_UNCHANGED path end to end",
+      "then": "it returns { ran: true, verdict: \"AUDIT_UNCHANGED\", treeId } where treeId is the checkpoint tree id the gates released; the dispatch callback was called exactly once — one invocation per QA submission, bounded by construction, with no second challenge and no retry in this slice; exactly one AUDIT_UNCHANGED entry for the slice's GitHub issue was recorded through recordSelfAuditOutcome (B-10) before the stage returned, with candidateTreeId and auditedTreeId both equal to that released tree id, this being #299 AC10 and the stage's own obligation rather than the writer's; and neither the qaBaseGate object nor the checkpoint object was mutated, so the orchestrator's own bindings are still the ones it goes on to pass to the deterministic QA dispatch",
+      "observableResult": "src/self-audit.test.ts's [behavior:B-09] unit test asserts the returned { ran, verdict, treeId }, a dispatch spy call count of exactly 1, that selfAuditsFor(loadRunState(<that temporary run-state directory>), ghIssue) returns exactly one entry whose verdict is \"AUDIT_UNCHANGED\" and whose candidateTreeId and auditedTreeId both equal the released checkpoint tree id — so a stage that classifies AUDIT_UNCHANGED and never calls the writer fails here, which a src/run-state.test.ts writer round-trip cannot do — and that both passed objects still deep-equal their pre-call structuredClone snapshots after the await. What the stage-local test does not claim: that the callback the orchestrator injects reaches a real generator invocation in the candidate worktree under the existing per-invocation bounds and the one AgentProvider interface (ADR 0002, ADR 0007). That sentence is carried by pnpm run typecheck alone in this slice; B-03's observableResult records why and names what exercises it later. The value-level claim about what runQAStage receives is #300's, per the operator decision",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-10",
+      "source": "GH #299 AC10; ARCHITECTURE.md \"Placement rules\" (\"A new persisted fact extends src/run-state.ts's schema with a version bump and a reader\"); src/run-state.ts:50-67 (the v6 bump's reasoning), :67 (RUN_STATE_VERSION = 6); src/eval-boundary.test.ts:127; src/qa-orchestration.test.ts:1028; src/qa-orchestration-gates.test.ts:1043",
+      "given": "src/run-state.ts gaining an additive selfAudits?: Record<string, PersistedSelfAuditOutcome[]> keyed by GitHub issue, a PersistedSelfAuditOutcome carrying { candidateTreeId, auditedTreeId?, verdict } over the three verdicts, the reader selfAuditsFor, the writer recordSelfAuditOutcome, sanitization in adaptLoadedState, and RUN_STATE_VERSION = 7 with the version union widened to 3 | 4 | 5 | 6 | 7",
+      "when": "an AUDIT_UNCHANGED entry is written into a run state that had no selfAudits and the file is reloaded, and separately when the three tests that pin the literal 6 are read",
+      "then": "selfAuditsFor returns one entry whose candidateTreeId and auditedTreeId are the released tree id and whose verdict is AUDIT_UNCHANGED; the reloaded file's version is 7 and RUN_STATE_VERSION is 7, the bump being unconditional for the same reason v6's was, since \"no audit ran\" and \"this file predates audits\" are the same fact to every reader; and the three literal pins have moved from 6 to 7. This behavior round-trips the writer against the reader; the obligation that a classifying stage actually calls the writer the moment the verdict lands is B-09's, observed on the stage's own entry point so an unreferenced writer cannot pass",
+      "observableResult": "src/run-state.test.ts's [behavior:B-10] test asserts the single entry's fields and loadRunState(...).version === 7 and RUN_STATE_VERSION === 7; the moved pins are observable as src/eval-boundary.test.ts, src/qa-orchestration.test.ts and src/qa-orchestration-gates.test.ts passing with 7 rather than 6. This test alone cannot fail on an uncalled writer — B-09 is the observation that does",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-11",
+      "source": "GH #299 AC12 and PRD user story 15 (an ADR stating the mechanism, its SwarmForge provenance, and the one-invocation bound)",
+      "given": "docs/adr/0069-bounded-generator-self-audit-before-qa-dispatch.md",
+      "when": "the file is read as text",
+      "then": "it exists with the repository's ADR structure (H1 title, **Status:** and **Date:** lines, narrative, ## Decision, ## Consequences) and states the structural tree-comparison mechanism, the SwarmForge provenance including the swarm-forge repository and swarm_handoff.sh, and the one-invocation-per-QA-submission bound as the standing argument against an audit-of-the-audit",
+      "observableResult": "src/self-audit.test.ts's [behavior:B-11] test reads the ADR with readFileSync and asserts it contains \"## Decision\", \"## Consequences\", \"swarm-forge\", \"swarm_handoff.sh\", a statement of tree comparison across one re-dispatch, and a statement of the one-invocation bound",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-01",
+      "source": "ADR 0012 (evaluator-qa base-gate authorization) and PRD Out of Scope (ADR 0012 untouched)",
+      "given": "the base-gate skip authorization path — authorizeBaseGateSkip in src/qa-gate-authorization.ts, its callers in src/post-qa-gates.ts, and resolveCandidateTreeId in src/gate-runner.ts:280",
+      "when": "this slice ships",
+      "then": "none of those three files is edited: the stage imports resolveCandidateTreeId and changes nothing in it, and the authorization still refuses whenever the evidence's tree id does not match the tree under review",
+      "observableResult": "src/qa-gate-authorization.ts, src/post-qa-gates.ts and src/gate-runner.ts are absent from this manifest's fileScope, so the scope gate refuses a candidate that edits them, and the existing base-gate authorization and QA-orchestration tests pass unchanged",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    },
+    {
+      "id": "P-02",
+      "source": "GH #299 AC3 (a candidate that failed a required cheap gate receives no audit invocation); src/orchestrator.ts:6341-6383",
+      "given": "a candidate whose required cheap gates produced failures, so requiredFailures.length > 0",
+      "when": "runSliceExecute reaches the required-failure branch",
+      "then": "it still assembles the base-gate repair references and the retry note and still returns through finishIntervention(candidateLifecycle.exhaustDeterministicGates({ candidateTreeId: checkpoint.treeId, ... })), with no audit dispatched and no selfAudits entry written",
+      "observableResult": "the B-03 source-order scan finds no runSelfAuditStage( occurrence between the requiredFailures assignment and the gate-release assertion, and the existing spawned QA-orchestration scenarios that exhaust the deterministic gates keep their current outcome with pnpm run test green",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-03",
+      "source": "src/run-state.ts:993-1012 (adaptLoadedState) and the v4/v5/v6 additive-bump precedent",
+      "given": "run-state files written at versions 3, 4, 5 and 6",
+      "when": "loadRunState adapts them after the v7 bump",
+      "then": "each loads with no selfAudits member, every other field intact — slices, contractConvergence, approvedBaselines, appliedWaivers, finalEvaluations, qualityStages, migrations, scope — and a later write re-stamps version 7",
+      "observableResult": "src/run-state.test.ts's [behavior:P-03] test loads a v6 fixture object, asserts state.selfAudits is undefined and the other members deep-equal the fixture's, and asserts the rewritten file's version is 7",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-04",
+      "source": "src/context-envelope.test.ts:3251 (cleaner is a ContextEnvelopeRole and not a PromptAssemblyRole) and PRD Out of Scope (the prompt-prose self-audit section stays)",
+      "given": "the four existing assembly-wired manifests (EXPLORER_, PLANNER_, CONTRACT_EVALUATOR_, GENERATOR_CONTEXT_MANIFEST), the manifest-only roles, and the generator prompt templates",
+      "when": "the fifth manifest and the \"generator-audit\" PromptAssemblyRole member are added",
+      "then": "the four existing manifests keep their declared fields, budgets and input orders, \"cleaner\" remains a ContextEnvelopeRole that is not a PromptAssemblyRole, and prompts/generator.md and prompts/generator-repair.md keep their existing self-audit prose unedited",
+      "observableResult": "the existing src/context-envelope.test.ts manifest assertions and the cleaner role type test at :3251 pass unmodified, and prompts/generator.md and prompts/generator-repair.md are absent from this manifest's fileScope so the scope gate refuses a candidate that edits them",
+      "preservation": true,
+      "gateIds": [
+        "tests"
+      ]
+    }
+  ]
+}
