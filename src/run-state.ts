@@ -338,6 +338,31 @@ export interface PersistedRecoveryLineageEvent {
   observedContractFingerprint?: string;
   /** The `acceptance-manifest.json` half of {@link observedContractFingerprint}. */
   observedManifestFingerprint?: string;
+  /**
+   * SHA-256 of the renegotiated `contract.md` the completed attempt accepted in
+   * place of the original {@link contractFingerprint} (#335 B-12).
+   *
+   * One of three fields that exist only on a `COMPLETED` event, and are
+   * *required* there, under the same per-state rule and for the same reason the
+   * three rollback-failure members carry theirs: {@link sanitizeRecoveryLineage}
+   * demands all three non-blank when `state` is `COMPLETED` and demands all
+   * three absent on every other state. Recorded beside the original fingerprints
+   * rather than instead of them, because "what the attempt started from" and
+   * "what it ended on" are the two facts a later dispatch has to compare to tell
+   * an untouched replacement from a drifted one (#335 B-04).
+   */
+  replacementContractFingerprint?: string;
+  /** The `acceptance-manifest.json` half of {@link replacementContractFingerprint}. */
+  replacementManifestFingerprint?: string;
+  /**
+   * The lock exit's provenance stamp for the completion, verbatim (#335 B-12).
+   *
+   * One opaque non-blank string: run state neither formats nor parses it, so the
+   * stamp's owner stays free to change its wording without a schema change here.
+   * Persisted because ADR 0055 §4 asks every lock exit to stamp, and a completion
+   * that appends the terminal event of a renegotiation is one.
+   */
+  lockProvenance?: string;
 }
 
 /**
@@ -357,6 +382,13 @@ const ROLLBACK_FAILURE_FIELDS = [
   "rollbackError",
   "observedContractFingerprint",
   "observedManifestFingerprint",
+] as const;
+
+/** The three members {@link PersistedRecoveryLineageEvent} carries only on `COMPLETED` (#335 B-12). */
+const COMPLETION_FIELDS = [
+  "replacementContractFingerprint",
+  "replacementManifestFingerprint",
+  "lockProvenance",
 ] as const;
 
 export interface RunState {
@@ -1143,6 +1175,12 @@ const RECOVERY_LINEAGE_STATE_VALUES: ReadonlySet<string> = new Set([
  * rollback was attempted on an open attempt. A rejection takes the same
  * consequence every other malformation takes — the target's whole list degrades
  * to absent — so this is extra branches in that gate, not a second failure mode.
+ *
+ * The three completion members are validated the same way (#335 B-12): required
+ * non-blank when `state` is `COMPLETED`, required absent otherwise. Both
+ * directions again, because a `COMPLETED` event without a replacement fingerprint
+ * is an event no dispatch can check the pair against, and a `PENDING` one
+ * carrying a replacement fingerprint claims a completion that has not happened.
  */
 function sanitizeRecoveryLineage(
   value: unknown,
@@ -1205,6 +1243,14 @@ function sanitizeRecoveryLineage(
         dropped = true;
         break;
       }
+      const completion =
+        state === "COMPLETED"
+          ? COMPLETION_FIELDS.every((field) => nonblank(event[field]))
+          : COMPLETION_FIELDS.every((field) => event[field] === undefined);
+      if (!completion) {
+        dropped = true;
+        break;
+      }
       events.push({
         attemptId: event.attemptId,
         state,
@@ -1227,6 +1273,15 @@ function sanitizeRecoveryLineage(
                 event.observedContractFingerprint as string,
               observedManifestFingerprint:
                 event.observedManifestFingerprint as string,
+            }
+          : {}),
+        ...(state === "COMPLETED"
+          ? {
+              replacementContractFingerprint:
+                event.replacementContractFingerprint as string,
+              replacementManifestFingerprint:
+                event.replacementManifestFingerprint as string,
+              lockProvenance: event.lockProvenance as string,
             }
           : {}),
       });

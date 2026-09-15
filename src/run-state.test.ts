@@ -1402,7 +1402,13 @@ describe("[behavior:#277:B-10] persisted recovery lineage", () => {
       slices: {},
     });
     const first = lineageEvent();
-    const second = lineageEvent({ attemptId: "attempt-1", state: "COMPLETED" });
+    const second = lineageEvent({
+      attemptId: "attempt-1",
+      state: "COMPLETED",
+      // #335 B-12 made the three completion members required on `COMPLETED`;
+      // `COMPLETION_OBSERVATIONS` is declared with the #335 block below.
+      ...COMPLETION_OBSERVATIONS,
+    });
 
     updateRunState(repo, "demo", (state) => {
       appendRecoveryLineageEvent(state, ISSUE, first);
@@ -1551,6 +1557,28 @@ const ROLLBACK_FIELDS = [
   "observedManifestFingerprint",
 ] as const;
 
+/**
+ * The three members only a `COMPLETED` event may carry (#335 B-12), and a
+ * well-formed value for each.
+ *
+ * Declared up here beside {@link ROLLBACK_OBSERVATIONS} because the #333 cases
+ * below build `COMPLETED` events as their *clean* control document, and a clean
+ * `COMPLETED` event now has to satisfy the newer rule too or the case stops
+ * being about the field it names.
+ */
+const COMPLETION_OBSERVATIONS = {
+  replacementContractFingerprint: "7".repeat(64),
+  replacementManifestFingerprint: "8".repeat(64),
+  lockProvenance: "renegotiated under run-state lock, run 42",
+} as const;
+
+/** The keys of {@link COMPLETION_OBSERVATIONS}, for per-field rejection cases. */
+const COMPLETION_FIELDS = [
+  "replacementContractFingerprint",
+  "replacementManifestFingerprint",
+  "lockProvenance",
+] as const;
+
 function rollbackLineageEvent(
   overrides: Record<string, unknown> = {},
 ): Record<string, unknown> {
@@ -1652,7 +1680,12 @@ describe("[behavior:#333:B-06] rollback-failure observations on a lineage event"
   ] as const)(
     "[behavior:#333:B-06] rejects a %s event carrying %s",
     (state, field) => {
-      const clean = rollbackLineageEvent({ state });
+      const clean = rollbackLineageEvent({
+        state,
+        // #335 B-12 made the three completion members required on `COMPLETED`,
+        // so the control document for that state has to carry them.
+        ...(state === "COMPLETED" ? COMPLETION_OBSERVATIONS : {}),
+      });
       const carrying = { ...clean, [field]: ROLLBACK_OBSERVATIONS[field] };
 
       expect(adaptLineage([carrying]).recoveryLineage).toBeUndefined();
@@ -1724,5 +1757,158 @@ describe("[behavior:#333:P-04] the #277 lineage shape still loads unchanged", ()
         clean,
       ]);
     }
+  });
+});
+
+/*
+ * ---------------------------------------------------------------------------
+ * Replacement fingerprints and lock provenance on a COMPLETED event (#335 B-12)
+ * ---------------------------------------------------------------------------
+ *
+ * #335 adds three more optional members — `replacementContractFingerprint`,
+ * `replacementManifestFingerprint`, `lockProvenance` — on exactly the
+ * {@link ROLLBACK_FAILURE_FIELDS} precedent: required non-blank on `COMPLETED`,
+ * required absent on every other state. That is another change to the validator's
+ * accepted input language, so ADR 0060 asks for both halves again: the newly
+ * accepted document round-trips through save/load field for field, and each
+ * newly rejected one degrades the target's whole list to absent. Purely additive,
+ * so {@link RUN_STATE_VERSION} stays 7 and no migration ships with it.
+ */
+describe("[behavior:#335:B-12] replacement fingerprints and lock provenance on a COMPLETED event", () => {
+  it("[behavior:#335:B-12] round-trips a well-formed COMPLETED event through save/load", () => {
+    const repo = makeRepo();
+    saveRunState(repo, {
+      version: RUN_STATE_VERSION,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      slices: {},
+    });
+    const pending = rollbackLineageEvent() as unknown as PersistedRecoveryLineageEvent;
+    const completed = rollbackLineageEvent({
+      state: "COMPLETED",
+      ...COMPLETION_OBSERVATIONS,
+    }) as unknown as PersistedRecoveryLineageEvent;
+
+    updateRunState(repo, "demo", (state) => {
+      appendRecoveryLineageEvent(state, ROLLBACK_ISSUE, pending);
+      appendRecoveryLineageEvent(state, ROLLBACK_ISSUE, completed);
+    });
+
+    // Additive on the v7 field the lineage already rides on: no version bump.
+    expect(RUN_STATE_VERSION).toBe(7);
+    const loaded = recoveryLineageFor(loadRunState(repo, "demo"), ROLLBACK_ISSUE);
+    expect(loaded).toEqual([pending, completed]);
+    for (const field of COMPLETION_FIELDS) {
+      // The `PENDING` half carries none of the three and the loader invents none.
+      expect(field in loaded[0]!).toBe(false);
+      expect(loaded[1]![field]).toBe(COMPLETION_OBSERVATIONS[field]);
+    }
+    // Every other member is copied forward untouched, key for key.
+    expect(Object.keys(loaded[1]!).sort()).toEqual(Object.keys(completed).sort());
+  });
+
+  it.each(
+    COMPLETION_FIELDS.flatMap((field) => [
+      [`${field} missing`, field, undefined] as const,
+      [`${field} present but blank`, field, "   "] as const,
+    ]),
+  )(
+    "[behavior:#335:B-12] rejects a COMPLETED event with %s",
+    (_label, field, value) => {
+      const complete = rollbackLineageEvent({
+        state: "COMPLETED",
+        ...COMPLETION_OBSERVATIONS,
+      });
+      const broken = { ...complete };
+      if (value === undefined) delete broken[field];
+      else broken[field] = value;
+
+      expect(adaptLineage([broken]).recoveryLineage).toBeUndefined();
+      expect(
+        recoveryLineageFor(adaptLineage([broken]), ROLLBACK_ISSUE),
+      ).toEqual([]);
+      // The same document, corrected, loads: the rejection is about this field.
+      expect(
+        recoveryLineageFor(adaptLineage([complete]), ROLLBACK_ISSUE),
+      ).toEqual([complete]);
+    },
+  );
+
+  it.each(
+    (["PENDING", "ROLLED_BACK"] as const).flatMap((state) =>
+      COMPLETION_FIELDS.map((field) => [state, field] as const),
+    ),
+  )(
+    "[behavior:#335:B-12] rejects a %s event carrying %s",
+    (state, field) => {
+      const clean = rollbackLineageEvent({ state });
+      const carrying = { ...clean, [field]: COMPLETION_OBSERVATIONS[field] };
+
+      expect(adaptLineage([carrying]).recoveryLineage).toBeUndefined();
+      // Removing the offending field is the whole difference.
+      expect(recoveryLineageFor(adaptLineage([clean]), ROLLBACK_ISSUE)).toEqual([
+        clean,
+      ]);
+    },
+  );
+
+  it("[behavior:#335:B-12] rejects a ROLLBACK_FAILED event carrying a completion member", () => {
+    const clean = rollbackLineageEvent({
+      state: "ROLLBACK_FAILED",
+      ...ROLLBACK_OBSERVATIONS,
+    });
+    const carrying = {
+      ...clean,
+      lockProvenance: COMPLETION_OBSERVATIONS.lockProvenance,
+    };
+
+    expect(adaptLineage([carrying]).recoveryLineage).toBeUndefined();
+    expect(recoveryLineageFor(adaptLineage([clean]), ROLLBACK_ISSUE)).toEqual([
+      clean,
+    ]);
+  });
+
+  it("[behavior:#335:B-12] rejects a COMPLETED event carrying a rollback-failure member", () => {
+    const clean = rollbackLineageEvent({
+      state: "COMPLETED",
+      ...COMPLETION_OBSERVATIONS,
+    });
+    const carrying = {
+      ...clean,
+      rollbackError: ROLLBACK_OBSERVATIONS.rollbackError,
+    };
+
+    // The two per-state rules are independent gates, not one shared branch.
+    expect(adaptLineage([carrying]).recoveryLineage).toBeUndefined();
+    expect(recoveryLineageFor(adaptLineage([clean]), ROLLBACK_ISSUE)).toEqual([
+      clean,
+    ]);
+  });
+
+  it("[behavior:#335:B-12] drops the whole list when the trailing COMPLETED event is malformed", () => {
+    const pending = rollbackLineageEvent();
+    const completed = rollbackLineageEvent({
+      state: "COMPLETED",
+      ...COMPLETION_OBSERVATIONS,
+      replacementManifestFingerprint: "",
+    });
+
+    expect(adaptLineage([pending, completed]).recoveryLineage).toBeUndefined();
+    // Not "keep the good ones": a surviving PENDING would read as an open attempt.
+    expect(
+      recoveryLineageFor(adaptLineage([pending, completed]), ROLLBACK_ISSUE),
+    ).toEqual([]);
+  });
+
+  it("[behavior:#335:B-12] ships no schema step: v7 stays v7 and no migration is added", () => {
+    expect(RUN_STATE_VERSION).toBe(7);
+    // A v7 document written before #335 has none of the three and still loads.
+    const legacy = rollbackLineageEvent();
+    expect(
+      recoveryLineageFor(adaptLineage([legacy]), ROLLBACK_ISSUE),
+    ).toEqual([legacy]);
+    // migrationCount 0: additive fields on an existing v7 field need no
+    // migration, and this repo has no migrations directory to add one to.
+    expect(existsSync(join("supabase", "migrations"))).toBe(false);
   });
 });
