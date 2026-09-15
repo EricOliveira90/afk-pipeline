@@ -22,6 +22,10 @@ import type {
   GateStatus,
 } from "./gate-runner.js";
 import type { PromptAssemblyRole } from "./context-envelope.js";
+import type {
+  MutationNotRunReason,
+  MutationSurvivor,
+} from "./mutation-report.js";
 
 export const EVENTS_FILE = "events.jsonl";
 export const EVENTS_SCHEMA_VERSION = 1;
@@ -458,6 +462,32 @@ export type RunEventPayload =
       durationMs: number;
       /** The subset of `gateIds` served from the gate cache (D17's `reused`). */
       cacheReusedGateIds: string[];
+    }
+  | {
+      /**
+       * What the report-only mutation step reported (#303 B-13, ADR 0071).
+       * Emitted at most once per run, from the ship gate, when the step's
+       * bounded await resolves — and never on a guardian-rejection exit, which
+       * publishes nothing because the gate never reaches its publish path.
+       *
+       * This is the stream both `run-summary.md` and the draft PR body derive
+       * their mutation section from, so the file and the stream cannot disagree
+       * — the same rule `quality-stage-attempt` above is kept under.
+       *
+       * Reported, never a gate (ADR 0063): nothing thresholds, alerts on, or
+       * branches on anything here, and the step holds no gate id.
+       *
+       * Additive, so `EVENTS_SCHEMA_VERSION` stays 1, the same way
+       * `quality-stage-policy` and `quality-stage-attempt` above arrived.
+       */
+      type: "mutation-step";
+      /** Run-ID provenance: the run's own `runSlug`. */
+      runSlug: string;
+      status: "MUTATION_REPORTED" | "MUTATION_NOT_RUN";
+      /** Present only under `MUTATION_NOT_RUN`. */
+      reason?: MutationNotRunReason;
+      /** Empty under `MUTATION_NOT_RUN`; legitimately empty under the other. */
+      survivors: MutationSurvivor[];
     }
   | { type: "run-ended"; outcome: "SUCCEEDED" | "FAILED" | "ABORTED" }
   | { type: "slice-outcome"; slice: SliceLifecycle }
