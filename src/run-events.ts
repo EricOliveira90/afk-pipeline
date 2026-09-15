@@ -23,6 +23,7 @@ import type {
 } from "./gate-runner.js";
 import type { PromptAssemblyRole } from "./context-envelope.js";
 import type {
+  MutationAttributionNote,
   MutationNotRunReason,
   MutationSurvivor,
 } from "./mutation-report.js";
@@ -486,8 +487,18 @@ export type RunEventPayload =
       status: "MUTATION_REPORTED" | "MUTATION_NOT_RUN";
       /** Present only under `MUTATION_NOT_RUN`. */
       reason?: MutationNotRunReason;
-      /** Empty under `MUTATION_NOT_RUN`; legitimately empty under the other. */
+      /**
+       * Empty under `MUTATION_NOT_RUN`; legitimately empty under the other.
+       * Each entry carries its optional attribution `label` (#304 B-11).
+       */
       survivors: MutationSurvivor[];
+      /**
+       * Which attribution degradations the run observed (#304 B-11). Optional
+       * and absent in the ordinary case, so `EVENTS_SCHEMA_VERSION` stays 1 for
+       * the reason the whole payload did: an optional member every existing
+       * reader ignores is not a schema break.
+       */
+      attributionNotes?: MutationAttributionNote[];
     }
   | { type: "run-ended"; outcome: "SUCCEEDED" | "FAILED" | "ABORTED" }
   | { type: "slice-outcome"; slice: SliceLifecycle }

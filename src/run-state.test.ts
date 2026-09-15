@@ -1355,6 +1355,87 @@ describe("[behavior:#303:B-13] the persisted mutation step", () => {
     }
   });
 
+  it("[behavior:#304:B-11] round-trips every label and every attribution note", () => {
+    const repo = makeRepo();
+    saveRunState(repo, {
+      version: RUN_STATE_VERSION,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      slices: {},
+    });
+    const attributed = {
+      runSlug: "afk-claude-code-demo",
+      status: "MUTATION_REPORTED" as const,
+      survivors: [
+        { ...RECORD.survivors[0]!, label: "new-in-this-run" as const },
+        { ...RECORD.survivors[0]!, id: "8", label: "pre-existing" as const },
+        { ...RECORD.survivors[0]!, id: "9", label: "accepted" as const },
+        { ...RECORD.survivors[0]!, id: "10", label: "unattributed" as const },
+      ],
+      attributionNotes: [
+        "BASELINE_UNUSABLE" as const,
+        "DECISIONS_UNUSABLE" as const,
+      ],
+    };
+
+    recordMutationStepOutcome(repo, "demo", attributed);
+
+    const loaded = loadRunState(repo, "demo");
+    expect(loaded.mutationStep).toEqual(attributed);
+    // Purely additive: two optional members on a record that already existed, so
+    // the version a resumed run reads is the one it wrote.
+    expect(loaded.version).toBe(7);
+    expect(RUN_STATE_VERSION).toBe(7);
+  });
+
+  it("[behavior:#304:B-11] loads a pre-attribution record unchanged, labels and notes absent", () => {
+    // What such a record *means* is `unattributed`, and the render derivation is
+    // the one place that substitutes it — inventing a label here would put a
+    // claim in the state file the step never made.
+    const loaded = adaptLoadedState(
+      { version: 7, featureBranch: "feat/demo", slices: {}, mutationStep: RECORD },
+      "demo",
+    ).mutationStep;
+    expect(loaded).toEqual(RECORD);
+    expect("label" in loaded!.survivors[0]!).toBe(false);
+    expect("attributionNotes" in loaded!).toBe(false);
+  });
+
+  it("[behavior:#304:B-11] drops a label or note it does not recognise, keeping the survivor", () => {
+    const loaded = adaptLoadedState(
+      {
+        version: 7,
+        featureBranch: "feat/demo",
+        slices: {},
+        mutationStep: {
+          ...RECORD,
+          survivors: [{ ...RECORD.survivors[0]!, label: "probably-fine" }],
+          attributionNotes: ["BASELINE_UNUSABLE", "VIBES", 7],
+        },
+      },
+      "demo",
+    ).mutationStep;
+    // A survivor is the load-bearing part: an unreadable label is worth less
+    // than the bullet it sits on, so the label goes and the mutant stays.
+    expect(loaded?.survivors).toEqual(RECORD.survivors);
+    expect(loaded?.attributionNotes).toEqual(["BASELINE_UNUSABLE"]);
+  });
+
+  it("[behavior:#304:B-11] leaves attributionNotes absent when nothing degraded", () => {
+    const loaded = adaptLoadedState(
+      {
+        version: 7,
+        featureBranch: "feat/demo",
+        slices: {},
+        mutationStep: { ...RECORD, attributionNotes: [] },
+      },
+      "demo",
+    ).mutationStep;
+    // Absence discipline: an empty array would round-trip into the state file as
+    // a degradation record for a run that had none.
+    expect("attributionNotes" in loaded!).toBe(false);
+  });
+
   it("[behavior:#303:P-05] still loads a v3 through v6 record, as a run with no mutation step", () => {
     for (const version of [3, 4, 5, 6]) {
       const repo = makeRepo();

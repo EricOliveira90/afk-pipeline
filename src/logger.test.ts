@@ -1708,15 +1708,82 @@ describe("[behavior:#303:B-14] run-summary.md's mutation section", () => {
     });
 
     // One derivation, shared with the draft PR body: the reader goes through
-    // `events.jsonl`, so the two renderings read the same bytes.
+    // `events.jsonl`, so the two renderings read the same bytes. The event
+    // carried no label, and a survivor with no label *is* unattributed — this
+    // derivation is the one place that says so (#304 B-11).
     expect(readMutationStepOutcome(log.runDir)).toEqual({
       runSlug: "mutation-reader",
       status: "MUTATION_REPORTED",
-      survivors: [SURVIVOR],
+      survivors: [{ ...SURVIVOR, label: "unattributed" }],
     });
   });
 
-  it("[behavior:#303:P-01] renders no section at all for a stream without the event", () => {
+  it("[behavior:#304:B-11] carries every label and note from the event stream into the section", () => {
+    const md = summaryWith("mutation-attributed", {
+      type: "mutation-step",
+      runSlug: "mutation-attributed",
+      status: "MUTATION_REPORTED",
+      survivors: [
+        { ...SURVIVOR, label: "new-in-this-run" },
+        { ...SURVIVOR, id: "13", label: "pre-existing" },
+        { ...SURVIVOR, id: "14", label: "accepted" },
+      ],
+      attributionNotes: ["DECISIONS_UNUSABLE"],
+    });
+
+    const section = md.slice(md.indexOf(MUTATION_REPORT_HEADING));
+    // The label rides the same bullet the mutant does, so a reviewer reads
+    // "which of these is new" without leaving the line.
+    expect(section).toContain(
+      "- `12` src/cart.ts:12:3 — ArithmeticOperator — new-in-this-run",
+    );
+    expect(section).toContain(
+      "- `13` src/cart.ts:12:3 — ArithmeticOperator — pre-existing",
+    );
+    expect(section).toContain(
+      "- `14` src/cart.ts:12:3 — ArithmeticOperator — accepted",
+    );
+    // Marked, never suppressed: the accepted survivor is still in the list.
+    expect(section).toContain("`14`");
+    expect(section).toContain("Attribution degraded: `DECISIONS_UNUSABLE`");
+    // Purely additive members on an existing payload: nothing about the stream's
+    // shape changed, so a resumed run reads its own events either way.
+    expect(EVENTS_SCHEMA_VERSION).toBe(1);
+  });
+
+  it("[behavior:#304:B-11] renders a pre-attribution record as unattributed, inventing nothing", () => {
+    const md = summaryWith("mutation-legacy", {
+      type: "mutation-step",
+      runSlug: "mutation-legacy",
+      status: "MUTATION_REPORTED",
+      survivors: [SURVIVOR],
+    });
+
+    const section = md.slice(md.indexOf(MUTATION_REPORT_HEADING));
+    expect(section).toContain(
+      "- `12` src/cart.ts:12:3 — ArithmeticOperator — unattributed",
+    );
+    // No degradation line: nothing was declared, so nothing degraded.
+    expect(section).not.toContain("Attribution degraded");
+  });
+
+  it("[behavior:#304:B-11] states a degradation even when the step found nothing", () => {
+    const md = summaryWith("mutation-degraded-clean", {
+      type: "mutation-step",
+      runSlug: "mutation-degraded-clean",
+      status: "MUTATION_REPORTED",
+      survivors: [],
+      attributionNotes: ["BASELINE_UNUSABLE"],
+    });
+
+    const section = md.slice(md.indexOf(MUTATION_REPORT_HEADING));
+    expect(section).toContain("No surviving mutants in the changed source files.");
+    expect(section).toContain("Attribution degraded: `BASELINE_UNUSABLE`");
+    // Reported, never a gate: the section says outright that nothing hung on it.
+    expect(section).toContain("ADR 0063");
+  });
+
+  it("[behavior:#303:P-01] [behavior:#304:P-01] renders no section at all for a stream without the event", () => {
     const md = summaryWith("mutation-absent");
     expect(md).not.toContain(MUTATION_REPORT_HEADING);
     expect(md).not.toContain("surviving mutants");

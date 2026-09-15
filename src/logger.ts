@@ -13,6 +13,7 @@ import { readRunEvents, type RunEvent } from "./run-events.js";
 import {
   MUTATION_REPORT_HEADING,
   formatMutationReportLines,
+  type MutationAttributionNote,
   type MutationNotRunReason,
   type MutationSurvivor,
 } from "./mutation-report.js";
@@ -292,7 +293,10 @@ export interface MutationStepReport {
   runSlug: string;
   status: "MUTATION_REPORTED" | "MUTATION_NOT_RUN";
   reason?: MutationNotRunReason;
+  /** Every survivor carries a `label`, substituted for a record without one. */
   survivors: MutationSurvivor[];
+  /** Which attribution degradations the run observed (#304 B-11). */
+  attributionNotes?: MutationAttributionNote[];
 }
 
 /**
@@ -302,6 +306,12 @@ export interface MutationStepReport {
  *
  * The last event wins. A run emits at most one, but "last" is the only reading
  * that stays correct if one ever emits two, and it never invents a third answer.
+ *
+ * This is also the one place a missing `label` becomes `unattributed` (#304
+ * B-11). A survivor recorded before attribution existed carries no label, and
+ * "nobody attributed this" is exactly what such a record means — so both render
+ * sites say so, and neither the parser nor the persisted record has to be
+ * rewritten to make them.
  */
 function deriveMutationStepOutcome(
   events: readonly RunEvent[],
@@ -313,7 +323,13 @@ function deriveMutationStepOutcome(
     runSlug: last.runSlug,
     status: last.status,
     ...(last.reason !== undefined ? { reason: last.reason } : {}),
-    survivors: last.survivors,
+    survivors: last.survivors.map((survivor) => ({
+      ...survivor,
+      label: survivor.label ?? "unattributed",
+    })),
+    ...(last.attributionNotes !== undefined && last.attributionNotes.length > 0
+      ? { attributionNotes: last.attributionNotes }
+      : {}),
   };
 }
 

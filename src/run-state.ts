@@ -14,8 +14,10 @@ import {
 } from "./slice-lifecycle.js";
 import type { PersistedRunScope } from "./slice-scope.js";
 import type {
+  MutationAttributionNote,
   MutationNotRunReason,
   MutationSurvivor,
+  MutationSurvivorLabel,
 } from "./mutation-report.js";
 import { withFileLock } from "./file-lock.js";
 import {
@@ -368,8 +370,18 @@ export interface PersistedMutationStep {
   status: "MUTATION_REPORTED" | "MUTATION_NOT_RUN";
   /** Present only under `MUTATION_NOT_RUN`. */
   reason?: MutationNotRunReason;
-  /** Empty under `MUTATION_NOT_RUN`, and legitimately empty under the other. */
+  /**
+   * Empty under `MUTATION_NOT_RUN`, and legitimately empty under the other.
+   * Each entry carries its optional attribution `label` (#304 B-11).
+   */
   survivors: MutationSurvivor[];
+  /**
+   * Which attribution degradations the run observed (#304 B-11). Optional and
+   * absent in the ordinary case, so `RUN_STATE_VERSION` stays 7: an optional
+   * member every existing reader ignores is not a schema break, which is the
+   * rationale #303 recorded for the record itself.
+   */
+  attributionNotes?: MutationAttributionNote[];
 }
 
 /**
@@ -977,6 +989,14 @@ function sanitizeMutationStep(
   // A dropped survivor would report a shorter list than the tool produced, so
   // the whole record degrades instead of quietly shrinking.
   if (survivors.length !== record.survivors.length) return undefined;
+  // An unrecognized note is dropped rather than degrading the record: a note is
+  // one line of report text, so a stray one costs a sentence, never a survivor.
+  const attributionNotes = Array.isArray(record.attributionNotes)
+    ? record.attributionNotes.filter(
+        (note): note is MutationAttributionNote =>
+          note === "BASELINE_UNUSABLE" || note === "DECISIONS_UNUSABLE",
+      )
+    : [];
   return {
     runSlug: record.runSlug,
     status: record.status,
@@ -988,8 +1008,24 @@ function sanitizeMutationStep(
       file: entry.file,
       mutator: entry.mutator,
       position: { ...entry.position },
+      // Copied through, never defaulted: a survivor with no label *means*
+      // `unattributed`, and substituting it here would claim this run attributed
+      // a record that predates attribution (#304 B-11).
+      ...(isMutationSurvivorLabel(entry.label) ? { label: entry.label } : {}),
     })),
+    ...(attributionNotes.length > 0 ? { attributionNotes } : {}),
   };
+}
+
+function isMutationSurvivorLabel(
+  value: unknown,
+): value is MutationSurvivorLabel {
+  return (
+    value === "new-in-this-run" ||
+    value === "pre-existing" ||
+    value === "unattributed" ||
+    value === "accepted"
+  );
 }
 
 /**
