@@ -824,11 +824,86 @@ export const CLEANER_CONTEXT_MANIFEST = {
   ],
 } as const satisfies ContextEnvelopeManifest;
 
+/**
+ * Generator self-audit role contract (#299 B-04, ADR 0069).
+ *
+ * The same generator, called back once on a candidate it has already committed
+ * and whose required cheap gates are green, between the gate-release assertion
+ * and the deterministic QA dispatch. Its subject is neither a brief nor a
+ * verdict but a tree: does the thing already committed meet the contract it was
+ * built against?
+ *
+ * `inputOrder` reads the pair before the author's account of satisfying it, and
+ * both before the diff: the audit re-reads what it was contracted to build,
+ * then its own story about building it, then what it actually changed. Reading
+ * the diff first invites an audit that reviews the change rather than the
+ * contract.
+ *
+ * The pair and the handoff travel by *path*, not by value: all three sit in the
+ * audit's own worktree, and ADR 0068's rule is that an envelope must not inline
+ * a file the role can open itself. The change summary is the one input that is
+ * not there — it is derived by the hub from the candidate's commits — so it is
+ * the only block this envelope inlines, and the only one the byte budget can
+ * bite on.
+ *
+ * `allowedWriteScope` is the slice worktree and nothing else. The audit may
+ * commit a fix inside it when it finds a gap; it has no licence to widen the
+ * boundary, and the `scope` gate over the candidate's checkpoints is what
+ * enforces that rather than this string.
+ */
+export const SELF_AUDIT_CONTEXT_MANIFEST = {
+  version: 1,
+  role: "generator-audit",
+  objective:
+    "Audit the already-committed candidate against its locked contract before QA is dispatched, and commit a fix only where the audit finds a gap.",
+  nonGoals: [
+    "Changing anything when the audit finds no gap; an unchanged resubmission is a legitimate outcome",
+    "Cosmetic churn — a rename, a reflow or an assertion the auditor does not believe in — to look diligent",
+    "Re-litigating the locked contract, the acceptance manifest or a passing gate",
+    "Widening the declared file scope, or writing outside the slice worktree",
+  ],
+  allowedWriteScope: "the slice's own worktree, within the locked file scope",
+  stopConditions: [
+    "The audit found no gap, so the candidate is resubmitted unchanged",
+    "The gap the audit found is fixed inside the declared file scope and committed",
+  ],
+  escalationConditions: [
+    "The gap can only be closed outside the declared file scope",
+    "The locked contract contradicts itself, so there is no boundary left to audit against",
+  ],
+  acceptedInputArtifactClasses: [
+    "locked-contract",
+    "acceptance-manifest",
+    "candidate-handoff",
+    "change-summary",
+  ],
+  outputArtifact: "audited-candidate-tree",
+  inputOrder: [
+    "locked-contract",
+    "acceptance-manifest",
+    "candidate-handoff",
+    "change-summary",
+  ],
+  inlineSizeBudgetBytes: 65_536,
+  omittedArtifactClasses: [
+    ...ROLE_ENVELOPE_OMISSIONS,
+    // No QA verdict exists yet — the audit runs before the dispatch — and the
+    // required gates the candidate just cleared are withheld on purpose: an
+    // audit handed a green gate's log spends the round re-reading a gate that
+    // already agreed with it.
+    "qa-review-artifacts",
+    "gate-evidence",
+    "final-review-pair",
+    "dependency-sibling-handoffs",
+  ],
+} as const satisfies ContextEnvelopeManifest;
+
 export type PromptAssemblyRole =
   | "explorer"
   | "planner"
   | "evaluator-contract"
-  | "generator";
+  | "generator"
+  | "generator-audit";
 
 /**
  * Roles that carry a versioned context-envelope manifest. A superset of
@@ -843,8 +918,26 @@ export type ContextEnvelopeRole =
   | "evaluator-final"
   | "cleaner";
 
-export interface RoleEnvelopeEvidence {
-  role: PromptAssemblyRole;
+/**
+ * The assembly roles whose envelope evidence is journaled to the provider as
+ * `ContextEnvelopeInvocationEvidence` (`src/agent-provider.ts`).
+ *
+ * A proper subset of {@link PromptAssemblyRole}, and the default type argument
+ * of {@link RoleEnvelopeEvidence} and {@link RoleEnvelopeResult}, so a bare
+ * reference to either means exactly what it meant before `"generator-audit"`
+ * joined the union. The audit's envelope is assembled and dispatched but not
+ * journaled: a new `prompt-assembly` event for it is an explicit non-goal of
+ * #299, and #301 owns the surfaces that report audit outcomes.
+ */
+export type JournaledAssemblyRole = Exclude<
+  PromptAssemblyRole,
+  "generator-audit"
+>;
+
+export interface RoleEnvelopeEvidence<
+  R extends PromptAssemblyRole = JournaledAssemblyRole,
+> {
+  role: R;
   assembledByteSize: number;
   includedArtifactClasses: string[];
   includedArtifactIds: string[];
@@ -852,9 +945,11 @@ export interface RoleEnvelopeEvidence {
   contextManifestVersion: number;
 }
 
-export interface RoleEnvelopeResult {
+export interface RoleEnvelopeResult<
+  R extends PromptAssemblyRole = JournaledAssemblyRole,
+> {
   prompt: string;
-  evidence: RoleEnvelopeEvidence;
+  evidence: RoleEnvelopeEvidence<R>;
 }
 
 export interface ContextArtifactReference {
@@ -1279,10 +1374,10 @@ function resolveInputOrder(
   return order;
 }
 
-export function assembleContextEnvelope(input: {
+export function assembleContextEnvelope<R extends PromptAssemblyRole>(input: {
   prompt: string;
   /** Only assembly-wired roles; the evaluator-qa manifest is manifest-only. */
-  manifest: ContextEnvelopeManifest & { role: PromptAssemblyRole };
+  manifest: ContextEnvelopeManifest & { role: R };
   includedArtifacts: readonly ContextArtifactReference[];
   /** Names the manifest input-order variant when the manifest declares more than one. */
   inputOrderKey?: string;
@@ -1293,7 +1388,7 @@ export function assembleContextEnvelope(input: {
    */
   inlineSizeBudgetBytes?: number;
   roleLabel?: string;
-}): RoleEnvelopeResult {
+}): RoleEnvelopeResult<R> {
   validateContextEnvelopeManifest(input.manifest);
   const accepted = new Set(input.manifest.acceptedInputArtifactClasses);
   const undeclared = input.includedArtifacts.find(
@@ -2255,6 +2350,82 @@ export function assembleGeneratorEnvelope(
       : { inlineSizeBudgetBytes: input.inlineSizeBudgetBytes }),
     roleLabel: "Generator",
   }) as GeneratorEnvelopeResult;
+}
+
+export interface SelfAuditEnvelopeInput {
+  /**
+   * Repo-relative slice artifact directory. The locked pair and the candidate's
+   * handoff are named by their paths under it rather than quoted, because the
+   * audit runs in the worktree that holds them (ADR 0068).
+   */
+  sliceDir: string;
+  /** The committed candidate tree the required cheap gates released. */
+  candidateTreeId: string;
+  /**
+   * The candidate's change summary. The one input absent from the audit's own
+   * worktree, so the one block this envelope inlines.
+   */
+  changeSummary: string;
+  /** Project override; stricter-only, clamped to the manifest budget (B-06). */
+  inlineSizeBudgetBytes?: number;
+}
+
+export interface SelfAuditEnvelopeResult {
+  prompt: string;
+  evidence: RoleEnvelopeEvidence<"generator-audit">;
+}
+
+/**
+ * Assembles the generator self-audit envelope (#299 B-05).
+ *
+ * Delegates order and budget enforcement to `assembleContextEnvelope` rather
+ * than re-implementing either: a prompt whose blocks are rendered out of
+ * `SELF_AUDIT_CONTEXT_MANIFEST`'s declared order, and one whose assembled bytes
+ * exceed the effective budget, both fail closed as CONFIGURATION before any
+ * evidence is emitted.
+ */
+export function assembleSelfAuditEnvelope(
+  input: SelfAuditEnvelopeInput,
+): SelfAuditEnvelopeResult {
+  const contractPath = `${input.sliceDir}/contract.md`;
+  const acceptanceManifestPath = `${input.sliceDir}/${ACCEPTANCE_MANIFEST_FILENAME}`;
+  const handoffPath = `${input.sliceDir}/handoff.md`;
+  const prompt = renderPrompt("generator-audit", {
+    SLICE_DIR: input.sliceDir,
+    ACCEPTANCE_MANIFEST_FILE: ACCEPTANCE_MANIFEST_FILENAME,
+    CANDIDATE_TREE_ID: input.candidateTreeId,
+    CHANGE_SUMMARY: input.changeSummary,
+  });
+  return assembleContextEnvelope({
+    prompt,
+    manifest: SELF_AUDIT_CONTEXT_MANIFEST,
+    includedArtifacts: [
+      {
+        artifactClass: "locked-contract",
+        artifactId: contractPath,
+        ...contentLocator(`\`${contractPath}\``),
+      },
+      {
+        artifactClass: "acceptance-manifest",
+        artifactId: acceptanceManifestPath,
+        ...contentLocator(`\`${acceptanceManifestPath}\``),
+      },
+      {
+        artifactClass: "candidate-handoff",
+        artifactId: handoffPath,
+        ...contentLocator(`\`${handoffPath}\``),
+      },
+      {
+        artifactClass: "change-summary",
+        artifactId: `candidate:${input.candidateTreeId}:change-summary`,
+        ...contentLocator(input.changeSummary),
+      },
+    ],
+    ...(input.inlineSizeBudgetBytes === undefined
+      ? {}
+      : { inlineSizeBudgetBytes: input.inlineSizeBudgetBytes }),
+    roleLabel: "Generator audit",
+  }) as SelfAuditEnvelopeResult;
 }
 
 export function formatGeneratorFailureSet(
