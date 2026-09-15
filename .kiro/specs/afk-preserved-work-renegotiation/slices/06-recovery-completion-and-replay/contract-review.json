@@ -1,0 +1,43 @@
+{
+  "version": 2,
+  "verdict": "ACCEPT",
+  "findings": [
+    {
+      "id": "F-09",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-01"],
+      "evidence": "acceptance-manifest.json B-01 `then`: \"The gate and the provenance stamp are injected rather than imported, on the module's existing `RecoveryGitProbes` seam (`:279-298`)\" — against contract B-01, which makes the gate \"a required `lockGate: (contractPath: string) => string | null` argument\" and calls `RecoveryGitProbes` only \"this module's existing seam pattern for exactly that problem\".",
+      "expected": "Both halves of the pair name the same injection site for `lockGate` and the provenance stamp, so a generator cannot read the manifest as licence to widen a preserved interface.",
+      "observed": "The contract says pattern; the manifest says the seam itself. `RecoveryGitProbes` is a closed three-member git-predicate interface with a `DEFAULT_RECOVERY_GIT_PROBES` constant (src/preserve-work-recovery.ts:288-298), consumed as `probes?: RecoveryGitProbes` by eligibility (:379) and admission (:611), and its doc comment earns its shape from being exactly the git surface eligibility may reach (\"it makes the 'no other git export is reachable from eligibility' claim a *type-level* fact\", :282-286). Adding a `lockGate` member to it would change that constant and both existing consumers' option shape — surfaces P-03 preserves for \"any input that is not a replay against a COMPLETED trailing event\" — and would weaken the type-level claim the interface exists to make. Advisory rather than blocking because the manifest's own `given` already pins the settled reading (\"a `completeRecoveryAttempt(args)` call whose ... required `lockGate: (contractPath: string) => string | null`\"), so the args-level placement is recoverable from the pair without guessing; only the `then`'s \"on the ... seam\" phrasing points elsewhere.",
+      "clearCondition": "Manifest B-01's `then` says the gate and provenance are injected as arguments of `completeRecoveryAttempt`, following the `RecoveryGitProbes` pattern rather than being added to that interface, and states that `RecoveryGitProbes` and `DEFAULT_RECOVERY_GIT_PROBES` gain no member.",
+      "state": "OPEN",
+      "revisionCitation": {
+        "artifact": "acceptance-manifest.json",
+        "before": "it validates the pair only through readLockedAcceptedPair, refuses with lock-gate-refused when the gate returns a non-null string",
+        "after": "The gate and the provenance stamp are injected rather than imported, on the module's existing `RecoveryGitProbes` seam (`:279-298`)"
+      }
+    },
+    {
+      "id": "F-07",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-03", "P-02"],
+      "evidence": "B-03 given: \"an admitted completion ... whose locked recheck fails because the trailing event or the scope fingerprint changed\"; then: \"the attempt ends through #333's rollBackRecoveryAttempt with trigger deterministic-validation-refusal, lock-gate-refusal or completion-cas-lost respectively\"; observableResult: \"tests assert the lineage gained no COMPLETED event, that the trailing event is the ROLLED_BACK or ROLLBACK_FAILED one rollBackRecoveryAttempt appends, and that the returned failure carries the expected trigger\"",
+      "expected": "The completion-CAS-lost failure path is stated over what the unedited #333 writer actually does, so every gated observable is reachable without editing rollBackRecoveryAttempt and no failure path can act on an attempt this call did not admit.",
+      "observed": "Resolved. B-03 now splits the failure surface into three named shapes in both halves of the pair, and every delegation is conditioned on a read that found the target's trailing event still this `attemptId` in state `PENDING` — the exact fact the unedited writer's own recheck (`current.attemptId !== trailing.attemptId || current.state !== trailing.state`, src/preserve-work-recovery.ts:1412-1422) will re-establish. Shape (b) is the only `completion-cas-lost` path and is scope-fingerprint drift with this attempt still trailing, so `rollbackableEvent` (:1293-1302) returns this attempt's `PENDING` event and the mandated `ROLLED_BACK` append is reachable. Shape (c) — a different `attemptId` trailing, or this one in another state — appends nothing, restores nothing and calls no rollback, refusing with the module's genuinely existing code `facts-changed-before-lock` (verified at :133-134, the same code the writer itself returns at :1419), so no gated observable asks the writer to append after a changed trailing event and no path lets completion roll back an attempt it never admitted. P-02 is extended to pin the writer's signature and to record shape (c) as the consequence, so the forbidden alternative is closed from both sides. The test plan's third bullet no longer targets the unreachable flavor: fingerprint drift and changed-trailing-event are now separate bullets with separate assertions, the latter asserting an event-for-event unchanged lineage, byte-identical pair files, and that the second attempt's snapshot is neither restored nor given an event. The residual TOCTOU between completion's unlocked read and the writer's own load is named in B-03, assigned to #333 under P-02, and gates no observable, so it is not a gap this slice can close.",
+      "clearCondition": "B-03 in both contract and manifest separates the two CAS-loss shapes: a lost recheck where this attempt is still the trailing PENDING event (scope-fingerprint drift) delegates to rollBackRecoveryAttempt with trigger completion-cas-lost, while a recheck lost because the trailing event is no longer this attempt's PENDING event appends nothing and calls no rollback (or states that the writer's own no-pending-attempt refusal is the ending), with B-03's observableResult restated per shape — so no gated observable requires the unedited #333 writer to append after a changed trailing event, and no path lets completion roll back an attemptId it did not admit.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-08",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-01", "B-03"],
+      "evidence": "B-01 (contract): \"`completeRecoveryAttempt(args)` ... refuses before any write unless three preconditions hold\"; B-03: \"an invalid replacement pair with `trigger: \\\"deterministic-validation-refusal\\\"`, a refusing lock gate with `trigger: \\\"lock-gate-refusal\\\"`\" ends \"through #333's verified rollback writer\"",
+      "expected": "B-01 says which write it forbids, so a generator can tell a non-destructive precondition refusal from a terminal one.",
+      "observed": "Resolved. \"before any write\" is gone. B-01 now names the forbidden write concretely — \"appends no `COMPLETED` event and writes no run-state document of its own\" — and states the terminal reading outright: \"A precondition refusal is terminal for the attempt, not a retryable non-write ... the attempt is then *ended* — it is not left `PENDING` — through B-03's delegation to #333's rollback writer, which restores the snapshot pair and appends `ROLLED_BACK`, or `ROLLBACK_FAILED` when the restore cannot be proven\", with the single write-nothing exception pointed at B-03's shape (c). The \"of its own\" carve-out is no longer ambiguous, because the same sentence attributes the run-state document that does get written to the #333 writer. The gate is tightened to match: manifest B-01's observableResult now asserts, per precondition, the refusal code, the absence of a `COMPLETED` event anywhere in the lineage, and that the trailing event afterwards is the `ROLLED_BACK` event appended for the same `attemptId` — so the retryable reading that previously also passed now fails. The test plan's second bullet asserts the same ending, including the `ROLLBACK_FAILED` variant.",
+      "clearCondition": "B-01 states the forbidden write concretely (\"appends no COMPLETED event\") instead of \"before any write\", and either B-01 or B-03 makes explicit that a failing precondition ends the attempt through the rollback writer rather than leaving it PENDING.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    }
+  ]
+}
