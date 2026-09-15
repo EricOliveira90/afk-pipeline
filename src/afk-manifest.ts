@@ -59,6 +59,28 @@ export interface MutationReportDeclaration {
    * check.
    */
   reportPath: string;
+  /**
+   * Repo-relative path of the operator's incremental baseline artifact, read to
+   * say whether each survivor is new in this run or was already surviving
+   * (#304 B-01). Optional and *absent* when undeclared, the same discipline
+   * `mutationReport` itself is under: absence is the normal case, never an
+   * error, and it means every survivor is reported `unattributed`.
+   *
+   * Declared here rather than behind a CLI flag or a script convention because
+   * it is a durable per-project fact, and `afk.json` is the strictly-validated
+   * cross-repository contract for those (ADR 0034).
+   */
+  baselinePath?: string;
+  /**
+   * Repo-relative path of the committed triage decisions file (ADR 0071's
+   * "Decisions file schema"), read to mark a survivor a human already
+   * adjudicated as `accepted` rather than re-raising it. Optional and absent
+   * when undeclared, for the reason `baselinePath` is.
+   *
+   * Marking, never suppressing: an `accepted` survivor stays in the report at
+   * full detail, so nothing here can shorten a survivor list.
+   */
+  decisionsPath?: string;
 }
 
 export interface AfkManifest {
@@ -174,15 +196,57 @@ function normalizeProtectedChangeWaiver(
 }
 
 /**
+ * The one path rule set every `mutationReport` path member goes through
+ * (#304 B-02): the waiver rules — one exact repo-relative path, never a glob —
+ * plus a `..` refusal, because a file read from outside the worktree came from a
+ * tree nobody reviewed.
+ *
+ * One helper rather than a copy per member: a third path arriving with its own
+ * hand-copied block is how one of them ends up missing a rule. `noun` and
+ * `nouns` keep each refusal reading as advice about the file at fault.
+ */
+function normalizeMutationReportPath(
+  value: string,
+  member: string,
+  noun: string,
+  nouns: string,
+  source: string,
+): string {
+  const path = normalizeWaiverPath(value);
+  if (/[*?[]/.test(path)) {
+    throw new Error(
+      `${source} mutationReport ${member} "${path}" looks like a glob; ` +
+        `the step reads one exact ${noun}, because a pattern names ${nouns} ` +
+        `nobody has read`,
+    );
+  }
+  if (/^(?:[a-zA-Z]:)?\//.test(path)) {
+    throw new Error(
+      `${source} mutationReport ${member} "${path}" must be repo-relative, ` +
+        `not absolute`,
+    );
+  }
+  if (path.split("/").includes("..")) {
+    throw new Error(
+      `${source} mutationReport ${member} "${path}" must not traverse ` +
+        `outside the worktree with ".."`,
+    );
+  }
+  return path;
+}
+
+/**
  * Validate and normalize a declared `mutationReport`, naming the offending
  * member in every refusal so an operator can fix the manifest without reading
  * this function.
  *
  * Fail closed on a blank member rather than dropping it: a silently ignored
- * declaration is a run that reports nothing and says nothing about why. The
- * path rules are the waiver rules — one exact repo-relative path — plus a `..`
- * refusal, because a report read from outside the worktree is a report from a
- * tree nobody reviewed.
+ * declaration is a run that reports nothing and says nothing about why.
+ *
+ * `baselinePath` and `decisionsPath` are optional, and an absent one stays
+ * absent in the result rather than becoming an `undefined`-valued key: the ship
+ * gate rewrites `afk.json` from this object, so a key this parser drops is a key
+ * deleted from the reviewed branch (#304 B-01/B-03).
  */
 function normalizeMutationReport(
   entry: unknown,
@@ -204,27 +268,44 @@ function normalizeMutationReport(
       `${source} mutationReport requires a non-blank reportPath`,
     );
   }
-  const reportPath = normalizeWaiverPath(value.reportPath);
-  if (/[*?[]/.test(reportPath)) {
-    throw new Error(
-      `${source} mutationReport reportPath "${reportPath}" looks like a glob; ` +
-        `the step reads one exact report file, because a pattern names reports ` +
-        `nobody has read`,
-    );
-  }
-  if (/^(?:[a-zA-Z]:)?\//.test(reportPath)) {
-    throw new Error(
-      `${source} mutationReport reportPath "${reportPath}" must be repo-relative, ` +
-        `not absolute`,
-    );
-  }
-  if (reportPath.split("/").includes("..")) {
-    throw new Error(
-      `${source} mutationReport reportPath "${reportPath}" must not traverse ` +
-        `outside the worktree with ".."`,
-    );
-  }
-  return { command: value.command.trim(), reportPath };
+  const reportPath = normalizeMutationReportPath(
+    value.reportPath,
+    "reportPath",
+    "report file",
+    "reports",
+    source,
+  );
+  const optionalPath = (
+    member: "baselinePath" | "decisionsPath",
+    noun: string,
+    nouns: string,
+  ): string | undefined => {
+    if (value[member] === undefined) return undefined;
+    const declared = value[member];
+    if (typeof declared !== "string" || declared.trim() === "") {
+      throw new Error(
+        `${source} mutationReport ${member} must be a non-blank string when ` +
+          `declared; omit the member instead to declare no ${noun}`,
+      );
+    }
+    return normalizeMutationReportPath(declared, member, noun, nouns, source);
+  };
+  const baselinePath = optionalPath(
+    "baselinePath",
+    "baseline file",
+    "baselines",
+  );
+  const decisionsPath = optionalPath(
+    "decisionsPath",
+    "decisions file",
+    "decisions files",
+  );
+  return {
+    command: value.command.trim(),
+    reportPath,
+    ...(baselinePath !== undefined ? { baselinePath } : {}),
+    ...(decisionsPath !== undefined ? { decisionsPath } : {}),
+  };
 }
 
 export function parseAfkManifest(

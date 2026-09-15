@@ -200,7 +200,7 @@ describe("afk.json", () => {
     });
   });
 
-  it("[behavior:#303:B-04] reads a manifest with no mutationReport exactly as before", () => {
+  it("[behavior:#303:B-04] [behavior:#304:P-01] reads a manifest with no mutationReport exactly as before", () => {
     const manifest = parseAfkManifest({
       version: 1,
       selectedSlices: ["01"],
@@ -273,7 +273,7 @@ describe("afk.json", () => {
       /mutationReport must be a JSON object holding command and reportPath/,
     ],
   ])(
-    "[behavior:#303:B-03] refuses %s, naming the member at fault",
+    "[behavior:#303:B-03] [behavior:#304:P-02] refuses %s, naming the member at fault",
     (_label, mutationReport: unknown, expected: RegExp) => {
       expect(() =>
         parseAfkManifest({
@@ -285,7 +285,112 @@ describe("afk.json", () => {
     },
   );
 
-  it("[behavior:#303:P-02] still refuses a foreign version and still returns every existing member", () => {
+  it("[behavior:#304:B-01] returns both attribution paths, normalized the way reportPath is", () => {
+    const manifest = parseAfkManifest({
+      version: 1,
+      selectedSlices: ["01"],
+      mutationReport: {
+        command: "pnpm run mutate",
+        reportPath: "reports/mutation.json",
+        baselinePath: "./reports\\mutation\\incremental.json",
+        decisionsPath: "docs/mutation-decisions.json",
+      },
+    });
+    // Returned, not merely validated: the ship gate rewrites `afk.json` from
+    // this object, so a key the parser dropped would be deleted from the
+    // reviewed branch.
+    expect(manifest.mutationReport).toEqual({
+      command: "pnpm run mutate",
+      reportPath: "reports/mutation.json",
+      baselinePath: "reports/mutation/incremental.json",
+      decisionsPath: "docs/mutation-decisions.json",
+    });
+    // `version` is untouched: both members are optional, and every existing
+    // reader already tolerates their absence.
+    expect(manifest.version).toBe(1);
+  });
+
+  it("[behavior:#304:B-01] leaves an undeclared attribution path absent, never undefined-valued", () => {
+    const manifest = parseAfkManifest({
+      version: 1,
+      selectedSlices: ["01"],
+      mutationReport: {
+        command: "pnpm run mutate",
+        reportPath: "reports/mutation.json",
+      },
+    });
+    // The absence discipline `mutationReport` itself is under: an
+    // `undefined`-valued key would survive into the rewritten manifest as
+    // `"baselinePath": null` on some writers, and "no baseline declared" is not
+    // "a baseline nobody named".
+    expect(manifest.mutationReport).toEqual({
+      command: "pnpm run mutate",
+      reportPath: "reports/mutation.json",
+    });
+    expect("baselinePath" in manifest.mutationReport!).toBe(false);
+    expect("decisionsPath" in manifest.mutationReport!).toBe(false);
+  });
+
+  it.each(
+    (["baselinePath", "decisionsPath"] as const).flatMap((member) => [
+      [
+        `a blank ${member}`,
+        { [member]: "   " },
+        new RegExp(`mutationReport ${member} must be a non-blank string`),
+      ],
+      [
+        `a non-string ${member}`,
+        { [member]: 7 },
+        new RegExp(`mutationReport ${member} must be a non-blank string`),
+      ],
+      [
+        `a glob ${member}`,
+        { [member]: "reports/*.json" },
+        new RegExp(
+          `mutationReport ${member} "reports/\\*\\.json" looks like a glob`,
+        ),
+      ],
+      [
+        `a character-class ${member}`,
+        { [member]: "reports/mutation-[12].json" },
+        new RegExp(`mutationReport ${member} .* looks like a glob`),
+      ],
+      [
+        `an absolute ${member}`,
+        { [member]: "/var/tmp/baseline.json" },
+        new RegExp(`mutationReport ${member} .* must be repo-relative`),
+      ],
+      [
+        `a drive-absolute ${member}`,
+        { [member]: "C:\\tmp\\baseline.json" },
+        new RegExp(`mutationReport ${member} .* must be repo-relative`),
+      ],
+      [
+        `a traversing ${member}`,
+        { [member]: "../outside/baseline.json" },
+        new RegExp(
+          `mutationReport ${member} .* must not traverse outside the worktree`,
+        ),
+      ],
+    ]),
+  )(
+    "[behavior:#304:B-02] refuses %s, naming the member at fault",
+    (_label, extra: Record<string, unknown>, expected: RegExp) => {
+      expect(() =>
+        parseAfkManifest({
+          version: 1,
+          selectedSlices: ["01"],
+          mutationReport: {
+            command: "pnpm run mutate",
+            reportPath: "reports/mutation.json",
+            ...extra,
+          },
+        }),
+      ).toThrow(expected);
+    },
+  );
+
+  it("[behavior:#303:P-02] [behavior:#304:P-02] still refuses a foreign version and still returns every existing member", () => {
     expect(() => parseAfkManifest({ version: 2, selectedSlices: ["01"] })).toThrow();
     expect(() => parseAfkManifest({ selectedSlices: ["01"] })).toThrow();
     // The new optional member did not loosen anything that was already checked.
@@ -418,6 +523,37 @@ describe("afk.json", () => {
     // The trim rewrites the whole file, and the ship gate's own mutation step
     // reads this declaration on a later run: dropping it here would silently
     // turn a declared run into `MUTATION_NOT_RUN`.
+    expect(
+      JSON.parse(readFileSync(join(prd, "afk.json"), "utf-8")).mutationReport,
+    ).toEqual(mutationReport);
+  });
+
+  it("[behavior:#304:B-03] keeps both attribution paths when the ship gate rewrites the manifest", () => {
+    const prd = tempPrd();
+    const mutationReport = {
+      command: "pnpm run mutate",
+      reportPath: "reports/mutation.json",
+      baselinePath: "reports/mutation/incremental.json",
+      decisionsPath: "docs/mutation-decisions.json",
+    };
+    writeFileSync(
+      join(prd, "afk.json"),
+      JSON.stringify({
+        version: 1,
+        selectedSlices: ["01"],
+        migrationPrefixes: ["144", "145"],
+        protectedIssues: [],
+        mutationReport,
+      }),
+    );
+
+    const result = trimUnclaimedMigrationPrefixes(prd, ["145"]);
+
+    expect(result.changed).toBe(true);
+    expect(result.manifest.mutationReport).toEqual(mutationReport);
+    // The bytes on disk are what a later run reads: a key the rewrite dropped
+    // would silently turn an attributed run into an unattributed one, with no
+    // diagnosis anywhere.
     expect(
       JSON.parse(readFileSync(join(prd, "afk.json"), "utf-8")).mutationReport,
     ).toEqual(mutationReport);
