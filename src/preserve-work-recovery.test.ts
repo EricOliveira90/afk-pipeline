@@ -65,6 +65,7 @@ import {
   RECOVERY_SNAPSHOT_DIRNAME,
   admitStaleRenegotiation,
   canonicalizeRecoveryRequest,
+  completeRecoveryAttempt,
   describeRecoveryReconciliation,
   encodeRunScopeFingerprintPayload,
   evaluateRecoveryEligibility,
@@ -77,9 +78,11 @@ import {
   readLockedAcceptedPair,
   reconcileRecoveryLineage,
   recoveryDispatchRefusal,
+  recoveryPreDispatchRefusal,
   restoreAcceptedPairFromSnapshot,
   rollBackRecoveryAttempt,
   runScopeFingerprint,
+  type CompleteRecoveryAttemptArgs,
   type ExecuteRecoveryAttemptArgs,
   type RecoveryAttemptLocator,
   type RecoveryFailure,
@@ -2418,6 +2421,8 @@ function plantedEvent(opts: {
   attemptId: string;
   snapshotPath: string;
   state: RecoveryLineageState;
+  /** The replacement pair a `COMPLETED` event records (#335 B-12). */
+  replacement?: { contractFingerprint: string; manifestFingerprint: string };
 }): PersistedRecoveryLineageEvent {
   return {
     attemptId: opts.attemptId,
@@ -2441,6 +2446,19 @@ function plantedEvent(opts: {
           rollbackError: "an earlier rollback could not read the snapshot",
           observedContractFingerprint: sha256Of(REOPENED_CONTRACT),
           observedManifestFingerprint: RECOVERY_FINGERPRINT_ABSENT,
+        }
+      : {}),
+    // Required on `COMPLETED` and forbidden everywhere else, under the same
+    // per-state rule the rollback-failure members follow (#335 B-12). Defaulted
+    // to a pair no fixture writes, so a planted completion never accidentally
+    // matches the pair on disk and turns a later admission into a replay.
+    ...(opts.state === "COMPLETED"
+      ? {
+          replacementContractFingerprint:
+            opts.replacement?.contractFingerprint ?? "9".repeat(64),
+          replacementManifestFingerprint:
+            opts.replacement?.manifestFingerprint ?? "a".repeat(64),
+          lockProvenance: "planted completion, recorded under the run-state lock",
         }
       : {}),
   };
@@ -3039,4 +3057,1011 @@ describe("what a launch with nothing to reconcile does", () => {
     },
     30_000,
   );
+});
+
+/*
+ * ---------------------------------------------------------------------------
+ * Recovery completion and replay (#335)
+ * ---------------------------------------------------------------------------
+ *
+ * The completion path takes no git probes and spawns nothing: it reads one
+ * run-state file, reads the replacement pair, calls one injected gate and
+ * appends one event under the ADR 0056 lock. So every case below is a unit test
+ * on the fixture repository this file already builds, starting from a `PENDING`
+ * event `admitPending` commits — the top of the `AGENTS.md` assertion ladder
+ * rather than the bottom (ADR 0063). The end-to-end shape, where a fixture-built
+ * run state is completed and then read by the pre-dispatch predicate, is one
+ * more `it` on `src/resume-integration.test.ts`'s existing recovery fixture, and
+ * it spawns nothing either.
+ */
+
+/** The replacement pair a renegotiation locks: valid, LOCKED, and not the stale one. */
+const REPLACEMENT_CONTRACT = [
+  "# Slice 07 — fixture contract, renegotiated",
+  "",
+  "**Status:** LOCKED",
+  "",
+  "### In scope",
+  "",
+  "- [behavior:B-01] The fixture behavior, restated after the pair went stale.",
+  "",
+].join("\n");
+
+/** A third valid pair, for the repeat that arrives against a *different* one. */
+const SECOND_REPLACEMENT_CONTRACT = [
+  "# Slice 07 — fixture contract, renegotiated twice",
+  "",
+  "**Status:** LOCKED",
+  "",
+  "### In scope",
+  "",
+  "- [behavior:B-01] The fixture behavior, restated a second time.",
+  "",
+].join("\n");
+
+/** The lock exit's own stamp: supplied by the caller, opaque to the module. */
+const PROVENANCE = "renegotiated under the run-state lock, run 42";
+
+const COMPLETING_ATTEMPT = "attempt-completing";
+
+/** A lock gate that records every contract path it is handed. */
+function recordingGate(refusal: string | null = null): {
+  calls: string[];
+  gate: (contractPath: string) => string | null;
+} {
+  const calls: string[] = [];
+  return {
+    calls,
+    gate: (contractPath: string) => {
+      calls.push(contractPath);
+      return refusal;
+    },
+  };
+}
+
+function complete(
+  f: Fixture,
+  overrides: Partial<CompleteRecoveryAttemptArgs> = {},
+) {
+  return completeRecoveryAttempt({
+    repoRoot: f.repoRoot,
+    prdSlug: PRD_SLUG,
+    sliceDir: f.sliceDir,
+    ghIssue: GH_ISSUE,
+    lockGate: () => null,
+    provenance: PROVENANCE,
+    ...overrides,
+  });
+}
+
+/** Admit one attempt, lock a replacement pair over the stale one, complete it. */
+function completeAttempt(
+  f: Fixture,
+  attemptId = COMPLETING_ATTEMPT,
+  contract = REPLACEMENT_CONTRACT,
+) {
+  admitPending(f, attemptId);
+  writeAcceptedPair(f.sliceDir, contract);
+  const result = complete(f);
+  expect(result.completed).toBe(true);
+  return result;
+}
+
+/** One top-level declaration's code, from its signature to the next export. */
+function declarationBody(signature: string): string {
+  const start = MODULE_CODE.indexOf(signature);
+  expect(start).toBeGreaterThan(-1);
+  const rest = MODULE_CODE.slice(start + signature.length);
+  const end = rest.indexOf("\nexport ");
+  return end === -1 ? rest : rest.slice(0, end);
+}
+
+/** Append one event to the persisted lineage with no writer at all — a plant. */
+function plantTrailingEvent(
+  f: Fixture,
+  event: PersistedRecoveryLineageEvent,
+): void {
+  const document = stateDocument(f);
+  const lineage = (document.recoveryLineage ?? {}) as Record<
+    string,
+    PersistedRecoveryLineageEvent[]
+  >;
+  lineage[GH_ISSUE] = [...(lineage[GH_ISSUE] ?? []), event];
+  document.recoveryLineage = lineage;
+  writeFileSync(f.statePath, `${JSON.stringify(document, null, 2)}\n`);
+}
+
+/** Resolve whatever attempt trails, so the target has no open attempt left. */
+function plantRolledBack(f: Fixture): void {
+  plantTrailingEvent(f, {
+    ...trailingEvent(f),
+    state: "ROLLED_BACK",
+    recordedAt: "2026-09-15T00:00:00.000Z",
+  });
+}
+
+const REVERSED_SCOPE: PersistedRunScope = {
+  mode: SCOPE.mode,
+  slices: [...SCOPE.slices].reverse(),
+};
+
+/** Change the persisted scope, and nothing else, so its fingerprint moves. */
+function reverseScope(f: Fixture): void {
+  const document = stateDocument(f);
+  document.scope = REVERSED_SCOPE;
+  writeFileSync(f.statePath, `${JSON.stringify(document, null, 2)}\n`);
+}
+
+describe("what a completion requires before it may append", () => {
+  const PRECONDITION_CASES: {
+    label: string;
+    code: "accepted-pair-invalid" | "lock-gate-refused";
+    trigger: RecoveryFailureTrigger;
+    /** What the recording gate answers when it is reached at all. */
+    gateRefusal?: string;
+    /** How many times the gate may be called: once, or never. */
+    gateCalls: 0 | 1;
+    args?: Partial<CompleteRecoveryAttemptArgs>;
+    mutate?: (f: Fixture) => void;
+  }[] = [
+    {
+      label: "an invalid replacement pair",
+      code: "accepted-pair-invalid",
+      trigger: "deterministic-validation-refusal",
+      gateCalls: 0,
+      mutate: reopenAcceptedPair,
+    },
+    {
+      label: "a refusing lock gate",
+      code: "lock-gate-refused",
+      trigger: "lock-gate-refusal",
+      gateRefusal: "migration prefix 0042 is already taken by another slice",
+      gateCalls: 1,
+    },
+    {
+      label: "a blank provenance",
+      code: "lock-gate-refused",
+      trigger: "lock-gate-refusal",
+      gateCalls: 1,
+      args: { provenance: "   " },
+    },
+    {
+      label: "a missing provenance",
+      code: "lock-gate-refused",
+      trigger: "lock-gate-refusal",
+      gateCalls: 1,
+      args: { provenance: undefined as unknown as string },
+    },
+    {
+      label: "a missing lock gate",
+      code: "lock-gate-refused",
+      trigger: "lock-gate-refusal",
+      // Never a skip: a completion with no gate is refused as a refusing gate is.
+      gateCalls: 0,
+      args: {
+        lockGate: undefined as unknown as CompleteRecoveryAttemptArgs["lockGate"],
+      },
+    },
+  ];
+
+  it.each(PRECONDITION_CASES)(
+    "[behavior:#335:B-01] refuses $code given $label, and ends the attempt",
+    (row) => {
+      admitPending(fixture, "attempt-precondition");
+      writeAcceptedPair(fixture.sliceDir, REPLACEMENT_CONTRACT);
+      row.mutate?.(fixture);
+      const gate = recordingGate(row.gateRefusal ?? null);
+
+      const result = complete(fixture, { lockGate: gate.gate, ...row.args });
+
+      expect(result.completed).toBe(false);
+      expect(result).toMatchObject({
+        code: row.code,
+        attemptId: "attempt-precondition",
+      });
+      // The gate is reached exactly once with the replacement contract's own
+      // path when the pair validated, and not at all when it did not.
+      expect(gate.calls).toEqual(
+        row.gateCalls === 0 ? [] : [join(fixture.sliceDir, CONTRACT_FILENAME)],
+      );
+      const events = eventsOf(fixture);
+      expect(events.some((event) => event.state === "COMPLETED")).toBe(false);
+      // Terminal for the attempt, not a lingering PENDING: #333's writer
+      // appended ROLLED_BACK for this same attemptId.
+      const trailing = events[events.length - 1]!;
+      expect(trailing.state).toBe("ROLLED_BACK");
+      expect(trailing.attemptId).toBe("attempt-precondition");
+      expect(
+        hasOpenRecoveryAttempt(
+          loadRunState(fixture.repoRoot, PRD_SLUG),
+          GH_ISSUE,
+        ),
+      ).toBe(false);
+      expect(
+        result.completed === false ? result.failure?.trigger : undefined,
+      ).toBe(row.trigger);
+      expect(
+        result.completed === false ? result.rollback?.rolledBack : undefined,
+      ).toBe(true);
+    },
+    30_000,
+  );
+
+  it("[behavior:#335:B-01] refuses a target whose lineage ends on no PENDING attempt", () => {
+    const gate = recordingGate();
+
+    const empty = complete(fixture, { lockGate: gate.gate });
+
+    expect(empty).toMatchObject({
+      completed: false,
+      code: "no-pending-attempt",
+    });
+    expect(empty.completed === false ? empty.message : "").toContain(
+      "the lineage is empty",
+    );
+    // Nothing was read of the pair and nothing was written: a target with no
+    // attempt is not an attempt to end.
+    expect(gate.calls).toEqual([]);
+    expect(persistedLineage(fixture)).toBeUndefined();
+
+    completeAttempt(fixture);
+    const resolved = complete(fixture, { lockGate: gate.gate });
+
+    expect(resolved).toMatchObject({
+      completed: false,
+      code: "no-pending-attempt",
+    });
+    expect(resolved.completed === false ? resolved.message : "").toContain(
+      `attempt ${COMPLETING_ATTEMPT} trails in state COMPLETED`,
+    );
+    expect(gate.calls).toEqual([]);
+    expect(eventsOf(fixture)).toHaveLength(2);
+  }, 30_000);
+
+  it("[behavior:#335:B-01] reaches its gate and its stamp through injected seams only", () => {
+    for (const forbidden of [
+      'from "./artifacts.js"',
+      'from "./contract-transaction.js"',
+      'from "./orchestrator.js"',
+      'from "./wave.js"',
+    ]) {
+      expect(MODULE_SOURCE).not.toContain(forbidden);
+    }
+    // The stamp's wording belongs to the stamp's owner, so the literal appears
+    // nowhere here — not even in a comment, which `MODULE_SOURCE` still carries.
+    expect(MODULE_SOURCE).not.toContain("**Lock-Provenance:**");
+    // Both are parameters on the completion's own entry point.
+    expect(MODULE_SOURCE).toContain(
+      "  lockGate: (contractPath: string) => string | null;",
+    );
+    expect(MODULE_SOURCE).toContain("  provenance: string;");
+  });
+});
+
+describe("the one COMPLETED append", () => {
+  it("[behavior:#335:B-02] appends one COMPLETED event and leaves every other field byte-identical", () => {
+    admitPending(fixture, "attempt-appended");
+    writeAcceptedPair(fixture.sliceDir, REPLACEMENT_CONTRACT);
+    const pending = trailingEvent(fixture);
+    const before = stateDocument(fixture);
+    const gate = recordingGate();
+
+    const result = complete(fixture, { lockGate: gate.gate });
+
+    expect(result.completed).toBe(true);
+    const after = stateDocument(fixture);
+    const differing = Object.keys({ ...before, ...after }).filter(
+      (key) => JSON.stringify(before[key]) !== JSON.stringify(after[key]),
+    );
+    expect(differing).toEqual(["recoveryLineage"]);
+    expect(after.scope).toEqual(SCOPE);
+    expect(gate.calls).toEqual([join(fixture.sliceDir, CONTRACT_FILENAME)]);
+
+    const events = eventsOf(fixture);
+    expect(events).toHaveLength(2);
+    expect(events[0]).toEqual(pending);
+    const completed = events[1]!;
+    // Every member is either copied from the PENDING event or is one of the
+    // three the completion records; `recordedAt` is the one new value.
+    expect(completed).toEqual({
+      ...pending,
+      state: "COMPLETED",
+      recordedAt: completed.recordedAt,
+      replacementContractFingerprint: sha256Of(REPLACEMENT_CONTRACT),
+      replacementManifestFingerprint: sha256Of(ACCEPTED_MANIFEST),
+      lockProvenance: PROVENANCE,
+    });
+    expect(completed.attemptId).toBe("attempt-appended");
+    expect(completed.target).toEqual({
+      number: CANONICAL_SLICE_NUMBER,
+      ghIssue: GH_ISSUE,
+    });
+    expect(completed.reason).toBe(request().reason);
+    expect(completed.snapshotPath).toBe(pending.snapshotPath);
+    expect(completed.extensions).toEqual([]);
+    // The replacement really is a different pair from the admitted one, so the
+    // two fingerprint pairs cannot pass by coincidence.
+    expect(completed.replacementContractFingerprint).not.toBe(
+      completed.contractFingerprint,
+    );
+    expect(completed.contractFingerprint).toBe(sha256Of(LOCKED_CONTRACT));
+    expect(result.completed === true ? result.event : undefined).toEqual(
+      completed,
+    );
+    expect(persistedLineage(fixture)).toEqual([...events]);
+  }, 30_000);
+
+  it("[behavior:#335:B-02] takes the run-state lock exactly once, and appends inside it", () => {
+    const body = declarationBody("export function completeRecoveryAttempt(");
+
+    expect(occurrences(body, "transactRunState<")).toBe(1);
+    expect(occurrences(body, "appendRecoveryLineageEvent(")).toBe(1);
+    // One unlocked read to find the attempt, one pair read, and the two rechecks
+    // that make the locked append conditional on the facts it was decided on.
+    expect(occurrences(body, "loadRunState(")).toBe(1);
+    expect(occurrences(body, "readLockedAcceptedPair(")).toBe(1);
+    expect(occurrences(body, "runScopeFingerprint(")).toBe(1);
+    expect(occurrences(body, "isLegalRecoveryTransition(")).toBe(1);
+    // And the append really is inside the transaction body, not beside it.
+    const locked = body.slice(body.indexOf("transactRunState<"));
+    expect(locked).toContain("appendRecoveryLineageEvent(");
+  });
+});
+
+describe("every unsuccessful completion ending", () => {
+  it("[behavior:#335:B-03] holds with ROLLBACK_FAILED when the refusal cannot restore", () => {
+    const attemptDir = admitPending(fixture, "attempt-held");
+    writeAcceptedPair(fixture.sliceDir, REPLACEMENT_CONTRACT);
+    rmSync(join(attemptDir, CONTRACT_FILENAME));
+
+    const result = complete(fixture, { provenance: "  " });
+
+    expect(result).toMatchObject({
+      completed: false,
+      code: "lock-gate-refused",
+      attemptId: "attempt-held",
+    });
+    const rollback = result.completed === false ? result.rollback : undefined;
+    expect(rollback?.rolledBack).toBe(false);
+    const trailing = trailingEvent(fixture);
+    expect(trailing.state).toBe("ROLLBACK_FAILED");
+    expect(trailing.attemptId).toBe("attempt-held");
+    // The hold records #333's own message, not a second one written here.
+    expect(trailing.rollbackError).toBe(
+      rollback?.rolledBack === false ? rollback.message : "",
+    );
+    expect(eventsOf(fixture).some((e) => e.state === "COMPLETED")).toBe(false);
+  }, 30_000);
+
+  it("[behavior:#335:B-03] ends through the rollback writer with completion-cas-lost when scope moved", () => {
+    admitPending(fixture, "attempt-cas");
+    writeAcceptedPair(fixture.sliceDir, REPLACEMENT_CONTRACT);
+    const pending = trailingEvent(fixture);
+
+    // The scope changes after the pair read and before the lock, which is the
+    // only window in which the locked recheck is the thing that catches it.
+    const result = complete(fixture, {
+      beforeLockAcquired: () => reverseScope(fixture),
+    });
+
+    expect(result).toMatchObject({
+      completed: false,
+      code: "facts-changed-before-lock",
+      attemptId: "attempt-cas",
+    });
+    expect(
+      result.completed === false ? result.failure?.trigger : undefined,
+    ).toBe("completion-cas-lost");
+    expect(
+      result.completed === false ? result.rollback?.rolledBack : undefined,
+    ).toBe(true);
+    const events = eventsOf(fixture);
+    expect(events.map((e) => e.state)).toEqual(["PENDING", "ROLLED_BACK"]);
+    expect(events[1]!.attemptId).toBe("attempt-cas");
+    expect(events.some((e) => e.state === "COMPLETED")).toBe(false);
+    const message = result.completed === false ? result.message : "";
+    expect(message).toContain(pending.scopeFingerprint);
+    expect(message).toContain(runScopeFingerprint(REVERSED_SCOPE));
+    // The rollback restored the pair the attempt was admitted with.
+    expect(
+      readFileSync(join(fixture.sliceDir, CONTRACT_FILENAME), "utf-8"),
+    ).toBe(LOCKED_CONTRACT);
+  }, 30_000);
+
+  /**
+   * Shape (c): the trailing event stopped being this attempt's `PENDING` one.
+   *
+   * Both plants land inside the interleave seam, because that is what the shape
+   * *is* — a lineage that changed after the completion read it. Planted before
+   * the call they would be a different claim: the entry read would see them, and
+   * `no-pending-attempt` or an ordinary completion of the newer attempt is the
+   * right answer to that.
+   */
+  const CHANGED_TRAILING_SHAPES: {
+    label: string;
+    plant: (f: Fixture) => void;
+    trailingAttemptId: string;
+    trailingState: string;
+  }[] = [
+    {
+      label: "a ROLLED_BACK event for this attempt",
+      plant: plantRolledBack,
+      trailingAttemptId: COMPLETING_ATTEMPT,
+      trailingState: "ROLLED_BACK",
+    },
+    {
+      label: "a fresh PENDING event for a second attempt",
+      plant: (f) => {
+        plantRolledBack(f);
+        // The second attempt is snapshotted from a *third* pair and the live
+        // pair is put back afterwards, so the pair on disk is byte-identical
+        // across the call while the second attempt's snapshot is not: a writer
+        // that restored it would be visible in the live bytes.
+        const live = readFileSync(join(f.sliceDir, CONTRACT_FILENAME));
+        writeAcceptedPair(f.sliceDir, SECOND_REPLACEMENT_CONTRACT);
+        admitPending(f, "attempt-replaced");
+        writeFileSync(join(f.sliceDir, CONTRACT_FILENAME), live);
+      },
+      trailingAttemptId: "attempt-replaced",
+      trailingState: "PENDING",
+    },
+  ];
+
+  it.each(CHANGED_TRAILING_SHAPES)(
+    "[behavior:#335:B-03] writes nothing at all once the trailing event became $label",
+    (shape) => {
+      admitPending(fixture, COMPLETING_ATTEMPT);
+      writeAcceptedPair(fixture.sliceDir, REPLACEMENT_CONTRACT);
+      let before:
+        | {
+            lineage: PersistedRecoveryLineageEvent[];
+            contract: Buffer;
+            manifest: Buffer;
+            snapshots: Record<string, string>;
+          }
+        | undefined;
+
+      const result = complete(fixture, {
+        beforeLockAcquired: () => {
+          shape.plant(fixture);
+          // Measured after the plant, so "unchanged" means unchanged by the
+          // completion rather than unchanged by the interleave.
+          before = {
+            lineage: [...eventsOf(fixture)],
+            contract: readFileSync(join(fixture.sliceDir, CONTRACT_FILENAME)),
+            manifest: readFileSync(
+              join(fixture.sliceDir, ACCEPTANCE_MANIFEST_FILENAME),
+            ),
+            snapshots: digestTree(
+              join(fixture.sliceDir, RECOVERY_SNAPSHOT_DIRNAME),
+            ),
+          };
+        },
+      });
+
+      expect(result).toMatchObject({
+        completed: false,
+        code: "facts-changed-before-lock",
+        attemptId: COMPLETING_ATTEMPT,
+      });
+      // No delegation: a completion may not roll back an attempt it never
+      // admitted, so neither a failure nor a #333 outcome is reported.
+      expect(result.completed === false ? result.failure : "unset").toBeUndefined();
+      expect(result.completed === false ? result.rollback : "unset").toBeUndefined();
+      const message = result.completed === false ? result.message : "";
+      expect(message).toContain(COMPLETING_ATTEMPT);
+      expect(message).toContain(
+        `attempt ${shape.trailingAttemptId} trails in state ${shape.trailingState}`,
+      );
+      // Event for event, at every index.
+      const after = eventsOf(fixture);
+      expect(after).toHaveLength(before!.lineage.length);
+      before!.lineage.forEach((event, index) => {
+        expect(after[index]).toEqual(event);
+      });
+      expect(after.some((event) => event.state === "COMPLETED")).toBe(false);
+      expect(
+        readFileSync(join(fixture.sliceDir, CONTRACT_FILENAME)).equals(
+          before!.contract,
+        ),
+      ).toBe(true);
+      expect(
+        readFileSync(join(fixture.sliceDir, ACCEPTANCE_MANIFEST_FILENAME)).equals(
+          before!.manifest,
+        ),
+      ).toBe(true);
+      expect(
+        digestTree(join(fixture.sliceDir, RECOVERY_SNAPSHOT_DIRNAME)),
+      ).toEqual(before!.snapshots);
+      // The second attempt kept its one admission event and got no other, and
+      // its snapshot differs from the live pair, so the byte equality above is a
+      // real discriminator rather than a coincidence.
+      const second = after.filter((e) => e.attemptId === "attempt-replaced");
+      if (second.length > 0) {
+        expect(second.map((e) => e.state)).toEqual(["PENDING"]);
+        expect(
+          before!.snapshots[`attempt-replaced/${CONTRACT_FILENAME}`],
+        ).toBe(sha256Of(SECOND_REPLACEMENT_CONTRACT));
+        expect(before!.contract.toString("utf-8")).toBe(REPLACEMENT_CONTRACT);
+      }
+    },
+    30_000,
+  );
+});
+
+describe("holding dispatch when a completed replacement pair drifted", () => {
+  function stateOf(f: Fixture): RunState {
+    return loadRunState(f.repoRoot, PRD_SLUG);
+  }
+
+  it("[behavior:#335:B-04] returns undefined while the completed replacement pair is what is on disk", () => {
+    completeAttempt(fixture);
+
+    expect(
+      recoveryPreDispatchRefusal(stateOf(fixture), GH_ISSUE, fixture.sliceDir),
+    ).toBeUndefined();
+    // A target whose lineage does not end on COMPLETED is not this predicate's
+    // business: that is the sibling predicate's domain, over its own state.
+    expect(
+      recoveryPreDispatchRefusal(stateOf(fixture), "278", fixture.sliceDir),
+    ).toBeUndefined();
+    writeAcceptedPair(fixture.sliceDir, SECOND_REPLACEMENT_CONTRACT);
+    admitPending(fixture, "attempt-open-again");
+    expect(
+      recoveryPreDispatchRefusal(stateOf(fixture), GH_ISSUE, fixture.sliceDir),
+    ).toBeUndefined();
+  }, 30_000);
+
+  it.each([
+    [
+      "a reopened, non-LOCKED pair",
+      (f: Fixture) => reopenAcceptedPair(f),
+      RECOVERY_FINGERPRINT_ABSENT,
+      RECOVERY_FINGERPRINT_ABSENT,
+    ],
+    [
+      "a mutated contract that is still LOCKED",
+      (f: Fixture) =>
+        writeAcceptedPair(
+          f.sliceDir,
+          `${REPLACEMENT_CONTRACT}A line added after the completion.\n`,
+        ),
+      sha256Of(`${REPLACEMENT_CONTRACT}A line added after the completion.\n`),
+      sha256Of(ACCEPTED_MANIFEST),
+    ],
+    [
+      "no pair at all",
+      (f: Fixture) => {
+        rmSync(join(f.sliceDir, CONTRACT_FILENAME));
+        rmSync(join(f.sliceDir, ACCEPTANCE_MANIFEST_FILENAME));
+      },
+      RECOVERY_FINGERPRINT_ABSENT,
+      RECOVERY_FINGERPRINT_ABSENT,
+    ],
+  ])(
+    "[behavior:#335:B-04] refuses fail-closed on %s",
+    (_label, drift, observedContract, observedManifest) => {
+      completeAttempt(fixture);
+      drift(fixture);
+
+      const refusal = recoveryPreDispatchRefusal(
+        stateOf(fixture),
+        GH_ISSUE,
+        fixture.sliceDir,
+      );
+
+      expect(refusal).not.toBeUndefined();
+      expect(refusal!.code).toBe("completed-pair-drifted");
+      expect(refusal!.attemptId).toBe(COMPLETING_ATTEMPT);
+      expect(refusal!.observedContractFingerprint).toBe(observedContract);
+      expect(refusal!.observedManifestFingerprint).toBe(observedManifest);
+      expect(refusal!.message).toContain(COMPLETING_ATTEMPT);
+      expect(refusal!.message).toContain(observedContract);
+      expect(refusal!.message).toContain(observedManifest);
+      expect(refusal!.message).toContain(sha256Of(REPLACEMENT_CONTRACT));
+    },
+    30_000,
+  );
+
+  it("[behavior:#335:B-04] is exported and wired into no dispatch site", () => {
+    expect(MODULE_SOURCE).toContain(
+      [
+        "export function recoveryPreDispatchRefusal(",
+        "  state: RunState,",
+        "  ghIssue: string,",
+        "  sliceDir: string,",
+        "): RecoveryPreDispatchRefusal | undefined {",
+      ].join("\n"),
+    );
+    // No shipped module outside this one names either new export, so no dispatch
+    // site can be calling one (#336's wiring). Tests are excluded because a test
+    // naming an export is what proving it looks like.
+    const consumers = readdirSync("src")
+      .filter((name) => name.endsWith(".ts") && !name.endsWith(".test.ts"))
+      .filter((name) => name !== "preserve-work-recovery.ts")
+      .filter((name) => {
+        const source = sourceOf(name);
+        return ["recoveryPreDispatchRefusal", "completeRecoveryAttempt"].some(
+          (symbol) => source.includes(symbol),
+        );
+      });
+    expect(consumers).toEqual([]);
+    // The dispatch call this refusal will guard is untouched, and the launch
+    // path still imports exactly #334's two reconciliation exports.
+    expect(sourceOf("wave.ts")).toContain("outcome = await runSliceExecute(ctx);");
+    const recoveryImport = sourceOf("orchestrator.ts").match(
+      /import \{([^}]*)\} from "\.\/preserve-work-recovery\.js";/,
+    );
+    expect(
+      recoveryImport?.[1]
+        ?.split(",")
+        .map((name) => name.trim())
+        .filter((name) => name !== "")
+        .sort(),
+    ).toEqual(["describeRecoveryReconciliation", "reconcileRecoveryLineage"]);
+  });
+});
+
+describe("a request that repeats a completed renegotiation", () => {
+  it("[behavior:#335:B-05] answers the exact repeat with the replay no-op and writes nothing", () => {
+    completeAttempt(fixture);
+    const before = {
+      state: readFileSync(fixture.statePath),
+      contract: readFileSync(join(fixture.sliceDir, CONTRACT_FILENAME)),
+      manifest: readFileSync(join(fixture.sliceDir, ACCEPTANCE_MANIFEST_FILENAME)),
+      snapshots: listPublishedPairSnapshots(fixture.sliceDir),
+      tree: digestTree(fixture.sliceDir),
+    };
+    expect(before.snapshots).toEqual([COMPLETING_ATTEMPT]);
+
+    const outcome = admit(fixture, { attemptId: "attempt-never-published" });
+
+    expect(outcome).toEqual({
+      admitted: false,
+      replayed: true,
+      code: "replay-completed-no-op",
+      message: expect.stringContaining(COMPLETING_ATTEMPT),
+      attemptId: COMPLETING_ATTEMPT,
+    });
+    expect(readFileSync(fixture.statePath).equals(before.state)).toBe(true);
+    expect(
+      readFileSync(join(fixture.sliceDir, CONTRACT_FILENAME)).equals(
+        before.contract,
+      ),
+    ).toBe(true);
+    expect(
+      readFileSync(join(fixture.sliceDir, ACCEPTANCE_MANIFEST_FILENAME)).equals(
+        before.manifest,
+      ),
+    ).toBe(true);
+    expect(listPublishedPairSnapshots(fixture.sliceDir)).toEqual(
+      before.snapshots,
+    );
+    expect(digestTree(fixture.sliceDir)).toEqual(before.tree);
+    expect(
+      existsSync(
+        join(
+          fixture.sliceDir,
+          RECOVERY_SNAPSHOT_DIRNAME,
+          "attempt-never-published",
+        ),
+      ),
+    ).toBe(false);
+  }, 30_000);
+
+  it("[behavior:#335:B-10] refuses a repeat that names a different canonical reason", () => {
+    completeAttempt(fixture);
+    const before = {
+      state: readFileSync(fixture.statePath),
+      tree: digestTree(fixture.sliceDir),
+    };
+
+    const outcome = admit(fixture, {
+      request: request(SLICE_NUMBER, "a different reason entirely"),
+      attemptId: "attempt-never-published",
+    });
+
+    expect(outcome.admitted).toBe(false);
+    expect(outcome).toMatchObject({ code: "replay-conflict" });
+    const message = outcome.admitted === false ? outcome.message : "";
+    expect(message).toContain(COMPLETING_ATTEMPT);
+    expect(message).toContain("a different reason entirely");
+    // A conflict is an ordinary refusal, not the replay member.
+    expect(outcome.admitted === false ? outcome.replayed : true).toBeUndefined();
+    expect(readFileSync(fixture.statePath).equals(before.state)).toBe(true);
+    expect(digestTree(fixture.sliceDir)).toEqual(before.tree);
+  }, 30_000);
+
+  it("[behavior:#335:B-10] refuses a repeat whose canonical target is another slice", () => {
+    // A completion recorded on slice 08 (#278) whose replacement pair is the one
+    // now sitting in slice 07's directory. The pair answers "which completion do
+    // I belong to" on its own, so the only thing differing here is the target.
+    admitPending(fixture, "attempt-other-slice");
+    const pending = trailingEvent(fixture);
+    writeAcceptedPair(fixture.sliceDir, REPLACEMENT_CONTRACT);
+    const document = stateDocument(fixture);
+    document.recoveryLineage = {
+      "278": [
+        {
+          ...pending,
+          target: { number: "8", ghIssue: "278" },
+          state: "COMPLETED",
+          replacementContractFingerprint: sha256Of(REPLACEMENT_CONTRACT),
+          replacementManifestFingerprint: sha256Of(ACCEPTED_MANIFEST),
+          lockProvenance: PROVENANCE,
+        },
+      ],
+    };
+    writeFileSync(fixture.statePath, `${JSON.stringify(document, null, 2)}\n`);
+    const before = {
+      state: readFileSync(fixture.statePath),
+      tree: digestTree(fixture.sliceDir),
+    };
+    expect(lineageOfTarget(fixture, "278")).toHaveLength(1);
+
+    const outcome = admit(fixture, { attemptId: "attempt-never-published" });
+
+    expect(outcome.admitted).toBe(false);
+    expect(outcome).toMatchObject({ code: "replay-conflict" });
+    const message = outcome.admitted === false ? outcome.message : "";
+    expect(message).toContain("attempt-other-slice");
+    expect(message).toContain(`#${GH_ISSUE}`);
+    expect(readFileSync(fixture.statePath).equals(before.state)).toBe(true);
+    expect(digestTree(fixture.sliceDir)).toEqual(before.tree);
+  }, 30_000);
+
+  it("[behavior:#335:B-11] admits an ordinary new attempt against a different valid pair", () => {
+    completeAttempt(fixture);
+    const completed = trailingEvent(fixture);
+    // A pair nobody has completed on: this is no replay, so it admits normally.
+    writeAcceptedPair(fixture.sliceDir, SECOND_REPLACEMENT_CONTRACT);
+
+    const outcome = admit(fixture, { attemptId: "attempt-second-round" });
+
+    expect(outcome.admitted).toBe(true);
+    expect(outcome.admitted === true ? outcome.attemptId : "").toBe(
+      "attempt-second-round",
+    );
+    expect("attempt-second-round").not.toBe(completed.attemptId);
+    const events = eventsOf(fixture);
+    expect(events.map((e) => e.state)).toEqual([
+      "PENDING",
+      "COMPLETED",
+      "PENDING",
+    ]);
+    const fresh = events[2]!;
+    expect(fresh.attemptId).toBe("attempt-second-round");
+    expect(fresh.contractFingerprint).toBe(
+      sha256Of(SECOND_REPLACEMENT_CONTRACT),
+    );
+    expect(fresh.snapshotPath).not.toBe(completed.snapshotPath);
+    // The new snapshot directory sits beside the completed attempt's.
+    expect(listPublishedPairSnapshots(fixture.sliceDir).sort()).toEqual(
+      [COMPLETING_ATTEMPT, "attempt-second-round"].sort(),
+    );
+    expect(
+      existsSync(
+        join(
+          fixture.sliceDir,
+          RECOVERY_SNAPSHOT_DIRNAME,
+          "attempt-second-round",
+          CONTRACT_FILENAME,
+        ),
+      ),
+    ).toBe(true);
+  }, 30_000);
+});
+
+describe("what completion and replay must not disturb", () => {
+  it("[behavior:#335:P-01] moves no ref across the completion, replay, refusal and hold paths", () => {
+    const document = stateDocument(fixture);
+    document.resume = { [GH_ISSUE]: { attempts: 2, lastDecision: "resumed" } };
+    writeFileSync(fixture.statePath, `${JSON.stringify(document, null, 2)}\n`);
+    const probes = eligibleProbes();
+    const before = {
+      tips: tips(fixture),
+      graph: git(fixture.repoRoot, "log", "--oneline", "--all"),
+      status: git(fixture.repoRoot, "status", "--porcelain"),
+      branches: git(fixture.repoRoot, "branch", "--list"),
+      worktree: digestTree(fixture.worktreeDir),
+      resume: stateDocument(fixture).resume,
+      slices: stateDocument(fixture).slices,
+    };
+    // The preserved branch really is ahead, so a lost commit would be visible.
+    expect(
+      git(fixture.repoRoot, "rev-list", "--count", `${fixture.featureBranch}..${SLICE_BRANCH}`),
+    ).toBe("1");
+
+    // Path 1: a completion that appends.
+    admitPending(fixture, COMPLETING_ATTEMPT);
+    writeAcceptedPair(fixture.sliceDir, REPLACEMENT_CONTRACT);
+    expect(complete(fixture).completed).toBe(true);
+    // Path 2: the replay no-op, and path 3: the replay conflict.
+    expect(admit(fixture, { probes })).toMatchObject({ replayed: true });
+    expect(
+      admit(fixture, { probes, request: request(SLICE_NUMBER, "another reason") }),
+    ).toMatchObject({ code: "replay-conflict" });
+    // Path 4: the pre-dispatch hold on a drifted pair.
+    reopenAcceptedPair(fixture);
+    expect(
+      recoveryPreDispatchRefusal(
+        loadRunState(fixture.repoRoot, PRD_SLUG),
+        GH_ISSUE,
+        fixture.sliceDir,
+      ),
+    ).not.toBeUndefined();
+    // Path 5: a precondition refusal ending through the rollback writer.
+    writeAcceptedPair(fixture.sliceDir, SECOND_REPLACEMENT_CONTRACT);
+    admitPending(fixture, "attempt-p01-refused");
+    expect(
+      complete(fixture, { lockGate: () => "the gate refused" }),
+    ).toMatchObject({ completed: false, code: "lock-gate-refused" });
+
+    expect(tips(fixture)).toEqual(before.tips);
+    expect(git(fixture.repoRoot, "log", "--oneline", "--all")).toBe(before.graph);
+    expect(git(fixture.repoRoot, "status", "--porcelain")).toBe(before.status);
+    expect(git(fixture.repoRoot, "branch", "--list")).toBe(before.branches);
+    expect(digestTree(fixture.worktreeDir)).toEqual(before.worktree);
+    expect(stateDocument(fixture).resume).toEqual(before.resume);
+    expect(stateDocument(fixture).slices).toEqual(before.slices);
+    expect(
+      git(fixture.repoRoot, "rev-list", "--count", `${fixture.featureBranch}..${SLICE_BRANCH}`),
+    ).toBe("1");
+    // Every git call the admissions made is one of eligibility's three
+    // predicates; the completion path took no probes at all.
+    expect(probes.calls.length).toBeGreaterThan(0);
+    for (const call of probes.calls) {
+      expect(call).toMatch(
+        /^(?:hasUncommittedChanges|countCommitsAhead|isAncestor):/,
+      );
+    }
+    const body = declarationBody("export function completeRecoveryAttempt(");
+    for (const forbidden of ["probes", "resolveCommit(", "git", "worktree"]) {
+      expect(body).not.toContain(forbidden);
+    }
+    expect(MODULE_CODE).not.toMatch(/\b(?:merge|reset|rebase)\b/i);
+  }, 60_000);
+
+  it("[behavior:#335:P-02] calls #333's and #334's writers instead of adding a second one", () => {
+    // The four reused exports, at the signatures they had.
+    expect(MODULE_SOURCE).toContain(
+      "export function restoreAcceptedPairFromSnapshot(args: {",
+    );
+    expect(MODULE_SOURCE).toContain(
+      [
+        "export function rollBackRecoveryAttempt<F extends RecoveryFailure>(",
+        "  args: RollBackRecoveryAttemptArgs<F>,",
+        "): RollBackRecoveryAttemptResult<F> {",
+      ].join("\n"),
+    );
+    expect(MODULE_SOURCE).toContain(
+      [
+        "export function recoveryDispatchRefusal(",
+        "  state: RunState,",
+        "  ghIssue: string,",
+        "): RecoveryDispatchRefusal | undefined {",
+      ].join("\n"),
+    );
+    expect(MODULE_SOURCE).toContain("export function reconcileRecoveryLineage(args: {");
+    // One restore-and-verify implementation (its declaration and the rollback's
+    // one call), one event builder, one append per writer, and no second
+    // rollback: the completion reaches #333's through one call site.
+    expect(occurrences(MODULE_CODE, "restoreAcceptedPairFromSnapshot(")).toBe(2);
+    expect(occurrences(MODULE_CODE, "function nextRecoveryEvent(")).toBe(1);
+    expect(occurrences(MODULE_CODE, "appendRecoveryLineageEvent(")).toBe(3);
+    expect(occurrences(MODULE_CODE, "rollBackRecoveryAttempt(")).toBe(2);
+    expect(occurrences(MODULE_CODE, "function observedPairFingerprints(")).toBe(1);
+
+    // And all four still behave the way #333 and #334 pinned them.
+    const attemptDir = admitPending(fixture, "attempt-p02-reused");
+    const pending = trailingEvent(fixture);
+    reopenAcceptedPair(fixture);
+    expect(restoreFrom(fixture, pending).ok).toBe(true);
+    reopenAcceptedPair(fixture);
+    expect(rollback(fixture).rolledBack).toBe(true);
+    expect(existsSync(attemptDir)).toBe(true);
+    expect(trailingEvent(fixture).state).toBe("ROLLED_BACK");
+    expect(
+      recoveryDispatchRefusal(loadRunState(fixture.repoRoot, PRD_SLUG), GH_ISSUE),
+    ).toBeUndefined();
+    expect(reconcile(fixture)).toEqual([]);
+  }, 30_000);
+
+  it("[behavior:#335:P-03] leaves canonicalization, the one pair reader and the pending refusal alone", () => {
+    expect(
+      canonicalizeRecoveryRequest(
+        { selector: GH_ISSUE, reason: "  the pair went stale  " },
+        SCOPE,
+      ),
+    ).toEqual({
+      ok: true,
+      request: {
+        target: { number: CANONICAL_SLICE_NUMBER, ghIssue: GH_ISSUE },
+        reason: "the pair went stale",
+      },
+    });
+    // Still exactly one accepted-pair reader, and one validator inside it.
+    expect(occurrences(MODULE_CODE, "function readLockedAcceptedPair(")).toBe(1);
+    expect(occurrences(MODULE_CODE, "parseAcceptanceManifest(")).toBe(1);
+    expect(
+      occurrences(MODULE_CODE, "validateAcceptanceManifestCoverage("),
+    ).toBe(1);
+
+    // Execution's outcome on an admitted attempt is unchanged.
+    admitPending(fixture, "attempt-p03");
+    writeSliceFiles(fixture.sliceDir, NEGOTIATION_BYTES);
+    expect(execute(fixture).ok).toBe(true);
+    // An open attempt is still refused before the replay check can see anything.
+    writeAcceptedPair(fixture.sliceDir, REPLACEMENT_CONTRACT);
+    expect(admit(fixture)).toMatchObject({
+      admitted: false,
+      code: "attempt-already-pending",
+    });
+    // And an input that is no replay still admits after the attempt resolves.
+    expect(complete(fixture).completed).toBe(true);
+    writeAcceptedPair(fixture.sliceDir, SECOND_REPLACEMENT_CONTRACT);
+    expect(admit(fixture, { attemptId: "attempt-p03-fresh" })).toMatchObject({
+      admitted: true,
+    });
+  }, 30_000);
+
+  it("[behavior:#335:P-04] leaves #277's entry-point refusal of --renegotiate-stale in force", () => {
+    // Re-pinned from this slice's own file, so `src/cli-options.test.ts` and
+    // `src/cli-entries.test.ts` stay untouched and out of scope. The refusal
+    // itself is a literal in an unedited module: this slice enables no flag.
+    expect(() =>
+      parsePipelineRuntimeOptions([
+        "--renegotiate-stale",
+        SLICE_NUMBER,
+        "--recovery-reason",
+        "the pair went stale",
+      ]),
+    ).toThrow(/--renegotiate-stale is refused until #335 lands/);
+    expect(sourceOf("cli-options.ts")).toContain("is refused until #335 lands");
+    expect(
+      parseStaleRenegotiationRequest([
+        "--renegotiate-stale",
+        SLICE_NUMBER,
+        "--recovery-reason",
+        "  stale  ",
+      ]),
+    ).toEqual({ selector: SLICE_NUMBER, reason: "stale" });
+  });
+
+  it("[behavior:#335:P-05] adds no launch, reporting or status surface, and spawns nothing new", () => {
+    const NEW_SYMBOLS = [
+      "completeRecoveryAttempt",
+      "recoveryPreDispatchRefusal",
+      "replay-completed-no-op",
+      "completed-pair-drifted",
+      "replacementContractFingerprint",
+      "lockProvenance",
+    ];
+    for (const name of [
+      "orchestrator.ts",
+      "wave.ts",
+      "run-events.ts",
+      "run-snapshot.ts",
+      "status.ts",
+      "afk.ts",
+      "afk-claude.ts",
+      "afk-codex.ts",
+    ]) {
+      const source = sourceOf(name);
+      for (const symbol of NEW_SYMBOLS) {
+        expect(source).not.toContain(symbol);
+      }
+    }
+    // No RunEventPayload variant, no run-snapshot field and no status field: the
+    // three modules that would carry one name recovery nowhere at all.
+    for (const name of ["run-events.ts", "run-snapshot.ts", "status.ts"]) {
+      expect(sourceOf(name)).not.toMatch(/recovery/i);
+    }
+    // And this slice's cases prove themselves through exported seams: the file
+    // still has exactly one spawned child, #277 B-08's. The needle is assembled
+    // rather than written out, so this assertion is not its own second match.
+    expect(
+      occurrences(sourceOf("preserve-work-recovery.test.ts"), `spawn${"Sync("}`),
+    ).toBe(1);
+  });
 });
