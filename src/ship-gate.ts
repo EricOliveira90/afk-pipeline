@@ -644,6 +644,18 @@ function isCancelled(error: unknown, signal?: AbortSignal): boolean {
 const defaultRunCommand: ShipCommandRunner = (command, args, options) =>
   execFileSync(command, [...args], options);
 
+/**
+ * A reconciliation decision as the `guardian-issue-reconciliation` event names
+ * it: the decision's imperative becomes the record of what happened (#320).
+ */
+const RECONCILED_ACTIONS = {
+  UPDATE: "UPDATED",
+  CLOSE: "CLOSED",
+  REOPEN: "REOPENED",
+  REFUSE: "REFUSED",
+  UNCHANGED: "UNCHANGED",
+} as const satisfies Record<FindingIssueDecision["action"], string>;
+
 function inlineMarkdown(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
@@ -1286,54 +1298,46 @@ export async function runShipGate(
       journal.event({ type: "warn", reason: "guardian-issue-reconciled", message });
     }
   }
-  {
-    const failedByRecord = new Map(
-      reconciled.failed.map(({ decision, error }) => [decision.record, error]),
-    );
-    const journalDecision = (decision: FindingIssueDecision) => {
-      const error = failedByRecord.get(decision.record);
-      const past = {
-        UPDATE: "UPDATED",
-        CLOSE: "CLOSED",
-        REOPEN: "REOPENED",
-        REFUSE: "REFUSED",
-        UNCHANGED: "UNCHANGED",
-      } as const;
-      const action = error ? "FAILED" : past[decision.action];
-      const detail = error
-        ? `the issue tracker call failed: ${error}. The issue is unchanged — ${decision.reason}`
-        : decision.reason;
-      const { guardian, stableId, kind, issue } = decision.record;
-      journal.event({
-        type: "guardian-issue-reconciliation",
-        guardian,
-        stableId,
-        issue,
-        kind,
-        round: decision.matched?.round ?? decision.record.round,
-        action,
-        ...(decision.refusal ? { refusal: decision.refusal } : {}),
-        detail,
-      });
-      if (action === "REFUSED" || action === "FAILED") {
-        journal.phase(
-          `  ⚠️  Left ${issue} open — ${guardian === "pm" ? "PM" : "architect"} finding ` +
-            `${stableId}: ${detail}`,
-          "warn",
-        );
-      } else if (action !== "UNCHANGED") {
-        journal.phase(
-          `  📝 ${action.toLowerCase()} ${issue} — ${guardian === "pm" ? "PM" : "architect"} ` +
-            `finding ${stableId}: ${decision.reason}`,
-          "log",
-        );
-      }
-    };
-    for (const decision of [
-      ...reconciliation.close,
-      ...unresolvedGuardianIssueDecisions(reconciliation),
-    ]) {
-      journalDecision(decision);
+  // One event per filed issue per pass, in the past tense: what happened, not
+  // what was decided. The run summary and the terminal handoff both project
+  // their remaining-defect count from this stream, so a decision whose `gh` call
+  // failed has to read as `FAILED` — the issue is still exactly as the previous
+  // pass left it.
+  const failedReconciliations = new Map(
+    reconciled.failed.map(({ decision, error }) => [decision.record, error]),
+  );
+  for (const decision of [
+    ...reconciliation.close,
+    ...unresolvedGuardianIssueDecisions(reconciliation),
+  ]) {
+    const error = failedReconciliations.get(decision.record);
+    const action = error ? "FAILED" : RECONCILED_ACTIONS[decision.action];
+    const detail = error
+      ? `the issue tracker call failed: ${error}. The issue is unchanged — ${decision.reason}`
+      : decision.reason;
+    const { guardian, stableId, kind, issue } = decision.record;
+    const label = guardian === "pm" ? "PM" : "architect";
+    journal.event({
+      type: "guardian-issue-reconciliation",
+      guardian,
+      stableId,
+      issue,
+      kind,
+      round: decision.matched?.round ?? decision.record.round,
+      action,
+      ...(decision.refusal ? { refusal: decision.refusal } : {}),
+      detail,
+    });
+    if (action === "REFUSED" || action === "FAILED") {
+      journal.phase(
+        `  ⚠️  Left ${issue} open — ${label} finding ${stableId}: ${detail}`,
+        "warn",
+      );
+    } else if (action !== "UNCHANGED") {
+      journal.phase(
+        `  📝 ${action.toLowerCase()} ${issue} — ${label} finding ${stableId}: ${decision.reason}`,
+        "log",
+      );
     }
   }
 
