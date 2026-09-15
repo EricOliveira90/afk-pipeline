@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { AgentProvider } from "./agent-provider.js";
-import type { AcceptanceManifestV2 } from "./acceptance-manifest.js";
+import {
+  ACCEPTANCE_MANIFEST_FILENAME,
+  type AcceptanceManifestV2,
+} from "./acceptance-manifest.js";
 import type { RunEventPayload } from "./run-events.js";
 import {
   CANDIDATE_EVALUATOR_CONTEXT_MANIFEST,
@@ -11,6 +14,7 @@ import {
   GENERATOR_CONTEXT_MANIFEST,
   MERGE_RESOLUTION_SITUATION_SECTION,
   PLANNER_CONTEXT_MANIFEST,
+  SELF_AUDIT_CONTEXT_MANIFEST,
   assembleContractEvaluatorInitialEnvelope,
   assembleContractEvaluatorRevisionEnvelope,
   assembleContextEnvelope,
@@ -18,6 +22,7 @@ import {
   assembleGeneratorEnvelope,
   assemblePlannerInitialEnvelope,
   assemblePlannerRevisionEnvelope,
+  assembleSelfAuditEnvelope,
   boundRepairSituationCommitLog,
   buildExplorerRepositoryContext,
   projectContractEvaluatorEvidence,
@@ -2408,6 +2413,9 @@ describe("role contract manifests", () => {
     FINAL_EVALUATOR_CONTEXT_MANIFEST,
     CLEANER_CONTEXT_MANIFEST,
     GENERATOR_CONTEXT_MANIFEST,
+    // [behavior:#299:B-04] The audit manifest is held to the same complete
+    // role contract as every other registered role, not to a weaker one.
+    SELF_AUDIT_CONTEXT_MANIFEST,
   ];
 
   it("every registered manifest satisfies the complete role-contract schema", () => {
@@ -3305,5 +3313,151 @@ describe("[behavior:#87:B-12] the cleaner role contract", () => {
     expect(() =>
       renderPrompt("cleaner", { ...CLEANER_PROMPT_ARGS, TEST_COMMAND: "x" }),
     ).toThrow(/does not reference it/);
+  });
+});
+
+/**
+ * The generator self-audit envelope (#299, ADR 0069).
+ *
+ * Four inputs in one fixed order, three of which travel as paths into the
+ * audit's own worktree (ADR 0068) and one — the change summary — inlined,
+ * which is what makes the budget cases below reachable from real inputs.
+ */
+describe("the generator self-audit envelope", () => {
+  const sliceDir = ".kiro/specs/generator-self-audit-gate/slices/01-audit";
+  const candidateTreeId = "4d1e0a9f".repeat(5);
+  const contractPath = `${sliceDir}/contract.md`;
+  const acceptancePath = `${sliceDir}/${ACCEPTANCE_MANIFEST_FILENAME}`;
+  const handoffPath = `${sliceDir}/handoff.md`;
+  const changeSummary = [
+    `commit ${"a".repeat(40)}`,
+    "",
+    "    feat(self-audit): bounded audit stage (#299)",
+    "",
+    " src/self-audit.ts | 250 ++++++++++++",
+  ].join("\n");
+  const smallInput = { sliceDir, candidateTreeId, changeSummary };
+  /** A summary alone larger than the standard budget. */
+  const oversizedInput = {
+    ...smallInput,
+    changeSummary: `${changeSummary}\n${"o".repeat(70_000)}`,
+  };
+  const declaredOrder = [
+    "locked-contract",
+    "acceptance-manifest",
+    "candidate-handoff",
+    "change-summary",
+  ];
+  /** The four locators the assembler wires, in the manifest's declared order. */
+  const wiredArtifacts = [
+    {
+      artifactClass: "locked-contract",
+      artifactId: contractPath,
+      locator: `\`${contractPath}\``,
+    },
+    {
+      artifactClass: "acceptance-manifest",
+      artifactId: acceptancePath,
+      locator: `\`${acceptancePath}\``,
+    },
+    {
+      artifactClass: "candidate-handoff",
+      artifactId: handoffPath,
+      locator: `\`${handoffPath}\``,
+    },
+    {
+      artifactClass: "change-summary",
+      artifactId: `candidate:${candidateTreeId}:change-summary`,
+      locator: changeSummary,
+    },
+  ];
+
+  it("[behavior:#299:B-04] declares the complete role contract at the standard budget", () => {
+    expect(() =>
+      validateContextEnvelopeManifest(SELF_AUDIT_CONTEXT_MANIFEST),
+    ).not.toThrow();
+    const auditRole: PromptAssemblyRole = "generator-audit";
+    expect(SELF_AUDIT_CONTEXT_MANIFEST.role).toBe(auditRole);
+    // The standard budget every other role manifest declares, not a bespoke
+    // one: the audit reads the same class of inputs as the round that wrote
+    // the candidate.
+    expect(SELF_AUDIT_CONTEXT_MANIFEST.inlineSizeBudgetBytes).toBe(65_536);
+    expect(GENERATOR_CONTEXT_MANIFEST.inlineSizeBudgetBytes).toBe(65_536);
+    // The contract leads — it is the boundary the audit measures the tree
+    // against — and what the round did comes last.
+    expect(SELF_AUDIT_CONTEXT_MANIFEST.inputOrder).toEqual(declaredOrder);
+    // No accepted class without a slot, and no slot without a class: an input
+    // the manifest accepts but cannot order would fail closed at assembly.
+    expect(SELF_AUDIT_CONTEXT_MANIFEST.acceptedInputArtifactClasses).toEqual(
+      declaredOrder,
+    );
+    // The write scope is the audit's own worktree and nothing wider.
+    expect(String(SELF_AUDIT_CONTEXT_MANIFEST.allowedWriteScope)).toMatch(
+      /worktree/,
+    );
+    expect(String(SELF_AUDIT_CONTEXT_MANIFEST.allowedWriteScope)).toMatch(
+      /file scope/,
+    );
+  });
+
+  it("[behavior:#299:B-05] assembles the four inputs in order and fails closed otherwise", () => {
+    const assembled = assembleSelfAuditEnvelope(smallInput);
+
+    expect(assembled.evidence.includedArtifactClasses).toEqual(declaredOrder);
+    expect(assembled.evidence.includedArtifactIds).toEqual([
+      contractPath,
+      acceptancePath,
+      handoffPath,
+      `candidate:${candidateTreeId}:change-summary`,
+    ]);
+    expect(assembled.evidence.role).toBe("generator-audit");
+    expect(assembled.evidence.contextManifestVersion).toBe(
+      SELF_AUDIT_CONTEXT_MANIFEST.version,
+    );
+    // The genuine template renders the blocks in that order for real.
+    expect(assembled.prompt.indexOf(`\`${contractPath}\``)).toBeLessThan(
+      assembled.prompt.indexOf(changeSummary),
+    );
+
+    // Blocks rendered out of the declared order fail closed before any
+    // evidence is returned — the same locators, a prompt that leads with what
+    // the round did instead of the boundary it is held to.
+    expect(() =>
+      assembleContextEnvelope({
+        prompt: [
+          changeSummary,
+          `\`${contractPath}\``,
+          `\`${acceptancePath}\``,
+          `\`${handoffPath}\``,
+        ].join("\n\n"),
+        manifest: SELF_AUDIT_CONTEXT_MANIFEST,
+        includedArtifacts: wiredArtifacts,
+        roleLabel: "Generator audit",
+      }),
+    ).toThrow(/violating the manifest's declared input order/);
+
+    // And an assembly over the effective budget throws rather than dispatching
+    // a truncated envelope.
+    expect(() => assembleSelfAuditEnvelope(oversizedInput)).toThrow(
+      /exceeds inline-size budget/,
+    );
+  });
+
+  it("[behavior:#299:B-06] clamps a wider budget override and honors a stricter one", () => {
+    // A project may only tighten the manifest budget. Handing the assembler
+    // four times the ceiling does not raise it.
+    expect(() =>
+      assembleSelfAuditEnvelope({
+        ...oversizedInput,
+        inlineSizeBudgetBytes: 65_536 * 4,
+      }),
+    ).toThrow(/allowed 65536 bytes/);
+
+    // The stricter direction is real, not decorative: a few hundred bytes
+    // refuses a prompt the manifest budget accepts.
+    expect(() =>
+      assembleSelfAuditEnvelope({ ...smallInput, inlineSizeBudgetBytes: 400 }),
+    ).toThrow(/allowed 400 bytes/);
+    expect(() => assembleSelfAuditEnvelope(smallInput)).not.toThrow();
   });
 });
