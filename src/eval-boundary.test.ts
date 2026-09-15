@@ -122,9 +122,12 @@ describe("the eval harness is a leaf", () => {
     }
 
     expect(offenders).toEqual([]);
-    // An eval run writes no event and no state, so neither schema moved.
+    // An eval run writes no event and no state, so neither schema moved *here*.
+    // The literals are pins on what the eval boundary did not do, refreshed by
+    // whichever slice legitimately moves a schema — #301 B-06 moved run state to
+    // 8 for `PersistedSelfAuditOutcome.runId`; the events schema has not moved.
     expect(EVENTS_SCHEMA_VERSION).toBe(1);
-    expect(RUN_STATE_VERSION).toBe(7);
+    expect(RUN_STATE_VERSION).toBe(8);
   });
 
   it("P-02 consumes the six production parsers and re-implements none", () => {

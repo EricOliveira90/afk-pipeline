@@ -986,12 +986,13 @@ describe("[behavior:#87:B-14] persisted quality stages", () => {
   const REPO_ISSUE = "87";
 
   it("[behavior:#87:B-14] pins the written schema at the current version and keeps the older ones assignable", () => {
-    // 5 -> 6 for `qualityStages`, then 6 -> 7 for `selfAudits` (#299 B-10).
+    // 5 -> 6 for `qualityStages`, 6 -> 7 for `selfAudits` (#299 B-10), then
+    // 7 -> 8 for the `runId` those entries now carry (#301 B-06).
     // `RunState.version` still admits every earlier version so a caller or
     // fixture holding an older record keeps compiling, and nothing reads one of
     // those back out of a loaded state.
-    expect(RUN_STATE_VERSION).toBe(7);
-    const older: RunState["version"][] = [3, 4, 5, 6, 7];
+    expect(RUN_STATE_VERSION).toBe(8);
+    const older: RunState["version"][] = [3, 4, 5, 6, 7, 8];
     expect(older).toContain(RUN_STATE_VERSION);
   });
 
@@ -1181,8 +1182,10 @@ describe("[behavior:#87:B-14] persisted quality stages", () => {
 describe("persisted self-audit outcomes", () => {
   const REPO_ISSUE = "299";
   const releasedTree = "d".repeat(40);
+  /** A run directory's name (ADR 0017) — the provenance a v8 entry carries. */
+  const RUN_ID = "20260915-120000-abcdef";
 
-  it("[behavior:#299:B-10] round-trips an AUDIT_UNCHANGED outcome at schema 7", () => {
+  it("[behavior:#299:B-10] [behavior:#301:B-06] round-trips an AUDIT_UNCHANGED outcome at schema 8", () => {
     const repo = makeRepo();
     saveRunState(repo, {
       version: RUN_STATE_VERSION,
@@ -1195,24 +1198,30 @@ describe("persisted self-audit outcomes", () => {
       candidateTreeId: releasedTree,
       auditedTreeId: releasedTree,
       verdict: "AUDIT_UNCHANGED",
+      runId: RUN_ID,
     });
 
     const loaded = loadRunState(repo, "demo");
-    // The bump is unconditional, for the same reason v6's was: "no audit ran"
-    // and "this file predates audits" are the same fact to every reader.
-    expect(loaded.version).toBe(7);
-    expect(RUN_STATE_VERSION).toBe(7);
+    // The bump is unconditional, for the same reason v6's and v7's were: "no
+    // audit ran" and "this file predates audits" are the same fact to every
+    // reader, and so are "this entry has no provenance" and "this entry predates
+    // provenance" (#301 B-06).
+    expect(loaded.version).toBe(8);
+    expect(RUN_STATE_VERSION).toBe(8);
     expect(selfAuditsFor(loaded, REPO_ISSUE)).toEqual([
       {
         candidateTreeId: releasedTree,
         auditedTreeId: releasedTree,
         verdict: "AUDIT_UNCHANGED",
+        runId: RUN_ID,
       },
     ]);
-    // Both tree ids are persisted, so the verdict is checkable after the fact
-    // from run state alone rather than trusted as a narrative (ADR 0069).
+    // Both tree ids and the run that spent the invocation are persisted, so the
+    // verdict is checkable after the fact from run state alone rather than
+    // trusted as a narrative (ADR 0069).
     const entry = selfAuditsFor(loaded, REPO_ISSUE)[0]!;
     expect(entry.auditedTreeId).toBe(entry.candidateTreeId);
+    expect(entry.runId).toBe(RUN_ID);
     // Another slice's audit is another key: the list is per GitHub issue.
     expect(selfAuditsFor(loaded, "300")).toEqual([]);
   });
@@ -1296,16 +1305,185 @@ describe("persisted self-audit outcomes", () => {
       candidateTreeId: releasedTree,
       auditedTreeId: releasedTree,
       verdict: "AUDIT_UNCHANGED",
+      runId: RUN_ID,
     });
     const rewritten = JSON.parse(readFileSync(statePath, "utf8")) as {
       version: number;
       qualityStages: unknown;
     };
-    expect(rewritten.version).toBe(7);
+    expect(rewritten.version).toBe(8);
     expect(rewritten.qualityStages).toEqual(v6.qualityStages);
     expect(selfAuditsFor(loadRunState(repo, "demo"), REPO_ISSUE)).toHaveLength(
       1,
     );
+  });
+
+  /**
+   * v8's one widening (#301 B-06): every entry names the run that spent the
+   * invocation. An entry without a usable one is malformed, and degrades exactly
+   * as a blank tree id already does — the whole issue's list, not that entry.
+   */
+  it("[behavior:#301:B-06] drops an issue's whole list when any entry has no usable runId", () => {
+    /** A file whose one `selfAudits` entry is `entry`, plus a v7 neighbour. */
+    const withEntry = (entry: unknown): Record<string, unknown> => ({
+      version: 7,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      slices: { [REPO_ISSUE]: { phase: "PASS", branch: "afk/demo-01" } },
+      qualityStages: {
+        [REPO_ISSUE]: [
+          { stage: "cleaner", enabled: true, rounds: [], outcome: "PASS" },
+        ],
+      },
+      selfAudits: { [REPO_ISSUE]: [entry] },
+    });
+
+    const malformed: Array<[string, unknown]> = [
+      // A pre-v8 entry: provenance was never written, so it cannot be read.
+      [
+        "runId absent",
+        {
+          candidateTreeId: releasedTree,
+          auditedTreeId: releasedTree,
+          verdict: "AUDIT_UNCHANGED",
+        },
+      ],
+      [
+        "runId blank",
+        {
+          candidateTreeId: releasedTree,
+          auditedTreeId: releasedTree,
+          verdict: "AUDIT_UNCHANGED",
+          runId: "   ",
+        },
+      ],
+      // Asserted alongside the pre-existing check, so a sanitizer rewritten to
+      // discard per entry rather than per issue fails on both at once.
+      [
+        "candidateTreeId blank",
+        {
+          candidateTreeId: " ",
+          auditedTreeId: releasedTree,
+          verdict: "AUDIT_UNCHANGED",
+          runId: RUN_ID,
+        },
+      ],
+    ];
+
+    for (const [label, entry] of malformed) {
+      const file = withEntry(entry);
+      const loaded = adaptLoadedState(file, "demo");
+
+      expect(selfAuditsFor(loaded, REPO_ISSUE), label).toEqual([]);
+      // The whole issue key is gone, not an empty array left behind: a reader
+      // asking "did this issue's audits get recorded?" gets "no", not "yes, none".
+      expect(loaded.selfAudits?.[REPO_ISSUE], label).toBeUndefined();
+      // Nothing else is discarded along with it.
+      expect(loaded.version, label).toBe(RUN_STATE_VERSION);
+      expect(loaded.slices, label).toEqual(file.slices);
+      expect(loaded.qualityStages, label).toEqual(file.qualityStages);
+    }
+
+    // A v8-shaped entry beside them survives, so the drop is about the entry and
+    // not about the member.
+    const good = adaptLoadedState(
+      withEntry({
+        candidateTreeId: releasedTree,
+        auditedTreeId: releasedTree,
+        verdict: "AUDIT_UNCHANGED",
+        runId: RUN_ID,
+      }),
+      "demo",
+    );
+    expect(selfAuditsFor(good, REPO_ISSUE)).toEqual([
+      {
+        candidateTreeId: releasedTree,
+        auditedTreeId: releasedTree,
+        verdict: "AUDIT_UNCHANGED",
+        runId: RUN_ID,
+      },
+    ]);
+  });
+
+  it("[behavior:#301:P-04] adapts v3, v6 and v7 files in memory and writes version 8 with no selfAudits member", () => {
+    const common = {
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      slices: { [REPO_ISSUE]: { phase: "PASS", branch: "afk/demo-01" } },
+      approvedBaselines: {
+        [REPO_ISSUE]: {
+          treeId: "a".repeat(40),
+          commit: "b".repeat(40),
+          artifactPath: ".afk/baselines/299.json",
+        },
+      },
+      appliedWaivers: {
+        [REPO_ISSUE]: [
+          {
+            riskClass: "deleted-test",
+            path: "src/legacy.test.ts",
+            author: "operator",
+            reason: "superseded",
+          },
+        ],
+      },
+      finalEvaluations: {
+        [REPO_ISSUE]: {
+          decision: "reuse",
+          finalTreeId: "c".repeat(40),
+          attempts: [
+            {
+              attempt: 1,
+              candidateTreeId: "c".repeat(40),
+              verdict: "PASS",
+              outcome: "GRADED",
+            },
+          ],
+          invalidatedCandidateTreeIds: [],
+        },
+      },
+      qualityStages: {
+        [REPO_ISSUE]: [
+          { stage: "cleaner", enabled: true, rounds: [], outcome: "PASS" },
+        ],
+      },
+    };
+
+    for (const version of [3, 6, 7]) {
+      const loaded = adaptLoadedState({ version, ...common }, "demo");
+
+      expect(loaded.version, String(version)).toBe(8);
+      expect(loaded.slices, String(version)).toEqual(common.slices);
+      expect(loaded.approvedBaselines, String(version)).toEqual(
+        common.approvedBaselines,
+      );
+      expect(loaded.appliedWaivers, String(version)).toEqual(
+        common.appliedWaivers,
+      );
+      expect(loaded.finalEvaluations, String(version)).toEqual(
+        common.finalEvaluations,
+      );
+      expect(loaded.qualityStages, String(version)).toEqual(
+        common.qualityStages,
+      );
+      // No audit ran in any of them, and the adaptation does not invent one.
+      expect(loaded.selfAudits, String(version)).toBeUndefined();
+    }
+
+    // And a run that dispatches no audit writes the new version with no
+    // `selfAudits` key at all — which is exactly why the bump is unconditional.
+    const repo = makeRepo();
+    saveRunState(repo, {
+      version: RUN_STATE_VERSION,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      slices: {},
+    });
+    const onDisk = JSON.parse(
+      readFileSync(join(repo, ".afk", "state", "demo.json"), "utf8"),
+    ) as Record<string, unknown>;
+    expect(onDisk.version).toBe(8);
+    expect("selfAudits" in onDisk).toBe(false);
   });
 });
 

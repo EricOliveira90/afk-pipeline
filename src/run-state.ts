@@ -51,8 +51,10 @@ export interface PersistedSliceState {
  * both keyed by GitHub issue and both optional: the per-slice approved baseline
  * locator below (#91) and `appliedWaivers` (#193). v5 adds a third of the same
  * shape, `finalEvaluations` (#96 B-02/B-09). v6 adds a fourth, `qualityStages`
- * (#87 B-14). v7 adds a fifth, `selfAudits` (#299 B-10).
- * `adaptLoadedState` normalizes a v3, v4, v5 or v6 file to it in memory,
+ * (#87 B-14). v7 adds a fifth, `selfAudits` (#299 B-10). v8 adds no member: it
+ * widens one, `PersistedSelfAuditOutcome.runId` (#301 B-06), so an audit outcome
+ * names the run that spent the invocation.
+ * `adaptLoadedState` normalizes a v3, v4, v5, v6 or v7 file to it in memory,
  * so a resumed run reads one shape, and `writeRunState` stamps it on every write
  * so a stale caller literal can never reach disk.
  *
@@ -63,12 +65,15 @@ export interface PersistedSliceState {
  * (#87 P-01). The v7 bump is unconditional for exactly that reason: a run
  * launched without `--self-audit` persists version `7` with no `selfAudits`
  * member, because "no audit ran" and "this file predates audits" are the same
- * fact to every reader (#299 B-10).
+ * fact to every reader (#299 B-10). The v8 bump is unconditional for exactly
+ * that reason once more: without it, a v7 file whose `selfAudits` entries predate
+ * run-ID provenance and a file whose entries carry it are indistinguishable to
+ * every reader (#301 B-06).
  *
  * Exported because it is the one number a reader has to compare against, and a
  * duplicated literal is how two modules disagree about what "current" means.
  */
-export const RUN_STATE_VERSION = 7;
+export const RUN_STATE_VERSION = 8;
 
 /**
  * Where one slice's approved baseline artifact is, and which candidate it
@@ -255,7 +260,7 @@ export interface RunState {
    * keep compiling, and nothing reads a `3`, `4` or `5` back out of a loaded
    * state.
    */
-  version: 3 | 4 | 5 | 6 | 7;
+  version: 3 | 4 | 5 | 6 | 7 | 8;
   prdSlug: string;
   featureBranch: string;
   /**
@@ -364,6 +369,11 @@ export type PersistedSelfAuditVerdict =
  * redundancy. `auditedTreeId` is absent when there is nothing honest to record
  * there: an invocation that never ran, or one whose post-audit tree could not
  * be resolved.
+ *
+ * `runId` is v8's addition (#301 B-06): the run directory name (ADR 0017) of the
+ * run that spent the invocation. Required rather than optional, because the
+ * question a resumed run asks of this entry — "was this audit already spent, and
+ * by whom?" — has no honest answer from an entry that names no run.
  */
 export interface PersistedSelfAuditOutcome {
   /** The candidate tree the audit was handed. */
@@ -371,6 +381,8 @@ export interface PersistedSelfAuditOutcome {
   /** The tree the audit left behind, when it could be resolved. */
   auditedTreeId?: string;
   verdict: PersistedSelfAuditVerdict;
+  /** The run that spent this invocation — the run directory's name (ADR 0017). */
+  runId: string;
 }
 
 /**
@@ -1061,6 +1073,10 @@ function sanitizeSelfAudits(
       >;
       if (
         !nonblank(entry.candidateTreeId) ||
+        // v8's requirement, joining the same condition rather than getting a
+        // rule of its own (#301 B-06): a pre-v8 entry names no run, so it
+        // degrades the whole issue's list exactly as a blank tree id does.
+        !nonblank(entry.runId) ||
         !VERDICTS.has(entry.verdict as string) ||
         (entry.auditedTreeId !== undefined && !nonblank(entry.auditedTreeId))
       ) {
@@ -1073,6 +1089,7 @@ function sanitizeSelfAudits(
           ? { auditedTreeId: entry.auditedTreeId as string }
           : {}),
         verdict: entry.verdict as PersistedSelfAuditVerdict,
+        runId: entry.runId,
       });
     }
     if (dropped || entries.length === 0) continue;
@@ -1126,8 +1143,11 @@ export function recordSelfAuditOutcome(
  * evaluation, because it had none. v6 adds `qualityStages` (#87) the same way
  * again: a v5 file with no such member reads as "no stage ran" and the adapter
  * writes nothing. v7 adds `selfAudits` (#299) the same way once more: a v6 file
- * reads as "no audit ran". Throws on unknown status strings rather than
- * silently producing an invalid record.
+ * reads as "no audit ran". v8 adds no member at all — it requires `runId` on each
+ * `selfAudits` entry (#301), so a v7 entry that predates provenance is malformed
+ * to the sanitizer and degrades its issue's whole list to absent, which costs a
+ * resumed run at most one re-dispatched audit. Throws on unknown status strings
+ * rather than silently producing an invalid record.
  */
 export function loadRunState(repoRoot: string, prdSlug: string): RunState {
   const p = statePath(repoRoot, prdSlug);
@@ -1181,7 +1201,8 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     r.version === 4 ||
     r.version === 5 ||
     r.version === 6 ||
-    r.version === 7
+    r.version === 7 ||
+    r.version === 8
   ) {
     const slices: Record<string, PersistedSliceState> = {};
     for (const [id, val] of Object.entries(slicesIn)) {
