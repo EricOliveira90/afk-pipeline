@@ -696,10 +696,14 @@ export function runPreShipSanity(
       failures.push(step.name);
       // `||`, not `??`: a step whose streams went to the log file reports no
       // captured output, and an empty string must fall through to the file.
+      //
+      // Ten lines, not five: a red vitest run ends with its `FAIL <file> >
+      // <test>` block, then four summary lines, then pnpm's own `ELIFECYCLE`,
+      // and a shorter tail reaches only the trailer. `outputTail` truncates from
+      // the end, so the earliest — most diagnostic — lines are the ones kept.
       const tail = outputTail(
         result.output || (logPath ? readLogTail(logPath) : ""),
-        3,
-        300,
+        10,
       );
       details.push(
         `${step.name} failed (exit ${result.exitCode})` +
