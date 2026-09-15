@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "round": 2,
+  "responses": [
+    {
+      "findingId": "F-01",
+      "position": "CONDITION_MET",
+      "evidence": "B-03 now states the guard in terms of the locator's real shape: a `snapshotPath` is accepted only as `<sliceDir>/recovery-snapshots/<attemptId>` — at least three `/` segments, every segment non-empty and neither `.` nor `..`, penultimate segment equal to `RECOVERY_SNAPSHOT_DIRNAME` (`recovery-snapshots`, src/preserve-work-recovery.ts:86, the same constant publishAcceptedPairSnapshot uses at :519-520,569), and therefore a non-empty derived `<sliceDir>`. Every other locator restores nothing and appends nothing, and B-03 names the two-segment `recovery-snapshots/<attemptId>` explicitly as rejected because its grandparent is empty and the destination would collapse onto repoRoot. The B-03 manifest scenario now plants a `contract.md` and `acceptance-manifest.json` of known bytes at the repository root and sweeps four locators (well-formed, two-segment, wrong penultimate segment, single-segment); its observableResult asserts the repository-root pair is byte-identical afterwards and that each rejection message names both the rejected locator and the derived destination that caused it, so the two-segment case is bound for the derived-destination reason rather than for segment count. B-07's observableResult also lists the repository-root pair among the files asserted unchanged."
+    },
+    {
+      "findingId": "F-02",
+      "position": "CONDITION_MET",
+      "evidence": "B-02's manifest scenario now binds three targets, including a trailing-`PENDING` target whose snapshot `contract.md` was deleted so the restore must fail. Its `then` requires exactly one appended `ROLLBACK_FAILED` event for that same `attemptId` carrying the restore failure message as `rollbackError` plus `observedContractFingerprint` and `observedManifestFingerprint` read off disk (absent file recorded as #333's explicit absent marker, never a blank), and its observableResult asserts each of those three fields by name and value under the test name `[behavior:#334:B-02]`, which `acceptance:behaviors` selects. The contract's B-02 statement now also declares both append branches as obligations of that ID and cites src/run-state.ts:284-341 for the ROLLBACK_FAILED-only fields, and the test plan bullet for the deleted-snapshot case now demands exactly one appended event for the same attemptId. An implementation that never appends a ROLLBACK_FAILED, or appends it without those fields, now fails a declared observable."
+    },
+    {
+      "findingId": "F-03",
+      "position": "CONDITION_MET",
+      "evidence": "B-05 now fixes the named retry per outcome family: relaunch for `ROLLED_BACK` (P-03's terminal-lineage path then runs the launch normally); repair the named snapshot directory so its pair again reads as a valid LOCKED pair matching the event's recorded fingerprints, then relaunch, for a `ROLLBACK_FAILED` appended this launch, which retries under `ROLLBACK_FAILED -> ROLLED_BACK`; and for the append-nothing outcomes (a trailing `ROLLBACK_FAILED` whose retry failed again, and a rejected locator) an explicit statement that the hold is intentionally terminal until #335's completion path, naming the run-state file and the `attemptId`, naming the snapshot repair for the retry-failed case and the unusable recorded `snapshotPath` for the rejected-locator case, and saying a relaunch alone will report the same target and stop again. The B-05 manifest scenario exercises the fixture once per outcome family and its observableResult asserts each line's outcome-specific retry content, and a test-plan bullet plus a Definition-of-done bullet now carry the same per-outcome obligation."
+    }
+  ]
+}

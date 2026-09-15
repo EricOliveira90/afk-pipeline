@@ -1,0 +1,34 @@
+{
+  "version": 2,
+  "verdict": "PASS",
+  "failureClass": "NONE",
+  "infrastructureEvidence": null,
+  "findings": [
+    {
+      "id": "QA-01",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-05"],
+      "summary": "The append-nothing operator line hard-codes the \"retry failed again\" cause, so a lock-race refusal from rollBackRecoveryAttempt is reported to the operator as a snapshot-repair problem it is not.",
+      "evidence": "src/preserve-work-recovery.ts reconcileRecoveryLineage records `appended: result.event?.state === \"ROLLBACK_FAILED\" ? \"ROLLBACK_FAILED\" : \"none\"` with `locatorRejected: false` for every non-rejected outcome. rollBackRecoveryAttempt (src/preserve-work-recovery.ts:1377-1384, :1418-1422) can also return `rolledBack: false` with no event under codes `no-pending-attempt` and `facts-changed-before-lock`. describeRecoveryReconciliation then takes the `locatorRejected === false` branch and emits `the retry failed again (<message>), so the existing hold stays in force. A human must repair the snapshot directory <snapshotDir> ...`. Confirmed by reading the two branches; the observed real-path text for a genuine re-failed retry is in the passing integration run.log line for #5003 (`pnpm vitest run src/resume-integration.test.ts`, 32 passed).",
+      "expected": "B-05 fixes the retry per outcome family so the line's promised content is derivable; the two append-nothing families it enumerates are a re-failed ROLLBACK_FAILED retry and a rejected locator.",
+      "observed": "A third, narrower append-nothing cause — the lineage drifting between the restore and the run-state lock, or the trailing event ceasing to be unresolved — is described with the re-failed-retry wording and instructed to repair a snapshot directory that is not the problem. The message text itself does carry the real reason in parentheses, so the operator is not misinformed, only mis-advised.",
+      "clearCondition": "The append-nothing operator line distinguishes a rollback-writer refusal that is not a re-failed restore from the re-failed-retry family, or the contract records that the lock-race cause is deliberately folded into the re-failed-retry wording.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    },
+    {
+      "id": "QA-02",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-01"],
+      "summary": "reconcileRecoveryLineage rebuilds the run-state file path from literals rather than through the module that owns the layout, so the operator line can name a file that does not exist if the layout moves.",
+      "evidence": "src/preserve-work-recovery.ts builds `runStateFile = join(args.repoRoot, \".afk\", \"state\", `${runSlug}.json`)`, duplicating the private `statePath` helper at src/run-state.ts:640. Nothing pins the two together: `pnpm vitest run src/preserve-work-recovery.test.ts` asserts `runStateFile: fixture.statePath`, where the fixture also constructs the path from the same literals, so a change to run-state.ts's layout would leave both green and the operator line wrong.",
+      "expected": "The reported `runStateFile` names the run-state file this reconciliation read and appended to (B-01 record shape, B-05 append-nothing line).",
+      "observed": "The path is a second copy of run-state.ts's layout. The code comment acknowledges the duplication and its reason (run-state keeps the path private), which is why this is advisory rather than blocking.",
+      "clearCondition": "The reported run-state file path is derived from the module that owns the run-state layout, or a test pins the two constructions to the same value.",
+      "state": "OPEN",
+      "remedy": "SOURCE_CHANGE",
+      "amendmentPaths": []
+    }
+  ]
+}
