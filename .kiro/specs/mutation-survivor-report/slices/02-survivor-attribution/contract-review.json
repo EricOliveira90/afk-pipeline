@@ -1,0 +1,50 @@
+{
+  "version": 2,
+  "verdict": "ACCEPT",
+  "findings": [
+    {
+      "id": "F-01",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-04", "B-06", "B-08", "B-09"],
+      "evidence": "B-04: \"Each returns `{ status: \\\"ABSENT\\\" }` when `existsSync(join(cwd, path))` is false, and only then; a path that exists but throws on read is `{ status: \\\"UNREADABLE\\\"; detail }`, and one that reads but does not parse is `MALFORMED`\"; B-06: \"Because the silent branch is keyed on `ABSENT`-or-omitted and B-08's noted branch is keyed on `UNREADABLE` or `MALFORMED`, no single input can satisfy both behaviors\"; B-08: \"keyed **only** on `UNREADABLE` or `MALFORMED` — never on `ABSENT` and never on an omitted input, both of which B-06 owns\"",
+      "expected": "One observable rule that tells an absent declared file apart from a present-but-unusable one, naming the read status or input shape that carries the distinction, and an explicit absent-decisionsPath outcome, so that no single input satisfies both a no-note and a note obligation.",
+      "observed": "The revision names exactly that mechanism and puts it in one place. A distinct ABSENT status is added to the two new readers' unions only, defined by existsSync and by nothing else; UNREADABLE is narrowed to a path that exists but throws, MALFORMED to a path that reads but does not parse. B-06 keys silence on the omitted-or-ABSENT input for both files and states the absent-decisionsPath outcome outright (no accepted label, baseline labels left as they are, no note); B-08 keys both notes only on UNREADABLE or MALFORMED and says so. B-09 states the call site probes nothing and passes each read result straight through, so the distinction cannot be re-derived a second time. The divergence from readMutationReport is declared rather than incidental, and P-06 plus the manifest's B-04 observable pin the existing missing-report UNREADABLE case (src/mutation-report.test.ts:219, confirmed present and #303-tagged) as unchanged, so #303's REPORT_UNREADABLE path is not disturbed. The distinction is observable without simulating a permission error: a directory at the declared path makes existsSync true and readFileSync throw, which this Windows host confirms (EISDIR). The test plan, the manifest's B-04, B-06 and B-08 observables, and a Definition-of-done check all require the ABSENT-no-note versus UNREADABLE/MALFORMED-note pair per file.",
+      "clearCondition": "Met: the ABSENT status is the single named mechanism, the two branches are disjoint by construction, and both absent-input outcomes are stated.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-02",
+      "severity": "BLOCKING",
+      "behaviorIds": ["P-01", "P-02", "P-04", "P-05", "P-06"],
+      "evidence": "Existing behavior to preserve: \"Every behavior below is proven by at least one passing assertion whose full name carries `[behavior:#304:P-0x]`. For P-01, P-02, P-04, P-05 and P-06 that assertion is the **existing** test, retitled to carry this slice's tag *in addition to* the `[behavior:#303:...]` tag it already has\"; Definition of done: \"Every behavior id in this contract — `B-01`-`B-12` and `P-01`-`P-06` — has at least one passing assertion whose full name carries the `#304`-qualified tag `[behavior:#304:<id>]`\"",
+      "expected": "Each preservation behavior that declares acceptance:behaviors must be satisfiable by that gate, meaning at least one passing assertion whose full name carries the #304-qualified tag for that id.",
+      "observed": "The revision states the retitle rule at the section head, names the concrete site for each id in both the contract and the manifest observableResult, and adds two Definition-of-done checks: one requiring a #304-qualified passing assertion for every id B-01 through P-06, and one requiring that the retitle be the whole edit (git diff shows changed describe/it name strings and nothing else), which is the \"assertions unedited\" obligation these behaviors carry. The mechanism holds against the gate as implemented: coverage is counted per id by fullName.includes(behaviorTag(issueNumber, behaviorId)) (src/acceptance-gate.ts:108-120, behaviorTag at :246-251), and the selector handed to --testNamePattern is an alternation over every bound id (behaviorSelector at :262-273), so one name carrying two qualified tags proves both slices and removes no #303 coverage. Every named anchor was verified to exist and to already carry a #303 tag: src/afk-manifest.test.ts:203, :276, :288; src/logger.test.ts:1719; src/ship-gate.test.ts:2411, :2449, :2487, :2577; src/mutation-report.test.ts:131, :219, :398, :513, :659. Retitling a describe does carry the tag into every assertion's fullName inside it, which is how P-04, P-05 and P-06 are covered without touching an it. The pattern is established repo practice, not an invention of this contract: src/cleaner-stage.test.ts:548 and :871, src/final-evaluation.test.ts:506 and src/logger.test.ts:1263 and :1281 already carry two issue-qualified tags on one name.",
+      "clearCondition": "Met: each of P-01, P-02, P-04, P-05 and P-06 names the existing test retitled to carry [behavior:#304:P-0x] with its assertions unedited, and the Definition of done requires a #304-qualified passing assertion for every declared id.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-03",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-04", "B-05"],
+      "evidence": "B-04: \"The baseline is parsed by the existing `parseMutationReport` on **this slice's stated assumption** that the tool's incremental artifact is the same mutation-testing-elements document ... no sample incremental file and no schema artifact exists in this repository to confirm that shape\" and \"a differently shaped baseline parses `MALFORMED`, which B-08 turns into `BASELINE_UNUSABLE` with every survivor `unattributed`, so a wrong shape can only cost attribution and can never produce a wrong label\"",
+      "expected": "B-04 marks the shared-schema claim as this slice's assumption and names the contained failure mode, or cites evidence for the format.",
+      "observed": "The claim is now recorded as an assumption rather than settled fact, the missing repository evidence is stated, and the containment is named at the parser with the diagnosis path an operator would follow. The cited precedent checks out: src/mutation-report.ts:83-88 already records the report shape as hand-derived \"because no schema artifact exists in this repository\". The manifest's B-04 \"then\" carries the same assumption and the same containment, so the acceptance evidence and the contract cannot drift apart.",
+      "clearCondition": "Met: the shared-schema claim is marked as this slice's assumption and its contained failure mode (BASELINE_UNUSABLE, never a wrong label) is named at the parser.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-04",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-05", "B-07"],
+      "evidence": "B-07: \"This key deliberately diverges from B-05's location-and-mutator key, and the divergence is the recorded decision's rather than this slice's ... if the tool renumbers per-file ids between runs, a committed `ACCEPT` entry goes stale, either matching nothing (its survivor is re-raised carrying its baseline label) or matching whichever mutant now holds that id in the same file (a survivor no human adjudicated is labeled `accepted`)\"",
+      "expected": "B-07 names the id-stability consequence it inherits from the recorded decision, or the scope lock records the divergence between the two match keys as deliberate.",
+      "observed": "B-07 now states the divergence, attributes it to the recorded decision it cannot amend (src/mutation-report.ts:46-50, confirmed to declare the decisions file keys by the tool's own id; ADR 0071, whose amendment is an explicit non-goal), and states the consequence in both directions rather than only the benign one — including that a stale entry can label a survivor no human adjudicated as accepted. The harm bound it gives is factually correct against this contract: no label reaches a gate, verdict or PR-open condition (B-12), and an accepted survivor stays in the list at full detail under the suppression non-goal, so the exposure is one mislabeled bullet a reviewer can check against the decisions file. B-05's matching rationale is likewise restated as an assumption. The manifest's B-07 \"then\" carries the same statement and keeps the id-matches-but-file-differs case that proves the ADR 0065 corroboration.",
+      "clearCondition": "Met: B-07 names the inherited id-stability consequence and records the divergence between the two match keys as deliberate.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    }
+  ]
+}

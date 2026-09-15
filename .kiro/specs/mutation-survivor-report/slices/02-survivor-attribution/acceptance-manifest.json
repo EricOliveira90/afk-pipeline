@@ -1,0 +1,260 @@
+{
+  "version": 2,
+  "fileScope": {
+    "kind": "paths",
+    "paths": [
+      "src/afk-manifest.ts",
+      "src/afk-manifest.test.ts",
+      "src/mutation-report.ts",
+      "src/mutation-report.test.ts",
+      "src/run-events.ts",
+      "src/run-state.ts",
+      "src/run-state.test.ts",
+      "src/logger.ts",
+      "src/logger.test.ts",
+      "src/ship-gate.ts",
+      "src/ship-gate.test.ts"
+    ]
+  },
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "GH #304 AC1",
+      "given": "an afk.json whose mutationReport declares baselinePath \"./reports\\\\mutation\\\\incremental.json\" and decisionsPath \"docs/mutation-decisions.json\" alongside command and reportPath",
+      "when": "parseAfkManifest reads it",
+      "then": "both keys are returned on the parsed mutationReport, normalized by normalizeWaiverPath to forward slashes with no leading ./, and a manifest declaring neither key returns a mutationReport with neither member present",
+      "observableResult": "a unit test on parseAfkManifest asserts toEqual on the returned mutationReport object for both the declared and the undeclared case, and typecheck accepts the optional members on MutationReportDeclaration and MutationReportConfig",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-02",
+      "source": "GH #304 AC1",
+      "given": "an afk.json whose baselinePath or decisionsPath is a blank string, a glob, an absolute path, or contains a .. segment",
+      "when": "parseAfkManifest reads it",
+      "then": "it throws a message naming the offending member and the reason, matching the rule set reportPath already enforces, and afk.json stays at version 1",
+      "observableResult": "it.each cases in src/afk-manifest.test.ts assert expect(() => parseAfkManifest(...)).toThrow(<regex naming the member>) for each refusal of each new key",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-03",
+      "source": "GH #304 AC1",
+      "given": "an afk.json on disk carrying mutationReport with baselinePath and decisionsPath plus one claimed migration prefix and one unclaimed one",
+      "when": "trimUnclaimedMigrationPrefixes rewrites the file",
+      "then": "the bytes on disk still carry both new keys with their original values",
+      "observableResult": "a unit test writes the manifest, calls trimUnclaimedMigrationPrefixes, re-reads afk.json from disk and asserts toEqual including both keys",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-04",
+      "source": "GH #304 AC7; ADR 0071 \"Decisions file schema\"",
+      "given": "decisions-file text that is valid, and text that is not JSON, declares no version 1, holds no decisions array, holds an unrecognized verdict, or holds a blank reasoning; plus a declared baselinePath and decisionsPath where no file exists, and the same paths each occupied by a directory",
+      "when": "parseMutationDecisions parses the text, and readMutationDecisions and readMutationBaseline read each path",
+      "then": "valid text returns status PARSED with the entries keyed as id, file, verdict, consequence, containment and reasoning; every invalid case returns status MALFORMED naming the offending member; a path with no file returns the distinct status ABSENT and a path that exists but throws on read returns UNREADABLE, so absence is never collapsed into a read failure; the baseline is parsed by the existing parseMutationReport on this slice's stated assumption that the tool's incremental artifact is the same mutation-testing-elements document, whose failure mode is contained to BASELINE_UNUSABLE and never a wrong label; nothing ever throws",
+      "observableResult": "unit tests over inline JSON string literals assert the returned status and detail for each parse case with no case wrapped in expect(...).toThrow; separate tests assert ABSENT for a path with no file and UNREADABLE for a path holding a directory, for both readers; and the existing readMutationReport case at src/mutation-report.test.ts:219 still asserts UNREADABLE for a missing report, unedited",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-05",
+      "source": "GH #304 AC2, AC3",
+      "given": "two parsed survivors and a parsed baseline whose survivor set holds one of them at the same file, mutator and identical four position numbers",
+      "when": "attributeMutationSurvivors runs over survivors plus that baseline",
+      "then": "the matched survivor is labeled pre-existing, the unmatched one is labeled new-in-this-run, and the match ignores the tool's per-run mutant id — chosen on this slice's conservative assumption that an incremental file may renumber per-file ids between runs, an assumption that costs nothing if wrong because location and mutator are stable under renumbering either way",
+      "observableResult": "a pure-function unit test asserts the label on each returned survivor, including a case where the baseline holds the same location and mutator under a different id",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-06",
+      "source": "GH #304 AC4",
+      "given": "a parsed survivor list with, in turn, an omitted baseline argument, a baseline of { status: \"ABSENT\" }, an omitted decisions argument, and a decisions of { status: \"ABSENT\" }",
+      "when": "attributeMutationSurvivors runs",
+      "then": "an omitted or ABSENT baseline labels every survivor unattributed and produces no note; an omitted or ABSENT decisions input leaves every baseline label exactly as it is, labels nothing accepted and produces no note; the silent branch is keyed on the omitted-or-ABSENT input alone, so no input satisfies both this behavior and B-08",
+      "observableResult": "a unit test asserts every returned label and an empty notes array for all four cases, including the two decisions cases run against survivors already carrying pre-existing and new-in-this-run baseline labels",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-07",
+      "source": "GH #304 AC5, AC6; ADR 0065",
+      "given": "three survivors, a baseline labeling all three, and a decisions document holding an ACCEPT entry matching the first survivor's id and file, an ACCEPT entry whose id matches the second but whose file does not, and a KILL entry matching the third",
+      "when": "attributeMutationSurvivors runs",
+      "then": "the first survivor is labeled accepted in place of its baseline label, the second and third keep their baseline labels, and all three remain in the returned list in their original order; the id-plus-file key is inherited from src/mutation-report.ts:46-50 and ADR 0071 rather than chosen here, and its stated consequence is that a renumbered id makes a committed ACCEPT entry go stale — either matching nothing, so the survivor is re-raised with its baseline label, or matching whichever mutant now holds that id in the same file, so at worst one report bullet is mislabeled, bounded by B-12 because no label reaches a gate, verdict or PR-open condition and an accepted survivor is never removed from the list",
+      "observableResult": "a unit test asserts the three labels and asserts the returned list length and order equal the input's, including the id-matches-but-file-differs case that proves the corroboration",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-08",
+      "source": "GH #304 AC7",
+      "given": "a parsed baseline plus a decisions input whose status is UNREADABLE and, separately, MALFORMED, and a baseline input whose status is UNREADABLE and, separately, MALFORMED",
+      "when": "attributeMutationSurvivors runs",
+      "then": "the unusable decisions input yields no accepted label, leaves the baseline labels intact and adds the note DECISIONS_UNUSABLE; the unusable baseline labels every survivor unattributed and adds the note BASELINE_UNUSABLE; each note is keyed only on UNREADABLE or MALFORMED and never on the ABSENT or omitted inputs B-06 owns; neither changes the step status away from MUTATION_REPORTED",
+      "observableResult": "unit tests assert the returned labels and notes for all four degraded inputs, assert the notes array is empty for the same call with an ABSENT input, and assert the outcome status stays MUTATION_REPORTED",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-09",
+      "source": "GH #304 settled decisions (\"report assembly stays a pure function over the parsed survivor list, the optional baseline artifact, and the optional decisions file\")",
+      "given": "runMutationStep with a config declaring reportPath, baselinePath and decisionsPath, a stub mutationRun that exits OK, and those three files written under the step's cwd",
+      "when": "the step classifies its outcome",
+      "then": "the MUTATION_REPORTED outcome carries labeled survivors and the attributionNotes the two files imply, the labels come from one attributeMutationSurvivors call with no extra argument on RunMutationStepArgs, and the abandonment read still sits immediately before the runner invocation with no await between them",
+      "observableResult": "a unit test on runMutationStep asserts the returned outcome's labels and notes, and the existing pre-spawn-window test still passes unchanged",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-10",
+      "source": "GH #304 AC2, AC3, AC4, AC5, AC7",
+      "given": "a report whose survivors carry labels new-in-this-run, pre-existing, unattributed and accepted, and whose attributionNotes holds DECISIONS_UNUSABLE",
+      "when": "formatMutationReportLines renders it",
+      "then": "each survivor bullet keeps its existing id, path, position and mutator text and ends with that survivor's label, and one further line states the degradation, with no per-consumer branch in the formatter",
+      "observableResult": "a unit test asserts the returned string array line by line, and run-summary.md and the draft PR body both render it because both call sites pass through this one formatter",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-11",
+      "source": "GH #304 AC2-AC7",
+      "given": "a ship gate that recorded a mutation-step event and run state record whose survivors carry labels and whose attributionNotes is non-empty, and separately a persisted v7 mutationStep record whose survivors carry no label",
+      "when": "recordMutationStepOutcome writes, run state loads through sanitizeMutationStep, and deriveMutationStepOutcome renders the run summary and readMutationStepOutcome feeds the PR body",
+      "then": "labels and notes survive every hop unchanged, EVENTS_SCHEMA_VERSION stays 1 and RUN_STATE_VERSION stays 7, and the unlabeled legacy record loads unchanged and renders unattributed",
+      "observableResult": "unit tests in src/run-state.test.ts and src/logger.test.ts assert the round-tripped record, the two version constants, and the rendered summary section for both the labeled and the legacy record",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-12",
+      "source": "GH #304 AC8; ADR 0063; ADR 0071 \"no blocking mutation gate\"",
+      "given": "a ship-gate run whose mutation step reported survivors labeled accepted and new-in-this-run",
+      "when": "the gate finishes and assembles its PR creation plan",
+      "then": "its verdict, its gate results and its PR-open decision are identical to the same run whose survivors carry no label, and no gate id, GateDeclaration, GateFindings field, threshold or percentage reads a label or a note",
+      "observableResult": "a ship-gate unit test asserts the two runs' verdict, gate ids, gate outcomes and PR-open decision are equal, and the diff introduces no gate declaration or verdict read touching label or attributionNotes",
+      "preservation": false,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-01",
+      "source": "GH #303 B-04/P-01, carried forward by GH #304's optional-key requirement",
+      "given": "a manifest with no mutationReport member and a run launched without --mutation-report",
+      "when": "the manifest is parsed, the ship gate runs and the run summary and draft PR body are rendered",
+      "then": "no mutationReport member is written, no mutation-step event is emitted, and both rendered documents are byte-identical to the pre-slice output",
+      "observableResult": "the existing absent-member and no-section tests at src/afk-manifest.test.ts:203, src/logger.test.ts:1719 and src/ship-gate.test.ts:2577 are retitled to carry [behavior:#304:P-01] alongside their current [behavior:#303:...] tag and pass with every assertion unedited, asserting no new key in the parsed manifest and no mutation text in the rendered documents; the acceptance gate selects each tag independently via fullName.includes (src/acceptance-gate.ts:109-117), so one name covers this id and #303's",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-02",
+      "source": "GH #303 AC (mutationReport validation); ADR 0034",
+      "given": "manifests exercising every existing command and reportPath refusal — blank command, blank reportPath, glob, absolute, .. traversal",
+      "when": "parseAfkManifest reads them",
+      "then": "each refusal throws the same message it does today, from the manifest fail-closed block rather than as a PreflightFinding, and reportPath normalization is unchanged",
+      "observableResult": "the existing it.each refusal table at src/afk-manifest.test.ts:276 and the existing-member case at :288 are retitled to carry [behavior:#304:P-02] alongside their current [behavior:#303:...] tag and pass with their expected messages and table rows unedited, so the acceptance gate has a #304-qualified passing assertion for this id",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-03",
+      "source": "GH #304 AC7; GH #303 (MUTATION_NOT_RUN vocabulary)",
+      "given": "a run whose declared baseline or decisions file is absent, unreadable or malformed while the mutation report itself parsed",
+      "when": "the step classifies its outcome",
+      "then": "the outcome is MUTATION_REPORTED, MutationNotRunReason gains no member, and no baseline or decisions condition can produce MUTATION_NOT_RUN",
+      "observableResult": "unit tests assert the outcome status for each degraded case, and the MutationNotRunReason union in src/mutation-report.ts still holds exactly BOUND_REACHED, COMMAND_FAILED, REPORT_UNREADABLE and REPORT_MALFORMED",
+      "preservation": true,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-04",
+      "source": "GH #303 B-14 (one shared report text)",
+      "given": "a MUTATION_REPORTED report with zero survivors, a MUTATION_NOT_RUN report with a reason, and a MUTATION_NOT_RUN report with no reason recorded",
+      "when": "formatMutationReportLines renders each",
+      "then": "the empty-survivor line, the named-reason line and the reason-not-recorded line are unchanged, no reason is invented, and both consumers still call this one formatter",
+      "observableResult": "the shared-report-text describe block at src/mutation-report.test.ts:659 is retitled to carry [behavior:#304:P-04] alongside its current [behavior:#303:B-14] tag — which carries the tag into every assertion's fullName inside it — and its tests pass with their expected strings unedited",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-05",
+      "source": "ADR 0071 (bound, concurrency, quiesce); GH #303 B-11/B-12",
+      "given": "a ship gate running the declared mutation step concurrently with the guardians, including the bound-reached and guardian-rejection exits",
+      "when": "the step is awaited",
+      "then": "the step still runs once per run under the flat MUTATION_STEP_BOUND_MS, still terminates through the quiesce path before the BOUND_REACHED outcome is returned, and the pre-spawn abandonment check still has no await between the read and the runner invocation",
+      "observableResult": "the sequencing describes at src/mutation-report.test.ts:398 and :513 and the bound and ordering cases at src/ship-gate.test.ts:2411, :2449 and :2487 are retitled to carry [behavior:#304:P-05] alongside their current [behavior:#303:...] tags and pass with every assertion and the bound constant unedited",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-06",
+      "source": "GH #303 B-08 (report parser)",
+      "given": "a mutation-testing-elements report holding Killed, NoCoverage and Survived mutants, one holding a Survived mutant with no id, mutator or location, and a declared reportPath with no file on disk",
+      "when": "parseMutationReport parses each and readMutationReport reads the missing path",
+      "then": "only Survived mutants are returned, the unlocatable survivor degrades the whole report to MALFORMED rather than being dropped, and readMutationReport still calls the missing report UNREADABLE — the two new readers' ABSENT status is additive and changes neither function",
+      "observableResult": "the report-parser describe at src/mutation-report.test.ts:131 is retitled to carry [behavior:#304:P-06] alongside its current [behavior:#303:B-08] tag — carrying the tag into every assertion inside it, including the missing-file UNREADABLE case at :219 — and its tests pass with fixtures and expectations unedited while the same parser is reused for the baseline artifact",
+      "preservation": true,
+      "gateIds": [
+        "tests",
+        "acceptance:behaviors"
+      ]
+    }
+  ]
+}
