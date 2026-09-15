@@ -1,0 +1,77 @@
+# Handoff — 01 Report-only mutation survivor step at the ship gate (#303)
+
+## What shipped
+
+- B-01: `src/cli-options.ts:parseCliOptions` (`mutationReport` flag), `src/cli-options.test.ts`
+- B-02: `src/afk-manifest.ts:parseAfkManifest` (`normalizeMutationReport`), `src/afk-manifest.test.ts`
+- B-03: `src/afk-manifest.ts:normalizeMutationReport` (named rejection reasons), `src/afk-manifest.test.ts`
+- B-04: `src/afk-manifest.ts:parseAfkManifest` (member absent by default), `src/afk-manifest.test.ts`
+- B-05: `src/afk-manifest.ts:trimUnclaimedMigrationPrefixes` (member preserved on rewrite), `src/afk-manifest.test.ts`
+- B-06: `src/preflight.ts:refuseUndeclaredMutationReport`, `src/preflight.test.ts`
+- B-07: `src/orchestrator.ts:runOrchestrator` (refusal call site), `src/mutation-report.test.ts`
+- B-08: `src/mutation-report.ts:parseMutationReport` / `readMutationReport`, `src/mutation-report.test.ts`
+- B-09: `src/mutation-report.ts:classifyMutationStep`, `src/mutation-report.test.ts`
+- B-10: `src/mutation-report.ts:mutationEligibleSources` / `isMutationEligibleSource`, `src/mutation-report.test.ts`
+- B-11: `src/mutation-report.ts:runMutationStep`, `src/ship-gate.ts:runShipGate`, `src/mutation-report.test.ts`, `src/ship-gate.test.ts`
+- B-12: `src/mutation-report.ts:MUTATION_STEP_BOUND_MS` / `awaitMutationStepWithinBound`, `src/ship-gate.test.ts`
+- B-13: `src/run-state.ts:recordMutationStepOutcome` / `adaptLoadedState`, `src/run-events.ts:RunEventPayload`, `src/run-state.test.ts`
+- B-14: `src/mutation-report.ts:MUTATION_REPORT_HEADING` / `formatMutationReportLines`, `src/logger.ts:readMutationStepOutcome`, `src/logger.test.ts`
+- B-15: `src/ship-gate.ts:buildPrCreationPlan` (mutation section in the draft body), `src/ship-gate.test.ts`
+- B-16: `src/ship-gate.ts:buildPrCreationPlan` (decision fields unchanged), `src/ship-gate.test.ts`
+- B-17: `docs/adr/0071-report-only-mutation-survivor-step.md`, `ARCHITECTURE.md` (ship-path internals row), `src/mutation-report.test.ts`
+- P-01: `src/ship-gate.ts:runShipGate` (no declaration, no step), `src/logger.test.ts`, `src/ship-gate.test.ts`
+- P-02: `src/afk-manifest.ts:parseAfkManifest`, `src/afk-manifest.test.ts`
+- P-03: `src/ship-gate.ts:runShipGate` (`abandonMutationStep`), `src/ship-gate.test.ts`
+- P-04: `src/preflight.ts:formatPreflightReport`, `src/preflight.test.ts`
+- P-05: `src/run-state.ts:adaptLoadedState`, `src/run-state.test.ts`, `src/eval-boundary.test.ts`
+
+New migration files: 0
+
+## Decisions made during implementation
+
+- The bound lives in `src/mutation-report.ts` as a flat, non-configurable
+  `MUTATION_STEP_BOUND_MS` (30 minutes). The contract left the number's home
+  unstated; putting it beside the step keeps the CLI and the orchestrator free
+  of a mutation knob, which the refusals in ADR 0071 rule out anyway.
+- The step is reached through three injectable seams on `RunShipGateArgs` —
+  `mutationRun`, `mutationScope`, `mutationNow`. No suite invokes a real
+  mutation tool and no test waits on the real bound; the gate under test is
+  still the real one on a real fixture repo.
+- Termination is one binding: `() => quiesceWorktree(reviewDir)`. Nothing in
+  this slice spawns its own kill path, so a mutation process is torn down by the
+  same code every other worktree process is.
+- The published text is one derivation. `readMutationStepOutcome(runDir)` reads
+  this run's `events.jsonl` and both `run-summary.md` and the draft PR body
+  render from it, so the stream, the summary and the PR cannot disagree.
+- `RUN_STATE_VERSION` moved 6 -> 7 for the persisted record; `EVENTS_SCHEMA_VERSION`
+  stays 1 because the run event is purely additive.
+- A guardian rejection publishes nothing at all — no event, no state record, no
+  PR — and rethrows the guardian's own reason, including when the termination
+  itself fails. A failed quiesce is the worktree teardown's report to make;
+  substituting it would lose why the run stopped.
+
+## Gotchas / learnings
+
+- A `Symbol()` race sentinel widens to `symbol` through `Promise.race`, so
+  `settled === BOUND_REACHED` does not narrow and the step arm's properties go
+  missing under `tsc`. `undefined` is also a real step result (the abandonment
+  return), so the arms are a discriminated `BoundRace` union instead.
+- The shared `makeJournal()` fixture in `src/ship-gate.test.ts` records events on
+  a mock and writes no `events.jsonl`. Anything asserting published text has to
+  add the tee itself; the tee's own shape is pinned on the real `Logger` in
+  `src/logger.test.ts`.
+- `quiesceWorktree(dir)` short-circuits to `{observed: [], terminated: [], survivors: [], verified: true}`
+  when nothing is registered inside `dir`, which makes a call-through `vi.mock`
+  spy cheap and gives "no process was registered" a direct observable.
+- The only guardian rejection `runGuardianReview` propagates rather than
+  classifying is a throw before its internal try — e.g. from `journal.agentLog`.
+  That is how P-03 drives the fork region's catch in both lane modes.
+- `isMutationEligibleSource` treats any status starting with `D` as deleted, so
+  a test asserting eligibility must use real `git diff --name-status` letters
+  (`R100`, `C075`, `T`) rather than invented ones.
+- `src/ship-gate.test.ts` imports no `beforeEach`; per-test spy state is cleared
+  inline. `ARCHITECTURE.md` has a hard 150-line cap that its own assertion in
+  `src/mutation-report.test.ts` enforces.
+- Do not append large TypeScript blocks to a file with a bash heredoc here —
+  backticks and apostrophes in the content break the outer quoting. Write the
+  content to a file with the editor tools instead.
