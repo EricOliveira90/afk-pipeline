@@ -36,6 +36,7 @@ import {
   type RunState,
 } from "./run-state.js";
 import { cleanerRoundsRemaining, MAX_CLEANER_ROUNDS } from "./bounds.js";
+import type { PersistedScopeSlice } from "./slice-scope.js";
 
 const tempDirs: string[] = [];
 const childProcesses: ChildProcess[] = [];
@@ -1910,5 +1911,165 @@ describe("[behavior:#335:B-12] replacement fingerprints and lock provenance on a
     // migrationCount 0: additive fields on an existing v7 field need no
     // migration, and this repo has no migrations directory to add one to.
     expect(existsSync(join("supabase", "migrations"))).toBe(false);
+  });
+});
+
+/*
+ * ---------------------------------------------------------------------------
+ * Scope extensions on a lineage event (#278 B-04)
+ * ---------------------------------------------------------------------------
+ *
+ * `extensions` was reserved by #277 as a bare-selector list that every writer
+ * left empty. #278 gives it the only shape a later reader can use without
+ * re-resolving anything: `{number, ghIssue}` pairs, the same identity `target`
+ * carries. That narrows the validator's accepted input language, so ADR 0060
+ * asks for both halves — the newly accepted document round-trips, and each
+ * newly rejected one degrades the target's whole list to absent. Additive on an
+ * existing v7 field, so `RUN_STATE_VERSION` stays 7 and no migration ships.
+ */
+const EXTENSION_PAIRS = [
+  { number: "02", ghIssue: "278" },
+  { number: "03", ghIssue: "279" },
+] as const;
+
+describe("[behavior:#278:B-04] scope extensions on a lineage event", () => {
+  it("[behavior:#278:B-04] round-trips an event carrying a pair set through save/load", () => {
+    const repo = makeRepo();
+    saveRunState(repo, {
+      version: RUN_STATE_VERSION,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      slices: {},
+    });
+    const pending = rollbackLineageEvent({
+      extensions: EXTENSION_PAIRS.map((pair) => ({ ...pair })),
+    }) as unknown as PersistedRecoveryLineageEvent;
+
+    updateRunState(repo, "demo", (state) => {
+      appendRecoveryLineageEvent(state, ROLLBACK_ISSUE, pending);
+    });
+
+    const loaded = recoveryLineageFor(loadRunState(repo, "demo"), ROLLBACK_ISSUE);
+    expect(loaded).toEqual([pending]);
+    // Pairs, not selectors: the member order the writer chose survives, and
+    // each member is exactly the two keys `PersistedScopeSlice` declares.
+    expect(loaded[0]!.extensions).toEqual([
+      { number: "02", ghIssue: "278" },
+      { number: "03", ghIssue: "279" },
+    ]);
+    for (const extension of loaded[0]!.extensions) {
+      expect(Object.keys(extension).sort()).toEqual(["ghIssue", "number"]);
+    }
+  });
+
+  it("[behavior:#278:B-04] types the member as the persisted scope identity", () => {
+    // A type-level fact, checked by `pnpm run typecheck`: the member a scope
+    // append consumes and the member a lineage event records are one shape, so
+    // neither side can drift into a bare selector without a compile error.
+    const pairs: PersistedScopeSlice[] = [...EXTENSION_PAIRS];
+    const event: PersistedRecoveryLineageEvent = {
+      ...(rollbackLineageEvent() as unknown as PersistedRecoveryLineageEvent),
+      extensions: pairs,
+    };
+
+    expect(event.extensions).toBe(pairs);
+    expect(
+      recoveryLineageFor(
+        adaptLineage([{ ...event } as unknown as Record<string, unknown>]),
+        ROLLBACK_ISSUE,
+      ),
+    ).toEqual([event]);
+  });
+
+  it.each([
+    ["a bare selector string", ["02"]],
+    ["a mix of a pair and a selector", [{ number: "02", ghIssue: "278" }, "03"]],
+    ["a pair with a blank number", [{ number: "  ", ghIssue: "278" }]],
+    ["a pair with a blank issue id", [{ number: "02", ghIssue: "" }]],
+    ["a pair missing its issue id", [{ number: "02" }]],
+    ["a null member", [null]],
+    ["a nested array member", [["02", "278"]]],
+    ["a non-array set", "none"],
+  ])(
+    "[behavior:#278:B-04] drops an event whose extensions hold %s",
+    (_label, extensions) => {
+      const broken = rollbackLineageEvent({ extensions });
+
+      expect(adaptLineage([broken]).recoveryLineage).toBeUndefined();
+      expect(recoveryLineageFor(adaptLineage([broken]), ROLLBACK_ISSUE)).toEqual(
+        [],
+      );
+      // The same document with a well-formed set loads: the rejection is about
+      // the extension shape and nothing else in the event.
+      const fixed = rollbackLineageEvent({
+        extensions: [{ number: "02", ghIssue: "278" }],
+      });
+      expect(recoveryLineageFor(adaptLineage([fixed]), ROLLBACK_ISSUE)).toEqual([
+        fixed,
+      ]);
+    },
+  );
+
+  it("[behavior:#278:B-04] drops the whole list when one event of several carries a bad set", () => {
+    const pending = rollbackLineageEvent();
+    const completed = rollbackLineageEvent({
+      state: "COMPLETED",
+      ...COMPLETION_OBSERVATIONS,
+      extensions: ["02"],
+    });
+
+    // Not "keep the good ones": a surviving PENDING would read as an open
+    // attempt, and a half-read set loses an identity this run admitted.
+    expect(adaptLineage([pending, completed]).recoveryLineage).toBeUndefined();
+    expect(
+      recoveryLineageFor(adaptLineage([pending, completed]), ROLLBACK_ISSUE),
+    ).toEqual([]);
+  });
+
+  it("[behavior:#278:P-05] keeps v7 loading with every event intact and adds no migration", () => {
+    expect(RUN_STATE_VERSION).toBe(7);
+    const assignable: RunState["version"][] = [3, 4, 5, 6, 7];
+    expect(assignable).toContain(RUN_STATE_VERSION);
+
+    // Every writer that could have produced a v7 file before #278 emitted the
+    // literal `[]`, which is a valid pair array — so no document on disk needs
+    // rewriting and the pre-#278 lineage loads event for event.
+    const pending = rollbackLineageEvent({ extensions: [] });
+    const rolledBack = rollbackLineageEvent({
+      state: "ROLLED_BACK",
+      extensions: [],
+    });
+    const loaded = recoveryLineageFor(
+      adaptLineage([pending, rolledBack]),
+      ROLLBACK_ISSUE,
+    );
+    expect(loaded).toEqual([pending, rolledBack]);
+    expect(loaded.map((event) => event.extensions)).toEqual([[], []]);
+    expect(existsSync(join("supabase", "migrations"))).toBe(false);
+  });
+
+  it("[behavior:#278:P-05] leaves appendRecoveryLineageEvent append-only and state-taking", () => {
+    const state: RunState = {
+      version: RUN_STATE_VERSION,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      slices: {},
+    };
+    const first = rollbackLineageEvent({
+      extensions: [{ number: "02", ghIssue: "278" }],
+    }) as unknown as PersistedRecoveryLineageEvent;
+    const second = rollbackLineageEvent({
+      state: "COMPLETED",
+      ...COMPLETION_OBSERVATIONS,
+      extensions: [{ number: "02", ghIssue: "278" }],
+    }) as unknown as PersistedRecoveryLineageEvent;
+
+    appendRecoveryLineageEvent(state, ROLLBACK_ISSUE, first);
+    appendRecoveryLineageEvent(state, ROLLBACK_ISSUE, second);
+
+    // Two records citing the same field, in order, with the earlier one
+    // untouched: widening the member changed no part of how it is appended.
+    expect(recoveryLineageFor(state, ROLLBACK_ISSUE)).toEqual([first, second]);
+    expect(recoveryLineageFor(state, ROLLBACK_ISSUE)[0]).toEqual(first);
   });
 });

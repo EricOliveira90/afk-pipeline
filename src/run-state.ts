@@ -12,7 +12,10 @@ import {
   type SliceLifecycle,
   type SlicePhase,
 } from "./slice-lifecycle.js";
-import type { PersistedRunScope } from "./slice-scope.js";
+import type {
+  PersistedRunScope,
+  PersistedScopeSlice,
+} from "./slice-scope.js";
 import { withFileLock } from "./file-lock.js";
 import {
   sanitizeGuardianReviewFields,
@@ -290,11 +293,22 @@ export interface PersistedRecoveryLineageEvent {
   /** The operator's `--recovery-reason`, trimmed and otherwise verbatim. */
   reason: string;
   /**
-   * Scope extensions this attempt admitted. Always empty until `--extend-scope`
-   * ships (#278); present so a reader never has to tell "no extensions" from
-   * "this record predates extensions".
+   * Scope identities this attempt admitted into the run's scope of record
+   * (`--extend-scope`, #278 B-04), canonical and duplicate-free.
+   *
+   * Full `{number, ghIssue}` pairs rather than the bare selector strings #277
+   * reserved, for the reason {@link target} carries a pair: a digits-only
+   * selector is ambiguous between a slice number and a GH issue id, so a
+   * persisted selector would leave a later reader re-resolving an identity
+   * against an `issues.md` that may have moved. Widened without a
+   * {@link RUN_STATE_VERSION} bump and with no migration, on the
+   * {@link rollbackError} precedent: every writer that could have produced a v7
+   * file before #278 emitted the literal `[]`, which is a valid pair array, so
+   * no document on disk needs rewriting. Empty stays the "this attempt admitted
+   * no extensions" reading it always was — never "this record predates
+   * extensions".
    */
-  extensions: string[];
+  extensions: PersistedScopeSlice[];
   /** Provider name from the caller's run identity; run state persists no other. */
   provider: string;
   sliceBranch: string;
@@ -1181,6 +1195,12 @@ const RECOVERY_LINEAGE_STATE_VALUES: ReadonlySet<string> = new Set([
  * directions again, because a `COMPLETED` event without a replacement fingerprint
  * is an event no dispatch can check the pair against, and a `PENDING` one
  * carrying a replacement fingerprint claims a completion that has not happened.
+ *
+ * `extensions` must be an array of `{number, ghIssue}` pairs with non-blank
+ * members (#278 B-04). An empty array is well-formed and always was; a bare
+ * selector string, or a pair with a blank member, drops the event's whole list
+ * for the reason above — a half-read extension set would let a scope identity
+ * this run admitted disappear from the record that proves it was admitted.
  */
 function sanitizeRecoveryLineage(
   value: unknown,
@@ -1190,6 +1210,17 @@ function sanitizeRecoveryLineage(
   }
   const nonblank = (field: unknown): field is string =>
     typeof field === "string" && field.trim() !== "";
+  // A scope extension is the same shape `target` is, held to the same
+  // non-blank rule (#278 B-04). A bare selector string — the shape #277
+  // reserved — is not a pair, so an event still carrying one degrades the
+  // slice's lineage rather than loading half-resolved.
+  const isScopePair = (field: unknown): field is PersistedScopeSlice => {
+    if (typeof field !== "object" || field === null || Array.isArray(field)) {
+      return false;
+    }
+    const pair = field as Partial<Record<"number" | "ghIssue", unknown>>;
+    return nonblank(pair.number) && nonblank(pair.ghIssue);
+  };
   const out: Record<string, PersistedRecoveryLineageEvent[]> = {};
   for (const [ghIssue, raw] of Object.entries(
     value as Record<string, unknown>,
@@ -1218,7 +1249,7 @@ function sanitizeRecoveryLineage(
         typeof event.reason !== "string" ||
         event.reason.trim() === "" ||
         !Array.isArray(event.extensions) ||
-        !event.extensions.every(nonblank) ||
+        !event.extensions.every(isScopePair) ||
         !nonblank(event.provider) ||
         !nonblank(event.sliceBranch) ||
         !nonblank(event.sliceHead) ||
@@ -1256,7 +1287,9 @@ function sanitizeRecoveryLineage(
         state,
         target: { number: target.number, ghIssue: target.ghIssue },
         reason: event.reason,
-        extensions: [...(event.extensions as string[])],
+        extensions: (event.extensions as PersistedScopeSlice[]).map(
+          ({ number, ghIssue }) => ({ number, ghIssue }),
+        ),
         provider: event.provider,
         sliceBranch: event.sliceBranch,
         sliceHead: event.sliceHead,
