@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { Slice } from "./issues-parser.js";
-import { resolveOnlyFailedSelection, resolveRunScope } from "./slice-scope.js";
+import {
+  appendScopeExtensions,
+  resolveOnlyFailedSelection,
+  resolveRunScope,
+  type PersistedRunScope,
+  type PersistedScopeSlice,
+} from "./slice-scope.js";
 
 const SLICES: Slice[] = [
   {
@@ -189,5 +195,159 @@ describe("resolveOnlyFailedSelection", () => {
     const extant = [SLICES[1]!];
 
     expect(resolveOnlyFailedSelection(extant, () => false)).toEqual(["02"]);
+  });
+});
+
+/*
+ * ---------------------------------------------------------------------------
+ * Appending admitted scope extensions (#278 B-08)
+ * ---------------------------------------------------------------------------
+ *
+ * The one widening a run's scope of record can undergo. It lives here rather
+ * than in the recovery module so it is reviewable beside `resolveRunScope`'s
+ * narrow-only rule, and it is pure so the locked completion that publishes both
+ * the terminal lineage event and the widened scope has no second writer.
+ */
+describe("[behavior:#278:B-08] appendScopeExtensions", () => {
+  const SCOPE: PersistedRunScope = {
+    mode: "explicit",
+    slices: [
+      { number: "02", ghIssue: "102" },
+      { number: "01", ghIssue: "101" },
+    ],
+  };
+
+  it("[behavior:#278:B-08] preserves every existing entry and its order and appends in canonical set order", () => {
+    const widened = appendScopeExtensions(SCOPE, [
+      { number: "10", ghIssue: "110" },
+      { number: "03", ghIssue: "103" },
+    ]);
+
+    // The existing pair keeps the order it was persisted in — not re-sorted —
+    // and the additions land after them, canonically ordered among themselves.
+    expect(widened.slices).toEqual([
+      { number: "02", ghIssue: "102" },
+      { number: "01", ghIssue: "101" },
+      { number: "03", ghIssue: "103" },
+      { number: "10", ghIssue: "110" },
+    ]);
+  });
+
+  it("[behavior:#278:B-08] orders canonical slice numbers numerically, then by GH issue", () => {
+    // "10" after "9" is the case a string comparison gets wrong, and zero
+    // padding is not part of the identity `canonicalSliceNumber` compares.
+    const widened = appendScopeExtensions(
+      { mode: "all-afk", slices: [] },
+      [
+        { number: "9", ghIssue: "209" },
+        { number: "010", ghIssue: "210" },
+        { number: "2", ghIssue: "202" },
+        { number: "02", ghIssue: "201" },
+      ],
+    );
+
+    expect(widened.slices).toEqual([
+      { number: "02", ghIssue: "201" },
+      { number: "2", ghIssue: "202" },
+      { number: "9", ghIssue: "209" },
+      { number: "010", ghIssue: "210" },
+    ]);
+  });
+
+  it("[behavior:#278:B-08] leaves scope.mode unchanged", () => {
+    for (const mode of ["all-afk", "explicit"] as const) {
+      expect(
+        appendScopeExtensions({ mode, slices: [] }, [
+          { number: "03", ghIssue: "103" },
+        ]).mode,
+      ).toBe(mode);
+    }
+  });
+
+  it("[behavior:#278:B-08] is pure: neither the scope nor the addition list is mutated", () => {
+    const scope: PersistedRunScope = {
+      mode: "explicit",
+      slices: [{ number: "01", ghIssue: "101" }],
+    };
+    const additions = [
+      { number: "03", ghIssue: "103" },
+      { number: "02", ghIssue: "102" },
+    ];
+
+    const widened = appendScopeExtensions(scope, additions);
+
+    expect(scope.slices).toEqual([{ number: "01", ghIssue: "101" }]);
+    expect(additions).toEqual([
+      { number: "03", ghIssue: "103" },
+      { number: "02", ghIssue: "102" },
+    ]);
+    // A fresh document, entry by entry: the locked write publishes this, so a
+    // shared entry object would let a later mutation reach the persisted scope.
+    expect(widened).not.toBe(scope);
+    expect(widened.slices[0]).not.toBe(scope.slices[0]);
+    expect(widened.slices[0]).toEqual(scope.slices[0]);
+  });
+
+  it("[behavior:#278:B-08] appends a set: a repeated addition lands once", () => {
+    const widened = appendScopeExtensions(SCOPE, [
+      { number: "03", ghIssue: "103" },
+      { number: "003", ghIssue: "103" },
+      { number: "3", ghIssue: "103" },
+    ]);
+
+    expect(widened.slices.slice(2)).toEqual([{ number: "03", ghIssue: "103" }]);
+  });
+
+  it("[behavior:#278:B-08] returns the same scope shape for an empty addition set", () => {
+    expect(appendScopeExtensions(SCOPE, [])).toEqual(SCOPE);
+  });
+
+  it("[behavior:#278:B-08] carries only the two members a persisted scope entry has", () => {
+    const widened = appendScopeExtensions(SCOPE, [
+      { number: "03", ghIssue: "103", extra: "ignored" } as PersistedScopeSlice,
+    ]);
+
+    for (const entry of widened.slices) {
+      expect(Object.keys(entry).sort()).toEqual(["ghIssue", "number"]);
+    }
+  });
+
+  it("[behavior:#278:P-02] leaves resolveRunScope narrow-only — the widened scope is what it reads, never what it makes", () => {
+    const slices: Slice[] = [
+      ...SLICES,
+      {
+        number: "04",
+        ghIssue: "104",
+        title: "Late addition",
+        type: "AFK",
+        blockedBy: [],
+        userStories: "",
+      },
+    ];
+    const before: PersistedRunScope = {
+      mode: "explicit",
+      slices: [{ number: "01", ghIssue: "101" }],
+    };
+
+    // Before the append, naming the addition still throws the superset refusal.
+    expect(() => resolveRunScope(slices, ["04"], before)).toThrow(
+      /never add to it/,
+    );
+
+    // After it, the same request resolves — because the persisted scope grew,
+    // not because resolveRunScope learned to grow one.
+    const after = appendScopeExtensions(before, [
+      { number: "04", ghIssue: "104" },
+    ]);
+    const scope = resolveRunScope(slices, ["04"], after);
+
+    expect(scope.persisted).toBe(after);
+    expect(scope.members.map((slice) => slice.ghIssue)).toEqual(["101", "104"]);
+    expect(scope.selected.map((slice) => slice.ghIssue)).toEqual(["104"]);
+    expect(scope.skipped).toMatchObject([
+      { slice: { number: "01" }, reason: "narrowed" },
+      { slice: { number: "02" }, reason: "not-selected" },
+      { slice: { number: "03" }, reason: "hitl" },
+    ]);
   });
 });

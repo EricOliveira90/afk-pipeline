@@ -134,6 +134,79 @@ export function resolveOnlyFailedSelection(
 }
 
 /**
+ * Canonical ordering for a scope identity set: canonical slice number first,
+ * GitHub issue id as the tiebreak (#278 B-08).
+ *
+ * Numeric on both halves where both sides are digits — `"10"` sorts after
+ * `"9"`, which a string comparison gets wrong — falling back to a string
+ * comparison so a non-numeric spelling still orders deterministically rather
+ * than landing wherever `NaN` puts it.
+ */
+function compareScopeIdentity(
+  left: PersistedScopeSlice,
+  right: PersistedScopeSlice,
+): number {
+  const byNumber = compareIdPart(
+    canonicalSliceNumber(left.number),
+    canonicalSliceNumber(right.number),
+  );
+  return byNumber !== 0 ? byNumber : compareIdPart(left.ghIssue, right.ghIssue);
+}
+
+function compareIdPart(left: string, right: string): number {
+  const numeric = /^\d+$/.test(left) && /^\d+$/.test(right);
+  if (numeric) {
+    const difference = Number(left) - Number(right);
+    if (difference !== 0) return difference;
+  }
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/**
+ * A persisted scope with `additions` appended (`--extend-scope`, #278 B-08).
+ *
+ * Pure, and here rather than in the recovery module, because this is the file
+ * that owns what a persisted scope is: the one write that publishes both the
+ * terminal lineage event and the widened scope calls this, so the shape of the
+ * widening is reviewable beside {@link resolveRunScope}'s narrow-only rule
+ * instead of inside a transaction body.
+ *
+ * Every existing entry survives in its existing order, `mode` is carried
+ * through untouched, and the additions land after them as a canonical
+ * duplicate-free set — the same ordering the `PENDING` record stored, so the
+ * scope on disk and the record that authorized it read the same way. This
+ * function does *not* judge whether an addition belongs: resolving a selector
+ * to an identity, refusing one already in scope (`extension-already-in-scope`)
+ * and refusing one `afk.json` disallows are `src/preserve-work-recovery.ts`'s,
+ * because they need `issues.md` and the manifest and this file's callers do not
+ * all have them.
+ *
+ * A widening only ever happens here. {@link resolveRunScope} still cannot grow
+ * a scope: it takes the persisted scope as given, and a request naming anything
+ * outside it still throws.
+ */
+export function appendScopeExtensions(
+  scope: PersistedRunScope,
+  additions: readonly PersistedScopeSlice[],
+): PersistedRunScope {
+  const seen = new Set<string>();
+  const appended: PersistedScopeSlice[] = [];
+  for (const addition of [...additions].sort(compareScopeIdentity)) {
+    const key = `${canonicalSliceNumber(addition.number)}#${addition.ghIssue}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    appended.push({ number: addition.number, ghIssue: addition.ghIssue });
+  }
+  return {
+    mode: scope.mode,
+    slices: [
+      ...scope.slices.map(({ number, ghIssue }) => ({ number, ghIssue })),
+      ...appended,
+    ],
+  };
+}
+
+/**
  * Resolve the executable AFK set. Once persisted, the resolved identities
  * win over a changed manifest so a retry cannot silently gain work.
  *
