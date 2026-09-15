@@ -75,11 +75,36 @@ the invocation is not pressured into cosmetic churn to look diligent.
   base-gate evidence disagrees with the checkpoint it was handed — and even a
   configuration fault inside its envelope degrades to `AUDIT_NOT_RUN` on the
   released tree.
-- A tree the audit rewrote has not been through the required cheap gates. That
-  is why the changed-tree path is a separate decision from this one: whatever
-  re-runs those gates and decides which tree QA grades has to be built
-  deliberately, and until it exists an `AUDIT_CHANGED` verdict is recorded and
-  changes nothing downstream.
+- A tree the audit rewrote has not been through the required cheap gates, so it
+  is not a candidate anyone may grade yet. On `AUDIT_CHANGED` the same required
+  cheap gate declarations that released the pre-audit candidate — the round's own
+  pre-QA set filtered to the required ids of the cheap gate catalog, derived from
+  the catalog rather than listed again — run a second time, on the audited tree.
+  The acceptance gate and the full suite are excluded by that derivation: a gate
+  whose `expectedCostMs` is undeclared cannot be asserted cheap, and the audited
+  tree is still graded by the post-QA gate phase and the QA evaluator.
+- A pass produces **one** graded-candidate identity — the audited tree id, its
+  commit sha, and a base-gate evidence object built fresh from the audited run
+  and naming the audited tree — and every pass-path consumer reads that one
+  value: the deterministic QA dispatch, the approved baseline, the shared-preview
+  stage and `runPostQAGates`'s `qaApprovedTreeId`. One value rather than four
+  expressions because ADR 0012 gives a QA verdict authority over exactly one
+  tree: `runPostQAGates` compares its approved tree id against a fresh checkpoint
+  and refuses a tree the verdict does not cover, so a consumer left on the
+  pre-audit id would fail the slice immediately after the verdict it just
+  earned — and a single value cannot diverge from itself. The audited base-gate
+  object is never a spread of the pre-audit one (which drops the skip
+  authorization) and never that object passed through (which would authorize a
+  skip for a tree QA is not grading); it vouches only for the gates that
+  actually re-ran.
+- A cheap-gate failure on the audited tree is an **ordinary repair round**, not a
+  new failure path: it enters the existing bounded repair loop with the usual
+  budget, spending no counter of its own and adding no terminal exit. The audited
+  tree is registered as the attempt's current candidate when its checkpoint is
+  minted, before those gates run, so it is named on the pass branch and the
+  failure branch alike. After `AUDIT_UNCHANGED`, `AUDIT_NOT_RUN` or a run without
+  `--self-audit`, every consumer still reads the pre-audit checkpoint pair
+  exactly as it did before the changed-tree path existed.
 - The audit costs one generator invocation per QA submission on runs that opt in
   and nothing at all on runs that do not, which is why the flag defaults off
   until the changed rate is known.
