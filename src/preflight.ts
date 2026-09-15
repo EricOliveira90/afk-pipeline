@@ -124,6 +124,42 @@ export interface PreflightFinding {
   pids?: number[];
 }
 
+/**
+ * Why `--mutation-report` without a declared `mutationReport` refuses the
+ * launch — `undefined` when there is nothing to refuse (#303 B-06).
+ *
+ * Deliberately **not** a {@link PreflightCheck}/{@link PreflightFinding}, and
+ * deliberately not run by `runLaunchPreflight`. `--preflight-report-only`
+ * downgrades every finding-based refusal to a warning, and that escape hatch
+ * exists for a *false reading of machine state* — a leftover worktree that is
+ * not leftover, a holder that is not holding (ADR 0042). A missing declaration
+ * is not a misreading: the operator asked for a step whose command nobody
+ * wrote, and no re-run makes that true. So the caller throws it from the
+ * manifest fail-closed block, before any worktree, branch, or agent dispatch.
+ *
+ * Pure: flag state plus the parsed manifest, no filesystem and no clock.
+ */
+export function refuseUndeclaredMutationReport(args: {
+  /** Whether `--mutation-report` was set on this launch. */
+  mutationReport: boolean | undefined;
+  /**
+   * The run's parsed launch manifest, or `null` in the documented legacy mode
+   * where the PRD directory holds no `afk.json` at all — which declares no
+   * mutation step just as surely as a manifest that omits the member.
+   */
+  manifest: { mutationReport?: { command: string; reportPath: string } } | null;
+}): string | undefined {
+  if (args.mutationReport !== true) return undefined;
+  if (args.manifest?.mutationReport !== undefined) return undefined;
+  return (
+    "--mutation-report was set but the launch manifest declares no " +
+    'mutationReport. Add `"mutationReport": { "command": ..., "reportPath": ... }` ' +
+    "to the PRD directory's afk.json, or drop the flag: AFK will not guess a " +
+    "mutation command, and a run that reported nothing would look like a run " +
+    "with no survivors."
+  );
+}
+
 export interface PreflightReport {
   findings: PreflightFinding[];
   /** Empty directory shells removed from the run's own namespace. */

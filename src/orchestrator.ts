@@ -97,6 +97,7 @@ import {
   formatPreflightRefusal,
   formatPreflightReport,
   gbToBytes,
+  refuseUndeclaredMutationReport,
   resolveMinFreeDiskGb,
   runLaunchPreflight,
   type RunNamespace,
@@ -609,6 +610,13 @@ export interface PipelineConfig {
    * state the run started in.
    */
   preflightReportOnly?: boolean;
+  /**
+   * Run the mutation step the launch manifest declares once at the ship gate
+   * and report what survived (#303, ADR 0071). Reported, never a gate. Set
+   * without a `mutationReport` declaration, the launch is refused before any
+   * dispatch — see `refuseUndeclaredMutationReport`.
+   */
+  mutationReport?: boolean;
 
   /** Slices forced to restart from base regardless of resume eligibility (#37). */
   forceRestart?: string[];
@@ -8506,6 +8514,16 @@ export async function runPipeline(
         `Run scope conflicts with afk.json selectedSlices: ${conflicting.join(", ")}`,
     });
   }
+  // Configuration refusal, in the same fail-closed block and for the same
+  // reason: it lands before the first run-state mutation below, before the
+  // launch preflight `--preflight-report-only` governs — which is why that flag
+  // cannot bypass it (#303 B-06/B-07, ADR 0042) — and before any worktree,
+  // branch or agent dispatch.
+  const undeclaredMutationReport = refuseUndeclaredMutationReport({
+    mutationReport: config.mutationReport,
+    manifest: config.manifest ?? null,
+  });
+  if (undeclaredMutationReport) throw new Error(undeclaredMutationReport);
   const initialized = updateRunState(repoRoot, loggerSlug, (current) => {
     initializeMigrationClaims(current, config.manifest ?? null);
     const resolvedScope = resolveRunScope(
@@ -9313,6 +9331,11 @@ export async function runPipeline(
         closesIssues: scope!.selected.map((slice) => slice.ghIssue),
         adoptions: adoptedSlices(runState),
         cachedReviewPhase: runState.reviewPhase,
+        // Both halves or nothing: the flag says "this run", the manifest says
+        // what to run. The undeclared case was already refused at launch.
+        ...(config.mutationReport === true && config.manifest?.mutationReport
+          ? { mutationReport: config.manifest.mutationReport }
+          : {}),
         invoke,
         journal: logger,
         options: {

@@ -9,6 +9,7 @@ import {
   formatPreflightReport,
   gbToBytes,
   MIN_FREE_DISK_GB_ENV,
+  refuseUndeclaredMutationReport,
   resolveMinFreeDiskGb,
   runLaunchPreflight,
   type PreflightDirEntry,
@@ -594,6 +595,86 @@ describe("preflight — report-only", () => {
     });
     expect(refusals(report)).toHaveLength(2);
     expect(report.refuse).toBe(false);
+  });
+
+  it("[behavior:#303:P-04] still downgrades genuine findings, and the report still formats them", async () => {
+    // The mutation refusal lives beside these checks without joining them:
+    // ADR 0042's downgrade still applies to every real `PreflightFinding`, and
+    // `formatPreflightReport` still prints them with their severity.
+    const report = await preflight({
+      freeBytes: gbToBytes(0.19),
+      worktrees: [{ path: S02, branch: BRANCH02 }],
+      reportOnly: true,
+    });
+    expect(report.refuse).toBe(false);
+    expect(refusals(report).map((finding) => finding.severity)).toEqual([
+      "refuse",
+      "refuse",
+    ]);
+    const block = formatPreflightReport(report)!;
+    expect(block).toContain("[REFUSE]");
+    // Downgraded, not erased: the findings keep their severity in the printed
+    // report, so the operator sees exactly what the waiver let through.
+    expect(formatPreflightRefusal(report)).toContain(
+      "2 preflight condition(s)",
+    );
+  });
+});
+
+describe("refuseUndeclaredMutationReport", () => {
+  const declared = {
+    mutationReport: { command: "pnpm run mutate", reportPath: "m.json" },
+  };
+
+  it("[behavior:#303:B-06] refuses the flag when the launch manifest declares no mutation command", () => {
+    const reason = refuseUndeclaredMutationReport({
+      mutationReport: true,
+      manifest: { selectedSlices: ["01"] } as never,
+    });
+    expect(reason).toContain("--mutation-report");
+    expect(reason).toContain("mutationReport");
+    // Named so the operator can fix it without reading source: what to add and
+    // where, plus the alternative of dropping the flag.
+    expect(reason).toContain("afk.json");
+  });
+
+  it("[behavior:#303:B-06] refuses just as hard when there is no manifest at all", () => {
+    expect(
+      refuseUndeclaredMutationReport({ mutationReport: true, manifest: null }),
+    ).toContain("--mutation-report");
+  });
+
+  it("[behavior:#303:B-06] says nothing when the flag is absent or the command is declared", () => {
+    expect(
+      refuseUndeclaredMutationReport({ mutationReport: undefined, manifest: null }),
+    ).toBeUndefined();
+    expect(
+      refuseUndeclaredMutationReport({ mutationReport: false, manifest: null }),
+    ).toBeUndefined();
+    expect(
+      refuseUndeclaredMutationReport({ mutationReport: true, manifest: declared }),
+    ).toBeUndefined();
+    // A declaration with no flag is inert: nothing runs and nothing is refused.
+    expect(
+      refuseUndeclaredMutationReport({
+        mutationReport: false,
+        manifest: declared,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("[behavior:#303:B-06] is a pure configuration refusal, not a preflight finding", async () => {
+    // ADR 0042 draws the line: a `PreflightFinding` is machine residue that
+    // `--preflight-report-only` may downgrade. A missing mutation command is a
+    // contradiction in the launch request itself — there is nothing to report
+    // on and nothing a waiver should be able to soften — so it is neither a
+    // `PreflightCheck` nor reachable through `preflight()`.
+    const report = await preflight({});
+    expect(refusals(report)).toHaveLength(0);
+    expect(JSON.stringify(report)).not.toContain("mutationReport");
+    expect(
+      refuseUndeclaredMutationReport({ mutationReport: true, manifest: null }),
+    ).toEqual(expect.any(String));
   });
 });
 
