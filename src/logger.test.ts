@@ -719,6 +719,59 @@ PM review: N/A
     );
   });
 
+  // #272: a Windows crash-range exit (0xC0000374, heap corruption under memory
+  // pressure) read as `FAIL (CONFIGURATION)` and sent an operator to debug an
+  // environment that a plain relaunch cleared.
+  it("renders a killed sanity process as ABNORMAL TERMINATION, not as CONFIGURATION", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "sanity-crash");
+    recordTerminal(log, id("1", "Pass", "afk/1"), { phase: "PASS" });
+    log.setSanityGate({
+      ok: false,
+      failures: ["install"],
+      failureKind: null,
+      terminationKind: "ABNORMAL_EXIT",
+      detail:
+        "pnpm install --frozen-lockfile terminated abnormally (exit 3221226356 " +
+        "= 0xC0000374 STATUS_HEAP_CORRUPTION) — relaunch the run",
+    });
+
+    const md = log.writeSummary();
+
+    expect(md).toContain(
+      "Pre-ship sanity gate: FAIL (ABNORMAL TERMINATION) — install: " +
+        "pnpm install --frozen-lockfile terminated abnormally",
+    );
+    expect(md).toContain("0xC0000374 STATUS_HEAP_CORRUPTION");
+    expect(md).not.toContain("CONFIGURATION");
+    const console_ = log.formatConsoleSummary();
+    expect(console_).toContain("FAIL (ABNORMAL TERMINATION) — install");
+    // The "Not ready" line names the action, not a broken environment.
+    expect(console_).toContain(
+      "sanity gate process was killed (ABNORMAL TERMINATION) — relaunch",
+    );
+    expect(console_).not.toContain("could not run (CONFIGURATION)");
+  });
+
+  it("names a red step's captured output beside the failing step (#272)", () => {
+    const repo = makeRepo();
+    const log = new Logger(repo, "sanity-red-detail");
+    recordTerminal(log, id("1", "Pass", "afk/1"), { phase: "PASS" });
+    log.setSanityGate({
+      ok: false,
+      failures: ["tests"],
+      failureKind: "COMMAND",
+      detail:
+        "tests failed (exit 1) — output: C:\\runs\\sanity-tests.log: " +
+        "Test Files 1 failed | 359 passed (360)",
+    });
+
+    expect(log.writeSummary()).toContain(
+      "Pre-ship sanity gate: FAIL (tests): tests failed (exit 1) — output: " +
+        "C:\\runs\\sanity-tests.log: Test Files 1 failed | 359 passed (360)",
+    );
+  });
+
   it("keeps the plain FAIL rendering for a red suite", () => {
     const repo = makeRepo();
     const log = new Logger(repo, "sanity-command");

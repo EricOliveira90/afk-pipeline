@@ -420,7 +420,17 @@ so husky never runs during the pipeline. Steps not defined in
 `package.json` are skipped, not failed. Failure short-circuits the
 guardians and the PR; the run-summary records the failing step names,
 and the run is a **blocked ship**.
-_Avoid_: "QA gate" (the evaluator already owns that term), "pre-push hook"
+It classifies a failure into one of three kinds, because they need three
+different operator responses: `CONFIGURATION` — the commands never really
+ran, so fix the environment; `ABNORMAL TERMINATION` — a command was killed
+by the OS (a Windows crash-range exit such as `0xC0000374`, a POSIX signal),
+so relaunch, and the tree is not implicated; `COMMAND` — the tree is red, so
+fix the code. A red step's own output is captured to
+`sanity-<step>.log` in the **run directory** and the verdict cites that path.
+The gate never retries itself in any of the three.
+_Avoid_: "QA gate" (the evaluator already owns that term), "pre-push hook",
+"CONFIGURATION failure" for a crashed process (that class asserts the
+operator's setup is at fault)
 
 **Ship gate**:
 The post-wave module that decides whether the merged **feature branch** may

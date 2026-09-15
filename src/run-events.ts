@@ -388,6 +388,15 @@ export type RunEventPayload =
        * (#101). A status reader can tell the two apart without parsing prose.
        */
       failureKind?: GateFailureKind;
+      /**
+       * Set instead of `failureKind` when the phase's own process was killed
+       * rather than reporting a verdict — a Windows crash-range exit code, a
+       * POSIX signal death (#272). Deliberately not a `GateFailureKind` member:
+       * the class belongs to the pre-ship sanity gate, and widening the shared
+       * union would ripple into the gate-evidence validator and every gate
+       * reader for one gate's benefit.
+       */
+      terminationKind?: "ABNORMAL_EXIT";
     }
   | {
       /**

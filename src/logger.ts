@@ -65,13 +65,22 @@ export type { SanityGateResult };
  * (CONFIGURATION)`, see `gate-outcome` rendering below) so a broken
  * environment cannot be mistaken for a red suite in the artifact an operator
  * reads (#101).
+ *
+ * A killed process is a third label, not either of those two (#272): reporting
+ * a `0xC0000374` heap corruption as `FAIL (CONFIGURATION)` asserts the
+ * operator's setup is at fault and sends them to debug an environment that was
+ * fine, when the action is a relaunch.
  */
 function sanityGateLabel(gate: SanityGateResult | undefined): string {
   if (!gate) return "N/A";
   if (gate.ok) return "PASS";
   const steps = gate.failures.join(", ");
-  if (gate.failureKind !== "CONFIGURATION") return `FAIL (${steps})`;
-  return `FAIL (CONFIGURATION) — ${steps}${gate.detail ? `: ${gate.detail}` : ""}`;
+  const detail = gate.detail ? `: ${gate.detail}` : "";
+  if (gate.terminationKind === "ABNORMAL_EXIT") {
+    return `FAIL (ABNORMAL TERMINATION) — ${steps}${detail}`;
+  }
+  if (gate.failureKind !== "CONFIGURATION") return `FAIL (${steps})${detail}`;
+  return `FAIL (CONFIGURATION) — ${steps}${detail}`;
 }
 
 /**
@@ -1032,9 +1041,11 @@ ${prUrl ? `PR: ${prUrl}` : ""}${prOverrideNote ? `\n${prOverrideNote}` : ""}
       if (cancelled.length > 0) reasons.push(`${cancelled.length} cancelled`);
       if (sanityGate && !sanityGate.ok) {
         reasons.push(
-          sanityGate.failureKind === "CONFIGURATION"
-            ? "sanity gate could not run (CONFIGURATION)"
-            : "sanity gate failed",
+          sanityGate.terminationKind === "ABNORMAL_EXIT"
+            ? "sanity gate process was killed (ABNORMAL TERMINATION) — relaunch"
+            : sanityGate.failureKind === "CONFIGURATION"
+              ? "sanity gate could not run (CONFIGURATION)"
+              : "sanity gate failed",
         );
       }
       if (!sanityGate) reasons.push("sanity gate not run");

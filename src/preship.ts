@@ -1,5 +1,12 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  openSync,
+  readFileSync,
+  readSync,
+  statSync,
+} from "node:fs";
 import { join } from "node:path";
 import type { GateFailureKind } from "./gate-runner.js";
 
@@ -274,34 +281,63 @@ export interface SanityCommandOutcome {
   exitCode: number | null;
   /** Command output, captured when the caller asked for it. */
   output?: string;
+  /**
+   * The signal that killed the child, on a platform that reports one. POSIX's
+   * analogue of a Windows crash-range exit code: `execFileSync` leaves `status`
+   * null and sets `signal` when a child dies by SIGSEGV or SIGKILL, so without
+   * this field a signal death is indistinguishable from a child that never
+   * started (#272).
+   */
+  signal?: string | null;
 }
 
 /**
  * Subprocess seam for the sanity commands. Production uses `execFileSync`;
  * direct tests inject a deterministic runner so no suite pays a real
  * registry install (ADR 0033).
+ *
+ * `logPath`, when set, is where the child's stdout and stderr go instead of the
+ * launcher's console — see {@link RunPreShipSanityOptions.stepLogDir}. An
+ * injected runner may ignore it.
  */
 export type SanityCommandRunner = (
   command: string,
   args: readonly string[],
-  options: { cwd: string; capture: boolean },
+  options: { cwd: string; capture: boolean; logPath?: string },
 ) => SanityCommandOutcome;
 
 const defaultRunCommand: SanityCommandRunner = (command, args, options) => {
+  // A step's output goes to its own log file when the caller named one, so a
+  // red step can cite a path instead of sending an operator to grep the
+  // launcher's stdout (#272). The child appends as it runs, so the file is
+  // tailable live — but if it cannot be opened, streaming is the better
+  // failure: the gate must still run.
+  let logFd: number | undefined;
+  if (options.logPath) {
+    try {
+      logFd = openSync(options.logPath, "w");
+    } catch {
+      logFd = undefined;
+    }
+  }
   try {
-    // Steps stream to the launcher's stdout as they always have; only the
-    // install is captured, so its diagnostic can reach the run log (#101).
+    // Steps stream to the launcher's stdout as they always have unless a log
+    // file was named; only the install is captured, so its diagnostic can
+    // reach the run log (#101).
     const stdout = execFileSync(command, [...args], {
       cwd: options.cwd,
       encoding: "utf-8",
       stdio: options.capture
         ? ["ignore", "pipe", "pipe"]
-        : ["ignore", "inherit", "inherit"],
+        : logFd !== undefined
+          ? ["ignore", logFd, logFd]
+          : ["ignore", "inherit", "inherit"],
     });
     return { outcome: "EXITED", exitCode: 0, output: stdout ?? undefined };
   } catch (error) {
     const failure = error as {
       status?: number | null;
+      signal?: string | null;
       stdout?: unknown;
       stderr?: unknown;
     };
@@ -310,12 +346,32 @@ const defaultRunCommand: SanityCommandRunner = (command, args, options) => {
       .join("");
     // `status` is set when the child ran and exited. When it is absent the
     // child never started (ENOENT — `pnpm` is not installed), which the
-    // gate-runner classifies as CONFIGURATION rather than COMMAND.
+    // gate-runner classifies as CONFIGURATION rather than COMMAND — unless a
+    // signal is reported, which means the child ran and was killed.
     if (typeof failure?.status === "number") {
-      return { outcome: "EXITED", exitCode: failure.status, output };
+      // `undefined`, not `""`: with the child's streams pointed at a log file
+      // (or inherited) there is no captured output at all, and a caller must be
+      // able to tell that from a command that printed nothing.
+      return { outcome: "EXITED", exitCode: failure.status, output: output || undefined };
+    }
+    if (typeof failure?.signal === "string" && failure.signal) {
+      return {
+        outcome: "EXITED",
+        exitCode: null,
+        output,
+        signal: failure.signal,
+      };
     }
     const message = error instanceof Error ? error.message : String(error);
     return { outcome: "SPAWN_ERROR", exitCode: null, output: output || message };
+  } finally {
+    if (logFd !== undefined) {
+      try {
+        closeSync(logFd);
+      } catch {
+        // Best effort — the child's output is already on disk.
+      }
+    }
   }
 };
 
@@ -332,15 +388,92 @@ export interface SanityGateResult {
    * Why the gate failed, in the gate-runner vocabulary shared with the
    * per-slice base gates (#101): `"COMMAND"` — the reviewed tree is red;
    * `"CONFIGURATION"` — the commands never really ran, because the
-   * environment could not be prepared. `null` when the gate passed.
+   * environment could not be prepared. `null` when the gate passed, and also
+   * when {@link SanityGateResult.terminationKind} is set: a process the OS
+   * killed is neither of the two, exactly as `classifyExecution` pairs its
+   * `INFRASTRUCTURE` status with `failureKind: null`.
    */
   failureKind: GateFailureKind;
   /**
-   * Operator-facing diagnostic for a CONFIGURATION failure: the command that
-   * could not run plus a tail of its own output. Single line, so it is safe
-   * in both `run.log` and `run-summary.md`.
+   * Set when a command was terminated abnormally instead of deciding to fail
+   * (#272): a Windows crash-range exit code, or a POSIX signal death. Local to
+   * this gate on purpose — widening the shared `GateFailureKind` union would
+   * ripple into the gate-evidence validator, the run-event type and every gate
+   * reader for one gate's benefit.
+   *
+   * The operator action it recommends is a relaunch, and the gate still blocks:
+   * it never retries itself.
+   */
+  terminationKind?: "ABNORMAL_EXIT";
+  /**
+   * Operator-facing diagnostic for a failure: the command that could not run
+   * plus a tail of its own output, or — for a red step whose output was
+   * captured to a file — the failing step, its exit code and that file's path.
+   * Single line, so it is safe in both `run.log` and `run-summary.md`.
    */
   detail?: string;
+}
+
+/**
+ * The base of the Windows NTSTATUS *error* range: a process whose exit code has
+ * this bit pattern was terminated by the operating system, not by its own
+ * `exit()`. `0xC0000374` (3221226356) is `STATUS_HEAP_CORRUPTION`, the exit that
+ * #272 was filed for.
+ */
+const NTSTATUS_ERROR_BASE = 0xc0000000;
+
+/** The crash codes worth naming, so a summary line does not need a lookup. */
+const NTSTATUS_NAMES: ReadonlyMap<number, string> = new Map([
+  [0xc0000005, "STATUS_ACCESS_VIOLATION"],
+  [0xc00000fd, "STATUS_STACK_OVERFLOW"],
+  [0xc000013a, "STATUS_CONTROL_C_EXIT"],
+  [0xc0000374, "STATUS_HEAP_CORRUPTION"],
+  [0xc0000409, "STATUS_STACK_BUFFER_OVERRUN"],
+]);
+
+/**
+ * Whether an exit code means the process was *killed* rather than that the check
+ * it ran decided to fail (#272).
+ *
+ * Two shapes, one per platform family:
+ * - Windows: an exit code at or above `0xC0000000` as unsigned is an NTSTATUS
+ *   error — `0xC0000374` heap corruption, `0xC0000005` access violation,
+ *   `0xC000013A` Ctrl-C. No tool chooses to exit with one, and the codes are
+ *   far outside the 0-255 range a real verdict uses, so the test is safe to run
+ *   on every platform.
+ * - POSIX: a shell reports a signal death as `128 + signo`, so 129-192 (signal
+ *   numbers run to `SIGRTMAX`) is a killed child. Bounded at 192 so a plain
+ *   255 — a common generic error code — stays a verdict, and gated on the
+ *   platform because a Windows tool may legitimately exit 130.
+ *
+ * `pnpm` exit 1 (a lockfile mismatch) stays false: that is a real, reproducible
+ * configuration fault an operator must fix, and the whole point of the split is
+ * that the two need opposite responses.
+ */
+export function isAbnormalTerminationExit(
+  code: number | null,
+  platform: string = process.platform,
+): boolean {
+  if (code == null || !Number.isInteger(code)) return false;
+  if ((code >>> 0) >= NTSTATUS_ERROR_BASE) return true;
+  return platform !== "win32" && code > 128 && code <= 192;
+}
+
+/** Whether one outcome is a killed process rather than a reported verdict. */
+function isAbnormalTermination(result: SanityCommandOutcome): boolean {
+  if (result.signal) return true;
+  return result.outcome === "EXITED" && isAbnormalTerminationExit(result.exitCode);
+}
+
+/** `exit 3221226356 = 0xC0000374 STATUS_HEAP_CORRUPTION` */
+function formatAbnormalExit(code: number): string {
+  const unsigned = code >>> 0;
+  const name = NTSTATUS_NAMES.get(unsigned);
+  const hex =
+    unsigned >= NTSTATUS_ERROR_BASE
+      ? ` = 0x${unsigned.toString(16).toUpperCase()}${name ? ` ${name}` : ""}`
+      : "";
+  return `exit ${code}${hex}`;
 }
 
 /** Last few non-empty output lines, flattened onto one line. */
@@ -351,6 +484,28 @@ function outputTail(output: string, maxLines = 5, maxChars = 500): string {
     .filter(Boolean);
   const tail = lines.slice(-maxLines).join(" | ");
   return tail.length > maxChars ? `${tail.slice(0, maxChars)}…` : tail;
+}
+
+/**
+ * The end of a step's log file, bounded: a suite log can be megabytes and only
+ * its last lines carry the verdict.
+ */
+function readLogTail(path: string, maxBytes = 8192): string {
+  try {
+    const size = statSync(path).size;
+    if (size === 0) return "";
+    const length = Math.min(size, maxBytes);
+    const buffer = Buffer.alloc(length);
+    const fd = openSync(path, "r");
+    try {
+      readSync(fd, buffer, 0, length, size - length);
+    } finally {
+      closeSync(fd);
+    }
+    return buffer.toString("utf-8");
+  } catch {
+    return "";
+  }
 }
 
 function configurationFailure(
@@ -371,16 +526,85 @@ function configurationFailure(
 }
 
 /**
+ * A command the operating system killed. Not CONFIGURATION: that class asserts
+ * the operator's environment is at fault and sends them to fix their tree,
+ * which is exactly the wrong instruction for a heap corruption under memory
+ * pressure that a plain relaunch clears (#272).
+ *
+ * The output tail is deliberately dropped. The reported incident attached
+ * pnpm's `Ignored build scripts … pnpm approve-builds` warning box as the
+ * cause — text that project prints on every *successful* install too — and an
+ * operator spent the time it invited. When the exit code is the diagnosis,
+ * trailing output that also appears in green runs is worse than nothing.
+ */
+function abnormalTerminationFailure(
+  entry: SanityCommand,
+  result: SanityCommandOutcome,
+): SanityGateResult {
+  const how = result.signal
+    ? `was killed by ${result.signal}`
+    : `terminated abnormally (${formatAbnormalExit(result.exitCode ?? 0)})`;
+  return {
+    ok: false,
+    failures: [entry.name],
+    failureKind: null,
+    terminationKind: "ABNORMAL_EXIT",
+    detail:
+      `${formatSanityCommand(entry)} ${how} — the process was killed rather ` +
+      `than reporting a verdict, so this is the machine and not the tree; ` +
+      `relaunch the run`,
+  };
+}
+
+/** Where one step's captured output lands, inside `stepLogDir`. */
+function stepLogPath(
+  stepLogDir: string | undefined,
+  step: SanityCommand,
+): string | undefined {
+  if (!stepLogDir) return undefined;
+  const safeName = step.name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 24);
+  return join(stepLogDir, `sanity-${safeName || "step"}.log`);
+}
+
+export interface RunPreShipSanityOptions {
+  /**
+   * Directory the steps' stdout and stderr are captured into, one
+   * `sanity-<step>.log` per step. Absent — every direct test, and any caller
+   * that has no run directory — leaves today's behaviour exactly as it was:
+   * output streams to the launcher's console and nothing is written.
+   *
+   * The trade #272 asks for. Streaming a 17-30 minute suite live to the
+   * launcher is what an operator watches today, so the capture keeps the output
+   * live *in a file the child appends to* (tailable) and the gate announces the
+   * path through {@link RunPreShipSanityOptions.onStepStart} before the step
+   * runs. What it buys is a red step that names its exit code and a path,
+   * instead of a bare `FAIL (tests)` that costs an operator a grep through the
+   * launcher log to find 1 failure in 4916.
+   */
+  stepLogDir?: string;
+  /**
+   * Called before each step runs, with the log path when one was resolved. The
+   * gate's progress line: which step is running, and where to watch it.
+   */
+  onStepStart?: (step: SanityCommand, logPath?: string) => void;
+}
+
+/**
  * Installs dependencies, then runs typecheck, lint, and tests against the
  * merged feature branch. Missing scripts are skipped; step failures are
- * collected so the summary names every failed step. A failure that means the
- * commands never really ran — the install failed, or `pnpm` itself is absent
- * — is reported as CONFIGURATION so an operator can tell a broken environment
- * from a red suite (#101).
+ * collected so the summary names every failed step.
+ *
+ * Three failure classes, because they need three different operator responses:
+ * - CONFIGURATION — the commands never really ran (the install failed on a real
+ *   lockfile fault, or `pnpm` is absent from PATH). Fix the environment (#101).
+ * - ABNORMAL_EXIT — a command was killed by the OS (a Windows crash-range exit,
+ *   a POSIX signal). Relaunch; the tree is not implicated (#272).
+ * - COMMAND — the reviewed tree is red. Fix the code.
  */
 export function runPreShipSanity(
   cwd: string,
   runCommand: SanityCommandRunner = defaultRunCommand,
+  options: RunPreShipSanityOptions = {},
 ): SanityGateResult {
   const plan = resolveSanityPlan(cwd);
   if (plan.steps.length === 0) {
@@ -392,25 +616,56 @@ export function runPreShipSanity(
       cwd,
       capture: true,
     });
+    if (isAbnormalTermination(prepared)) {
+      return abnormalTerminationFailure(plan.prepare, prepared);
+    }
     if (prepared.outcome === "SPAWN_ERROR" || prepared.exitCode !== 0) {
       return configurationFailure(plan.prepare, prepared);
     }
   }
 
   const failures: string[] = [];
+  const details: string[] = [];
   for (const step of plan.steps) {
+    const logPath = stepLogPath(options.stepLogDir, step);
+    options.onStepStart?.(step, logPath);
     const result = runCommand(step.command, step.args, {
       cwd,
       capture: false,
+      ...(logPath ? { logPath } : {}),
     });
     // `pnpm` missing from PATH fails every step for the same environmental
     // reason; report it once, as configuration, instead of blaming the tree.
     if (result.outcome === "SPAWN_ERROR") {
       return configurationFailure(step, result);
     }
-    if (result.exitCode !== 0) failures.push(step.name);
+    // A killed step is not a red step: stop, and say so, rather than letting a
+    // crash join the failing-step list as if the suite had reported it.
+    if (isAbnormalTermination(result)) {
+      return abnormalTerminationFailure(step, result);
+    }
+    if (result.exitCode !== 0) {
+      failures.push(step.name);
+      // `||`, not `??`: a step whose streams went to the log file reports no
+      // captured output, and an empty string must fall through to the file.
+      const tail = outputTail(
+        result.output || (logPath ? readLogTail(logPath) : ""),
+        3,
+        300,
+      );
+      details.push(
+        `${step.name} failed (exit ${result.exitCode})` +
+          `${logPath ? ` — output: ${logPath}` : ""}` +
+          `${tail ? `: ${tail}` : ""}`,
+      );
+    }
   }
   return failures.length === 0
     ? { ok: true, failures: [], failureKind: null }
-    : { ok: false, failures, failureKind: "COMMAND" };
+    : {
+        ok: false,
+        failures,
+        failureKind: "COMMAND",
+        detail: details.join("; "),
+      };
 }

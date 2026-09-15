@@ -945,6 +945,52 @@ describe("runShipGate", () => {
     expect(runCommand).not.toHaveBeenCalled();
   });
 
+  // #272: the install died with 0xC0000374 (heap corruption, host under memory
+  // pressure) and the block read `CONFIGURATION` — the one class that asserts
+  // the operator's tree is at fault. A plain relaunch cleared it.
+  it("blocks a crashed install as an abnormal termination that asks for a relaunch (#272)", async () => {
+    const repo = makeRepo();
+    const slug = "install-crash";
+    commitSanityProject(repo);
+
+    const fixture = makeJournal();
+    const event = vi.fn();
+    const journal: ShipGateJournal = { ...fixture.journal, event };
+    const invoke = vi.fn(async () => {
+      throw new Error("a killed process must not reach guardians");
+    });
+    const runCommand = vi.fn<ShipCommandRunner>(() => "");
+    const sanityRunCommand = stubSanityRunner([], () => ({
+      // 0xC0000374 STATUS_HEAP_CORRUPTION, with the warning box this project
+      // prints on every green install too.
+      exitCode: 3221226356,
+      output: 'Ignored build scripts: unrs-resolver@1.11.1. Run "pnpm approve-builds"',
+    }));
+
+    const result = await runShipGate({
+      ...makeArgs(repo, slug, journal, invoke, runCommand),
+      sanityRunCommand,
+    });
+
+    expect(result.verdict).toBe("BLOCKED");
+    expect(result.failureReason).toContain("ABNORMAL TERMINATION: install");
+    expect(result.failureReason).toContain("relaunch the run");
+    expect(result.failureReason).toContain("0xC0000374 STATUS_HEAP_CORRUPTION");
+    // Neither the misleading class nor the non-discriminating tail.
+    expect(result.failureReason).not.toContain("CONFIGURATION");
+    expect(result.failureReason).not.toContain("approve-builds");
+    // The gate still blocks and never retries itself.
+    expect(invoke).not.toHaveBeenCalled();
+    expect(event).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "run-phase-ended",
+        phase: "sanity",
+        verdict: "FAIL",
+        terminationKind: "ABNORMAL_EXIT",
+      }),
+    );
+  });
+
   it("records the CONFIGURATION kind on the sanity phase event and in the summary", async () => {
     const repo = makeRepo();
     const slug = "install-config-event";

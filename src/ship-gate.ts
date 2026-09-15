@@ -707,7 +707,18 @@ export async function runShipGate(
     );
   } else {
     journal.event({ type: "run-phase-started", phase: "sanity" });
-    sanity = runPreShipSanity(reviewDir, sanityRunCommand);
+    sanity = runPreShipSanity(reviewDir, sanityRunCommand, {
+      // Each step's output lands beside the run's own logs, and the path is
+      // announced before the step runs so an operator can tail it live — the
+      // trade #272 asks for, which buys a red step that cites its exit code and
+      // a file instead of a bare `FAIL (tests)`.
+      stepLogDir: journal.runDir,
+      onStepStart: (step, logPath) =>
+        journal.phase(
+          `  ▶️  Sanity step ${step.name}${logPath ? ` → ${logPath}` : ""}`,
+          "log",
+        ),
+    });
   }
   journal.event({
     type: "run-phase-ended",
@@ -715,19 +726,28 @@ export async function runShipGate(
     cached: usesCachedSanity ? true : undefined,
     verdict: sanity.ok ? "PASS" : "FAIL",
     failureKind: sanity.ok ? undefined : sanity.failureKind ?? undefined,
+    terminationKind: sanity.terminationKind,
   });
   journal.setSanityGate(sanity);
   if (!sanity.ok) {
     const failedSteps = sanity.failures.join(", ");
+    const detail = sanity.detail ? `: ${sanity.detail}` : "";
     // A CONFIGURATION failure means the commands never really ran, so the
-    // block belongs to the environment, not to the reviewed tree (#101).
-    // Written once, for both the run-log line and the blocker reason.
+    // block belongs to the environment, not to the reviewed tree (#101). A
+    // killed process is a third case with a third action — relaunch — and must
+    // not borrow CONFIGURATION's wording, which asserts the operator's setup is
+    // at fault (#272). Written once, for both the run-log line and the blocker
+    // reason.
     const reason =
-      sanity.failureKind === "CONFIGURATION"
-        ? `sanity gate failed (CONFIGURATION: ${failedSteps}) — ` +
-          "a configuration failure of the environment, not a code failure" +
-          `${sanity.detail ? `: ${sanity.detail}` : ""}`
-        : `sanity gate failed (${failedSteps})`;
+      sanity.terminationKind === "ABNORMAL_EXIT"
+        ? `sanity gate did not complete (ABNORMAL TERMINATION: ${failedSteps}) — ` +
+          "the process was killed by the operating system, not by a failing " +
+          `check; relaunch the run${detail}`
+        : sanity.failureKind === "CONFIGURATION"
+          ? `sanity gate failed (CONFIGURATION: ${failedSteps}) — ` +
+            "a configuration failure of the environment, not a code failure" +
+            `${detail}`
+          : `sanity gate failed (${failedSteps})${detail}`;
     journal.phase(
       `  ❌ Pre-ship ${reason}. Skipping guardian reviews and PR creation.`,
     );
