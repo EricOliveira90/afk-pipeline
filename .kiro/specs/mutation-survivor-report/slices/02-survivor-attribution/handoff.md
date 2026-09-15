@@ -98,3 +98,21 @@
 - No heavy suite exercises the mutation step's survivors — `orchestrator.test.ts`
   and `qa-orchestration.test.ts` mention "mutation" only in unrelated fixture
   names and a `RUN_STATE_VERSION` comment.
+- The `tests` gate on the round-1 candidate reported one failure, in
+  `src/qa-orchestration-gates.test.ts` (`shared-preview QA` →
+  `[behavior:P-04] keeps deterministic and UAT findings isolated across a UAT
+  retry`) — a file this slice never touches (`git diff` against
+  `feat-claude-code/mutation-survivor-report` lists neither it nor
+  `src/orchestrator.ts`), so no code path in this slice reaches it. Its failure
+  mode is load-induced and self-amplifying: the stub provider asserts the
+  shared-preview marker file equals `"verify\napply\n".repeat(n)`, so if attempt
+  1's `applyMigrationCommand` never appends — `runHeartbeatCommand`'s
+  inactivity timeout under a saturated host — the marker is permanently polluted
+  with an extra `verify`, every later attempt's equality assertion fails on the
+  stale prefix, and the infrastructure retry loop ends with
+  `shared-preview infrastructure failed after 3 attempt(s)`. That is the exact
+  message and the exact `'verify\nverify\napply\nverify\napply\n'` value the
+  gate log recorded. A future round seeing it again should read it as host load,
+  not as slice behavior; making the test resilient means asserting a suffix or
+  resetting the marker per attempt, both edits to
+  `src/qa-orchestration-gates.test.ts`, outside this slice's file scope.
