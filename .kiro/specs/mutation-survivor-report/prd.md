@@ -83,6 +83,19 @@ already-adjudicated survivors as accepted instead of re-raising them.
   bound is flat and not configurable in this PRD.
 - Declared command + declared JSON path; mutation-testing-elements schema;
   flag without declaration refuses launch before any agent dispatch.
+- **Settled 2026-09-14 (#303): the declaring surface is `<prd-dir>/afk.json`.**
+  One optional `mutationReport` member of `command` and `reportPath`, validated
+  and returned by the same strict validator (`parseAfkManifest`) and read before
+  any agent dispatch; `#304` extends the same member with optional
+  `baselinePath` and `decisionsPath`. `reportPath` names one exact file,
+  repo-relative to the tree the mutation command runs in, with no glob, no
+  absolute path and no parent traversal. `afk.json` stays at `version: 1`, and
+  the ADR states that as a condition on the parser rather than as a reserved
+  number (#249). The refusal is a throw from the manifest fail-closed block, not
+  a `PreflightFinding`, so `--preflight-report-only` cannot bypass it. No CLI
+  flags for either value: a flag may narrow a declared value later, as
+  `--test-command` narrows a catalog-derived value under ADR 0038, but not here.
+  Full reasoning and the rejected alternatives are in #303's body.
 - Concurrent start with guardians on the merged feature branch; differential
   scope from the change-summary builder, filtered to mutation-eligible
   source files.
