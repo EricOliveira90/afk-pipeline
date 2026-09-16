@@ -25,6 +25,7 @@ import {
   approvedBaselineFor,
   recordApprovedBaseline,
   cleanerRoundsSpent,
+  recordMutationStepOutcome,
   recordQualityStageOutcome,
   recordQualityStageRound,
   RUN_STATE_VERSION,
@@ -983,12 +984,13 @@ describe("RunState.appliedWaivers", () => {
 describe("[behavior:#87:B-14] persisted quality stages", () => {
   const REPO_ISSUE = "87";
 
-  it("[behavior:#87:B-14] pins the written schema at 6 and keeps 3-5 assignable", () => {
-    // 5 -> 6 for `qualityStages`, once. `RunState.version` still admits 3, 4
-    // and 5 so a caller or fixture holding an older record keeps compiling,
-    // and nothing reads one of those back out of a loaded state.
-    expect(RUN_STATE_VERSION).toBe(6);
-    const older: RunState["version"][] = [3, 4, 5, 6];
+  it("[behavior:#87:B-14] pins the written schema and keeps 3-6 assignable", () => {
+    // 5 -> 6 for `qualityStages`, then 6 -> 7 for `mutationStep` (#303 B-13).
+    // `RunState.version` still admits 3-6 so a caller or fixture holding an
+    // older record keeps compiling, and nothing reads one of those back out of
+    // a loaded state.
+    expect(RUN_STATE_VERSION).toBe(7);
+    const older: RunState["version"][] = [3, 4, 5, 6, 7];
     expect(older).toContain(RUN_STATE_VERSION);
   });
 
@@ -1256,5 +1258,210 @@ describe("cross-process run-state locking", () => {
     expect(
       readFileSync(join(repo, ".afk", "state", "conditional.json"), "utf-8"),
     ).toBe(before);
+  });
+});
+
+/**
+ * v7 is purely additive: one optional record of the ship gate's report-only
+ * mutation step, carrying the run's own slug as provenance so a summary or PR
+ * body can never attribute one run's survivors to another (#303 B-13).
+ */
+describe("[behavior:#303:B-13] the persisted mutation step", () => {
+  const RECORD = {
+    runSlug: "afk-claude-code-demo",
+    status: "MUTATION_REPORTED" as const,
+    survivors: [
+      {
+        id: "7",
+        file: "src/cart.ts",
+        mutator: "ArithmeticOperator",
+        position: { startLine: 12, startColumn: 3, endLine: 12, endColumn: 9 },
+      },
+    ],
+  };
+
+  it("[behavior:#303:B-13] round-trips the outcome, and the loaded provenance is the slug it was written under", () => {
+    const repo = makeRepo();
+    saveRunState(repo, {
+      version: RUN_STATE_VERSION,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      slices: {},
+    });
+
+    recordMutationStepOutcome(repo, "demo", RECORD);
+
+    const loaded = loadRunState(repo, "demo");
+    expect(loaded.mutationStep).toEqual(RECORD);
+    // Provenance, not decoration: the reader compares what it loaded against
+    // the run it belongs to, so a stale record from an earlier run of the same
+    // PRD cannot be republished as this run's answer.
+    expect(loaded.mutationStep?.runSlug).toBe(RECORD.runSlug);
+    expect(loaded.version).toBe(7);
+  });
+
+  it("[behavior:#303:B-13] round-trips a not-run outcome with its reason and no survivors", () => {
+    const repo = makeRepo();
+    saveRunState(repo, {
+      version: RUN_STATE_VERSION,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      slices: {},
+    });
+
+    recordMutationStepOutcome(repo, "demo", {
+      runSlug: "afk-claude-code-demo",
+      status: "MUTATION_NOT_RUN",
+      reason: "BOUND_REACHED",
+      survivors: [],
+    });
+
+    expect(loadRunState(repo, "demo").mutationStep).toEqual({
+      runSlug: "afk-claude-code-demo",
+      status: "MUTATION_NOT_RUN",
+      reason: "BOUND_REACHED",
+      survivors: [],
+    });
+  });
+
+  it("[behavior:#303:B-13] degrades a record it cannot trust rather than loading half of it", () => {
+    // A dropped survivor would report a shorter list than the tool produced,
+    // which reads as a suite that did better than it did.
+    expect(
+      adaptLoadedState(
+        { version: 7, featureBranch: "feat/demo", slices: {}, mutationStep: RECORD },
+        "demo",
+      ).mutationStep,
+    ).toEqual(RECORD);
+    for (const broken of [
+      { ...RECORD, runSlug: "  " },
+      { ...RECORD, status: "MUTATION_MAYBE" },
+      { ...RECORD, survivors: "one" },
+      { ...RECORD, survivors: [{ ...RECORD.survivors[0]!, id: "" }] },
+      { ...RECORD, survivors: [{ ...RECORD.survivors[0]!, position: 12 }] },
+      "MUTATION_REPORTED",
+    ]) {
+      expect(
+        adaptLoadedState(
+          {
+            version: 7,
+            featureBranch: "feat/demo",
+            slices: {},
+            mutationStep: broken,
+          },
+          "demo",
+        ).mutationStep,
+      ).toBeUndefined();
+    }
+  });
+
+  it("[behavior:#304:B-11] round-trips every label and every attribution note", () => {
+    const repo = makeRepo();
+    saveRunState(repo, {
+      version: RUN_STATE_VERSION,
+      prdSlug: "demo",
+      featureBranch: "feat/demo",
+      slices: {},
+    });
+    const attributed = {
+      runSlug: "afk-claude-code-demo",
+      status: "MUTATION_REPORTED" as const,
+      survivors: [
+        { ...RECORD.survivors[0]!, label: "new-in-this-run" as const },
+        { ...RECORD.survivors[0]!, id: "8", label: "pre-existing" as const },
+        { ...RECORD.survivors[0]!, id: "9", label: "accepted" as const },
+        { ...RECORD.survivors[0]!, id: "10", label: "unattributed" as const },
+      ],
+      attributionNotes: [
+        "BASELINE_UNUSABLE" as const,
+        "DECISIONS_UNUSABLE" as const,
+      ],
+    };
+
+    recordMutationStepOutcome(repo, "demo", attributed);
+
+    const loaded = loadRunState(repo, "demo");
+    expect(loaded.mutationStep).toEqual(attributed);
+    // Purely additive: two optional members on a record that already existed, so
+    // the version a resumed run reads is the one it wrote.
+    expect(loaded.version).toBe(7);
+    expect(RUN_STATE_VERSION).toBe(7);
+  });
+
+  it("[behavior:#304:B-11] loads a pre-attribution record unchanged, labels and notes absent", () => {
+    // What such a record *means* is `unattributed`, and the render derivation is
+    // the one place that substitutes it — inventing a label here would put a
+    // claim in the state file the step never made.
+    const loaded = adaptLoadedState(
+      { version: 7, featureBranch: "feat/demo", slices: {}, mutationStep: RECORD },
+      "demo",
+    ).mutationStep;
+    expect(loaded).toEqual(RECORD);
+    expect("label" in loaded!.survivors[0]!).toBe(false);
+    expect("attributionNotes" in loaded!).toBe(false);
+  });
+
+  it("[behavior:#304:B-11] drops a label or note it does not recognise, keeping the survivor", () => {
+    const loaded = adaptLoadedState(
+      {
+        version: 7,
+        featureBranch: "feat/demo",
+        slices: {},
+        mutationStep: {
+          ...RECORD,
+          survivors: [{ ...RECORD.survivors[0]!, label: "probably-fine" }],
+          attributionNotes: ["BASELINE_UNUSABLE", "VIBES", 7],
+        },
+      },
+      "demo",
+    ).mutationStep;
+    // A survivor is the load-bearing part: an unreadable label is worth less
+    // than the bullet it sits on, so the label goes and the mutant stays.
+    expect(loaded?.survivors).toEqual(RECORD.survivors);
+    expect(loaded?.attributionNotes).toEqual(["BASELINE_UNUSABLE"]);
+  });
+
+  it("[behavior:#304:B-11] leaves attributionNotes absent when nothing degraded", () => {
+    const loaded = adaptLoadedState(
+      {
+        version: 7,
+        featureBranch: "feat/demo",
+        slices: {},
+        mutationStep: { ...RECORD, attributionNotes: [] },
+      },
+      "demo",
+    ).mutationStep;
+    // Absence discipline: an empty array would round-trip into the state file as
+    // a degradation record for a run that had none.
+    expect("attributionNotes" in loaded!).toBe(false);
+  });
+
+  it("[behavior:#303:P-05] still loads a v3 through v6 record, as a run with no mutation step", () => {
+    for (const version of [3, 4, 5, 6]) {
+      const repo = makeRepo();
+      mkdirSync(join(repo, ".afk", "state"), { recursive: true });
+      const statePath = join(repo, ".afk", "state", "demo.json");
+      const onDisk = `${JSON.stringify(
+        {
+          version,
+          prdSlug: "demo",
+          featureBranch: "feat/demo",
+          slices: { "303": { phase: "PASS", branch: "afk/demo-01" } },
+        },
+        null,
+        2,
+      )}\n`;
+      writeFileSync(statePath, onDisk);
+
+      const loaded = loadRunState(repo, "demo");
+
+      expect(loaded.version).toBe(RUN_STATE_VERSION);
+      // Absent, not empty: "no step ran" and "the step ran and found nothing"
+      // are different answers, and only the second one has a survivor list.
+      expect(loaded.mutationStep).toBeUndefined();
+      expect(loaded.slices["303"]?.phase).toBe("PASS");
+      // Adapting in memory still rewrites nothing.
+      expect(readFileSync(statePath, "utf8")).toBe(onDisk);
+    }
   });
 });

@@ -1,0 +1,43 @@
+{
+  "version": 2,
+  "verdict": "ACCEPT",
+  "findings": [
+    {
+      "id": "F-09",
+      "severity": "BLOCKING",
+      "behaviorIds": ["B-07"],
+      "evidence": "B-07's revised manifest observable is \"src/mutation-report.test.ts's B-07 case asserts that ordering over src/orchestrator.ts's text, while the refusal reason itself is B-06's assertion in src/preflight.test.ts — both files are in this manifest's fileScope, src/orchestrator.test.ts is not in scope and is not edited, and no test in this slice drives runPipeline\", and the contract records \"the observable for that ordering claim is a source-position assertion in `src/mutation-report.test.ts`, and `src/orchestrator.test.ts` stays out of this slice's file scope\".",
+      "expected": "Every behavior's `acceptance:behaviors` gate (`vitest run --testNamePattern {behaviorId}`) can produce evidence from a test that lives in a file the slice is allowed to change, and the file that will hold each declared observable appears in the acceptance manifest's `fileScope`.",
+      "observed": "Branch (b) of the clear condition is taken and it holds. B-07's observable now names `src/mutation-report.test.ts` (fileScope entry, contract file list) for the ordering claim and `src/preflight.test.ts` (also in scope) for the refusal reason, so `--testNamePattern B-07` matches a test the generator may write. The declared shape exists and is satisfiable: `src/eval-boundary.test.ts:166-186` is a real source-position case (`P-01`, reading a source file as text and comparing `indexOf` positions with `toBeGreaterThan`/`toBeLessThan`), and every anchor the ordering pins was checked in this worktree — `assertWithinManifestScope({` occurs exactly once at `src/orchestrator.ts:8501` (the only other mention is the import at `:223`, which does not match the `({` form), `const initialized = updateRunState(` exactly once at `:8509`, `runLaunchPreflight(` exactly once at `:8545`, `runWave(` exactly once at `:9178`. The load-bearing half of GH #303 AC2 — the refusal sitting inside the `8497-8508` fail-closed block and ahead of the run's first `updateRunState` — is therefore observable from an in-scope seam, and `--preflight-report-only` non-bypassability follows from the refusal preceding `runLaunchPreflight(` (P-04, ADR 0042). The spawned-scenario non-goal is untouched: `src/orchestrator.test.ts` stays out of `fileScope.paths` and no declared test drives `runPipeline`.",
+      "clearCondition": "B-07's observable names a file that is in `fileScope`, one of: (a) add `src/orchestrator.test.ts` to the contract's file list and the manifest's `fileScope.paths` and name in B-07 the concrete existing scenario whose shared result the new `B-07` `it` rides — reconciling that with the spawned-scenario non-goal by stating that no new spawn is added; or (b) restate B-07's observable at an in-scope seam that can actually see the ordering claim (for example a source-position assertion in `src/mutation-report.test.ts` or `src/preflight.test.ts`, in the shape of `src/eval-boundary.test.ts`'s source-reading assertions, that the refusal call site sits inside the `assertWithinManifestScope` block and ahead of the `updateRunState` call at `src/orchestrator.ts:8509`), with the manifest's `observableResult` naming that file explicitly.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-10",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-13"],
+      "evidence": "B-13 now records \"the identifier that provenance value is the run's `runSlug` — the provider-qualified slug `runSlugForProviderName` produces (`src/run-identity.ts:23`)\", and the manifest observable is \"src/run-state.test.ts asserts the write->load round-trip through adaptLoadedState comparing the loaded provenance value against the `runSlug` the record was written under\".",
+      "expected": "The identifier that constitutes \"run-ID provenance\" is named, so the round-trip assertion has a definite value to compare rather than only a field's presence.",
+      "observed": "The identifier is named and every citation behind it checks out in this worktree: `runSlugForProviderName` is declared at `src/run-identity.ts:23`, `runSlug: string;` is a member of `RunShipGateArgs` at `src/ship-gate.ts:584`, and `src/run-state.ts:1389` is the `runSlug` parameter that `saveAppliedWaivers` hands to `updateRunState` at `:1394`, so the run slug is already the key run state is written under and no new identifier is minted. The round-trip now compares a known value rather than field presence, and the contract's Test plan bullet, Definition of done item and New patterns entry carry the same value, so the contract does not disagree with itself about what is persisted. One imprecision worth noting rather than reopening: `src/run-state.ts:1389` is a caller's parameter, not `updateRunState`'s own signature — the substantive claim (the state file is keyed by run slug) is correct.",
+      "clearCondition": "B-13 names the identifier the provenance field carries (e.g. the run's `runSlug`, sourced from `src/run-identity.ts`) so the `src/run-state.test.ts` round-trip asserts a known value rather than field presence alone.",
+      "state": "RESOLVED",
+      "revisionCitation": null
+    },
+    {
+      "id": "F-11",
+      "severity": "ADVISORY",
+      "behaviorIds": ["B-07"],
+      "evidence": "B-07's revised `then` ends \"and precedes `runWave(`, at or after which every worktree creation, branch creation and agent dispatch happens\", and the contract's matching Test plan bullet says the ordering shows the throw \"precedes the first run-state mutation, the launch preflight that `--preflight-report-only` governs, and every worktree, branch and dispatch\".",
+      "expected": "A scenario's stated rationale for why an anchor carries a claim should describe what the code actually does, so a later reader cannot conclude that the anchor guarantees more than it does.",
+      "observed": "The `runWave(` rationale is not accurate: branch creation happens well before `runWave(`. `git.createBranch(repoRoot, featBranch, baseBranch)` runs at `src/orchestrator.ts:8627`, the launch guard `git.ensureFeatureBranchContainsHostHead(...)` at `:8640` can fast-forward that branch, and ADR 0029 merge-only recovery merges slice branches from `:8921` onward — all between `updateRunState(` at `:8509` and `runWave(` at `:9178`. So `runWave(` is not the point \"at or after which ... branch creation ... happens\". This is rationale, not assertion: the positional facts the test compares are all true, and the claim the gate actually needs is carried by the refusal preceding `const initialized = updateRunState(` at `:8509` — the run's first mutation, ahead of every branch, worktree and dispatch listed above. Nothing a broken implementation could do would slip past the declared assertion because of this sentence, which is why it is advisory rather than blocking.",
+      "clearCondition": "B-07's `then` and the matching Test plan bullet describe `runWave(` as the anchor for worktree creation and agent dispatch only (branch creation is already covered by the `:8509` anchor), or drop the `runWave(` rationale clause and rest the ordering claim on the refusal preceding `const initialized = updateRunState(` at `src/orchestrator.ts:8509`; the pinned positions themselves need no change.",
+      "state": "OPEN",
+      "revisionCitation": {
+        "artifact": "acceptance-manifest.json",
+        "before": "      \"then\": \"it throws the refusal reason before any worktree, branch, or agent dispatch, and --preflight-report-only does not change that\",",
+        "after": "      \"then\": \"the positions run `assertWithinManifestScope({` (:8501) < the refusal call site < `const initialized = updateRunState(` (:8509) < `runLaunchPreflight(` (:8545) < `runWave(` (:9178), each trailing anchor occurring exactly once in the file — so the refusal precedes the run's first run-state mutation, precedes the launch preflight that `--preflight-report-only` governs and therefore cannot be downgraded by it (B-06, P-04, ADR 0042), and precedes `runWave(`, at or after which every worktree creation, branch creation and agent dispatch happens\","
+      }
+    }
+  ]
+}

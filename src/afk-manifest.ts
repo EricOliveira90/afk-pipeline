@@ -36,6 +36,53 @@ export interface ProtectedChangeWaiver {
   reason: string;
 }
 
+/**
+ * The declared report-only mutation step (#303, ADR 0071): what to run, and
+ * where the run writes its mutation-testing-elements report.
+ *
+ * It lives in the launch manifest for the reason a waiver does — `afk.json`
+ * sits in the host checkout's PRD directory, outside every slice's file scope,
+ * so a candidate cannot declare its own mutation command. Unlike a waiver,
+ * nothing here authorizes anything: the step is reported, never a gate.
+ *
+ * `--mutation-report` decides whether the step runs this run; this member
+ * decides what the step *is*. Neither is enough alone, which is why the flag
+ * without a declaration refuses the launch instead of quietly running nothing.
+ */
+export interface MutationReportDeclaration {
+  /** The command line to run, verbatim; the changed files are appended. */
+  command: string;
+  /**
+   * Repo-relative path of the JSON report the command writes, normalized the
+   * way a waiver path is. One exact path, never a glob: a pattern names files
+   * nobody has read, and a report AFK guessed at is a survivor list nobody can
+   * check.
+   */
+  reportPath: string;
+  /**
+   * Repo-relative path of the operator's incremental baseline artifact, read to
+   * say whether each survivor is new in this run or was already surviving
+   * (#304 B-01). Optional and *absent* when undeclared, the same discipline
+   * `mutationReport` itself is under: absence is the normal case, never an
+   * error, and it means every survivor is reported `unattributed`.
+   *
+   * Declared here rather than behind a CLI flag or a script convention because
+   * it is a durable per-project fact, and `afk.json` is the strictly-validated
+   * cross-repository contract for those (ADR 0034).
+   */
+  baselinePath?: string;
+  /**
+   * Repo-relative path of the committed triage decisions file (ADR 0071's
+   * "Decisions file schema"), read to mark a survivor a human already
+   * adjudicated as `accepted` rather than re-raising it. Optional and absent
+   * when undeclared, for the reason `baselinePath` is.
+   *
+   * Marking, never suppressing: an `accepted` survivor stays in the report at
+   * full detail, so nothing here can shorten a survivor list.
+   */
+  decisionsPath?: string;
+}
+
 export interface AfkManifest {
   version: 1;
   selectedSlices: string[];
@@ -49,6 +96,14 @@ export interface AfkManifest {
    * `protectedChangeWaivers ?? []`.
    */
   protectedChangeWaivers?: ProtectedChangeWaiver[];
+  /**
+   * The declared mutation step. Optional and *absent* when undeclared — unlike
+   * `protectedChangeWaivers`, absence is not "an empty one": a manifest that
+   * declares no command is a manifest `--mutation-report` refuses, and an empty
+   * object would be a command nobody wrote. `version` stays `1`: an optional
+   * member every existing reader ignores is not a schema break (GH #303 AC5).
+   */
+  mutationReport?: MutationReportDeclaration;
 }
 
 function normalizeSlice(value: unknown): string {
@@ -140,6 +195,119 @@ function normalizeProtectedChangeWaiver(
   };
 }
 
+/**
+ * The one path rule set every `mutationReport` path member goes through
+ * (#304 B-02): the waiver rules — one exact repo-relative path, never a glob —
+ * plus a `..` refusal, because a file read from outside the worktree came from a
+ * tree nobody reviewed.
+ *
+ * One helper rather than a copy per member: a third path arriving with its own
+ * hand-copied block is how one of them ends up missing a rule. `noun` and
+ * `nouns` keep each refusal reading as advice about the file at fault.
+ */
+function normalizeMutationReportPath(
+  value: string,
+  member: string,
+  noun: string,
+  nouns: string,
+  source: string,
+): string {
+  const path = normalizeWaiverPath(value);
+  if (/[*?[]/.test(path)) {
+    throw new Error(
+      `${source} mutationReport ${member} "${path}" looks like a glob; ` +
+        `the step reads one exact ${noun}, because a pattern names ${nouns} ` +
+        `nobody has read`,
+    );
+  }
+  if (/^(?:[a-zA-Z]:)?\//.test(path)) {
+    throw new Error(
+      `${source} mutationReport ${member} "${path}" must be repo-relative, ` +
+        `not absolute`,
+    );
+  }
+  if (path.split("/").includes("..")) {
+    throw new Error(
+      `${source} mutationReport ${member} "${path}" must not traverse ` +
+        `outside the worktree with ".."`,
+    );
+  }
+  return path;
+}
+
+/**
+ * Validate and normalize a declared `mutationReport`, naming the offending
+ * member in every refusal so an operator can fix the manifest without reading
+ * this function.
+ *
+ * Fail closed on a blank member rather than dropping it: a silently ignored
+ * declaration is a run that reports nothing and says nothing about why.
+ *
+ * `baselinePath` and `decisionsPath` are optional, and an absent one stays
+ * absent in the result rather than becoming an `undefined`-valued key: the ship
+ * gate rewrites `afk.json` from this object, so a key this parser drops is a key
+ * deleted from the reviewed branch (#304 B-01/B-03).
+ */
+function normalizeMutationReport(
+  entry: unknown,
+  source: string,
+): MutationReportDeclaration {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+    throw new Error(
+      `${source} mutationReport must be a JSON object holding command and reportPath`,
+    );
+  }
+  const value = entry as Record<string, unknown>;
+  if (typeof value.command !== "string" || value.command.trim() === "") {
+    throw new Error(
+      `${source} mutationReport requires a non-blank command`,
+    );
+  }
+  if (typeof value.reportPath !== "string" || value.reportPath.trim() === "") {
+    throw new Error(
+      `${source} mutationReport requires a non-blank reportPath`,
+    );
+  }
+  const reportPath = normalizeMutationReportPath(
+    value.reportPath,
+    "reportPath",
+    "report file",
+    "reports",
+    source,
+  );
+  const optionalPath = (
+    member: "baselinePath" | "decisionsPath",
+    noun: string,
+    nouns: string,
+  ): string | undefined => {
+    if (value[member] === undefined) return undefined;
+    const declared = value[member];
+    if (typeof declared !== "string" || declared.trim() === "") {
+      throw new Error(
+        `${source} mutationReport ${member} must be a non-blank string when ` +
+          `declared; omit the member instead to declare no ${noun}`,
+      );
+    }
+    return normalizeMutationReportPath(declared, member, noun, nouns, source);
+  };
+  const baselinePath = optionalPath(
+    "baselinePath",
+    "baseline file",
+    "baselines",
+  );
+  const decisionsPath = optionalPath(
+    "decisionsPath",
+    "decisions file",
+    "decisions files",
+  );
+  return {
+    command: value.command.trim(),
+    reportPath,
+    ...(baselinePath !== undefined ? { baselinePath } : {}),
+    ...(decisionsPath !== undefined ? { decisionsPath } : {}),
+  };
+}
+
 export function parseAfkManifest(
   value: string | unknown,
   source = "afk.json",
@@ -222,12 +390,20 @@ export function parseAfkManifest(
     );
   }
 
+  // Absent stays absent: "no mutation step declared" and "this manifest
+  // predates the member" are the same fact to every reader (#303 B-04).
+  const mutationReport =
+    input.mutationReport === undefined
+      ? undefined
+      : normalizeMutationReport(input.mutationReport, source);
+
   return {
     version: 1,
     selectedSlices,
     migrationPrefixes,
     protectedIssues,
     protectedChangeWaivers,
+    ...(mutationReport !== undefined ? { mutationReport } : {}),
   };
 }
 
@@ -303,6 +479,9 @@ export function trimUnclaimedMigrationPrefixes(
     return { changed: false, manifest };
   }
 
+  // Spread, never rebuilt field by field: this rewrite is about migration
+  // prefixes, so every other declared member — waivers, and the mutation step
+  // (#303 B-05) — has to survive it byte for byte.
   const next = { ...manifest, migrationPrefixes };
   writeFileSync(path, `${JSON.stringify(next, null, 2)}\n`, "utf-8");
   return { changed: true, manifest: next };

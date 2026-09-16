@@ -22,9 +22,27 @@ import type {
   GateStatus,
 } from "./gate-runner.js";
 import type { PromptAssemblyRole } from "./context-envelope.js";
+import type {
+  MutationAttributionNote,
+  MutationNotRunReason,
+  MutationSurvivor,
+} from "./mutation-report.js";
 
 export const EVENTS_FILE = "events.jsonl";
 export const EVENTS_SCHEMA_VERSION = 1;
+
+/**
+ * Run-level phases the ship gate journals as `run-phase-started` /
+ * `run-phase-ended` pairs. The first four are the gate's own stages;
+ * `mutation-step` (#303 US-13) is the report-only step that runs beside the
+ * guardians. Adding a member is additive - the events schema stays at 1.
+ */
+export type RunPhaseName =
+  | "sanity"
+  | "architect-review"
+  | "pm-review"
+  | "mutation-step"
+  | "draft-pr";
 
 /**
  * Event payloads as emitted at call sites — the RunJournal stamps `ts`.
@@ -371,13 +389,21 @@ export type RunEventPayload =
     }
   | {
       type: "run-phase-started";
-      phase: "sanity" | "architect-review" | "pm-review" | "draft-pr";
+      /**
+       * `mutation-step` is the report-only mutation step (#303 US-13, ADR
+       * 0071): it opens when the step is kicked off alongside the guardians
+       * and closes with the step's own status as its verdict, so a ship gate
+       * holding for it is a visible open phase rather than silence. It is a
+       * lifecycle phase, not a gate: no `gateId`, and its verdict never feeds a
+       * decision.
+       */
+      phase: RunPhaseName;
       attempt?: number;
       cached?: boolean;
     }
   | {
       type: "run-phase-ended";
-      phase: "sanity" | "architect-review" | "pm-review" | "draft-pr";
+      phase: RunPhaseName;
       attempt?: number;
       cached?: boolean;
       verdict: string;
@@ -458,6 +484,42 @@ export type RunEventPayload =
       durationMs: number;
       /** The subset of `gateIds` served from the gate cache (D17's `reused`). */
       cacheReusedGateIds: string[];
+    }
+  | {
+      /**
+       * What the report-only mutation step reported (#303 B-13, ADR 0071).
+       * Emitted at most once per run, from the ship gate, when the step's
+       * bounded await resolves — and never on a guardian-rejection exit, which
+       * publishes nothing because the gate never reaches its publish path.
+       *
+       * This is the stream both `run-summary.md` and the draft PR body derive
+       * their mutation section from, so the file and the stream cannot disagree
+       * — the same rule `quality-stage-attempt` above is kept under.
+       *
+       * Reported, never a gate (ADR 0063): nothing thresholds, alerts on, or
+       * branches on anything here, and the step holds no gate id.
+       *
+       * Additive, so `EVENTS_SCHEMA_VERSION` stays 1, the same way
+       * `quality-stage-policy` and `quality-stage-attempt` above arrived.
+       */
+      type: "mutation-step";
+      /** Run-ID provenance: the run's own `runSlug`. */
+      runSlug: string;
+      status: "MUTATION_REPORTED" | "MUTATION_NOT_RUN";
+      /** Present only under `MUTATION_NOT_RUN`. */
+      reason?: MutationNotRunReason;
+      /**
+       * Empty under `MUTATION_NOT_RUN`; legitimately empty under the other.
+       * Each entry carries its optional attribution `label` (#304 B-11).
+       */
+      survivors: MutationSurvivor[];
+      /**
+       * Which attribution degradations the run observed (#304 B-11). Optional
+       * and absent in the ordinary case, so `EVENTS_SCHEMA_VERSION` stays 1 for
+       * the reason the whole payload did: an optional member every existing
+       * reader ignores is not a schema break.
+       */
+      attributionNotes?: MutationAttributionNote[];
     }
   | { type: "run-ended"; outcome: "SUCCEEDED" | "FAILED" | "ABORTED" }
   | { type: "slice-outcome"; slice: SliceLifecycle }

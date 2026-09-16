@@ -30,7 +30,7 @@ entry in `afk.config.json`. Cap: 150 lines.
 | Post-approval quality stages | Bounded post-approval rounds that make declared *clean* gates green without changing approved behavior, re-dispatched with the final evaluator's `RESTORE` findings under the same round budget and reverted whole when none is left; each attempt reported as `quality-stage-attempt` ROI evidence, never as a gate (PRD 5 D2/D4/D10–D12, ADR 0063, #87, #97) | `src/cleaner-orchestration.ts` | `src/cleaner-stage.ts`, `src/suppression-gate.ts`, `prompts/cleaner.md`, `src/run-events.ts` |
 | Manifest and claims | `afk.json` scope, migration prefix reservation (ADR 0034) | `src/afk-manifest.ts` | `src/migration-claims.ts` |
 | PRD inputs | `issues.md` → DAG; PRD directory reading | `src/issues-parser.ts` | `src/prd-reader.ts`, `src/prd-hold.ts` |
-| Ship path | Pre-ship gate, ship gate, terminal handoff (ADR 0033) | `src/ship-gate.ts` | `src/preship.ts`, `src/handoff.ts` |
+| Ship path | Pre-ship gate, ship gate, terminal handoff (ADR 0033) | `src/ship-gate.ts` | `src/preship.ts`, `src/handoff.ts`, `src/mutation-report.ts` |
 | Guardian round persistence | The complete persistence invariant for guardian round evidence: persisted shape, normalization, ledger writes (ADR 0057, #221) | `src/guardian-round-persistence.ts`, `src/guardian-round-records.ts` | — |
 | Control surface | Status, stop, preflight, cleanup (ADR 0023, 0042, 0043) | `src/status.ts`, `src/stop-command.ts`, `src/preflight.ts`, `src/clean-failed.ts` | `src/status-*.ts`, `src/stop-sentinel.ts`, `src/cancellation.ts`, `src/crash-records.ts` |
 | Prompts | Role prompt templates, assembled into per-invocation context envelopes (PRD 3, shipped) | `prompts/*.md` (e.g. `prompts/evaluator-final.md`), `src/prompt-template.ts` | — |

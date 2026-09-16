@@ -107,6 +107,16 @@ export interface PipelineRuntimeOptions {
    * checks were bypassed.
    */
   preflightReportOnly?: boolean;
+  /**
+   * Run the declared mutation command once at the ship gate and report what
+   * survived (#303, ADR 0071). Reported, never a gate: no outcome can fail a
+   * gate, change a verdict, or keep the draft PR closed.
+   *
+   * The command and its report path come from the PRD directory's `afk.json`
+   * (`mutationReport`), not from a companion flag — the flag says "run it this
+   * run", the manifest says what "it" is.
+   */
+  mutationReport?: boolean;
   sharedPreview?: {
     verifyMigrationCommand: string;
     applyMigrationCommand: string;
@@ -245,6 +255,7 @@ export function parsePipelineRuntimeOptions(
     optionValue(args, "--min-free-disk-gb"),
   );
   const preflightReportOnly = args.includes("--preflight-report-only");
+  const mutationReport = args.includes("--mutation-report");
   const serialLanes = args.includes("--serial-lanes");
   const openPrOnOverride = args.includes("--open-pr-on-override");
   // Exact-token membership like the booleans above, but left unset rather
@@ -284,6 +295,7 @@ export function parsePipelineRuntimeOptions(
     testCommand,
     minFreeDiskGb,
     preflightReportOnly,
+    mutationReport,
     serialLanes,
     openPrOnOverride,
     recordPrompts,

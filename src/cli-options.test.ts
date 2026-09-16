@@ -125,6 +125,36 @@ describe("parsePipelineRuntimeOptions", () => {
     ).toBe(true);
   });
 
+  it("[behavior:#303:B-01] asks for the mutation report only on the exact flag", () => {
+    expect(parsePipelineRuntimeOptions(["--mutation-report"]).mutationReport)
+      .toBe(true);
+    // Off by default and off for anything that merely looks like the flag: the
+    // step spends real wall clock, so a typo must not start it (ADR 0063).
+    expect(parsePipelineRuntimeOptions([]).mutationReport).toBe(false);
+    for (const token of [
+      "--mutation-reports",
+      "--mutation",
+      "--mutation-report=true",
+      "--no-mutation-report",
+      "--mutation-command",
+      "--mutation-report-path",
+    ]) {
+      expect(parsePipelineRuntimeOptions([token]).mutationReport).toBe(false);
+    }
+  });
+
+  it("[behavior:#303:B-01] takes no value, so the next token stays its own option", () => {
+    // The flag is boolean, not a command carrier: what to run and where the
+    // report lands are the consuming repo's afk.json declaration, never CLI
+    // arguments this parser would have to validate twice.
+    const options = parsePipelineRuntimeOptions([
+      "--mutation-report",
+      "--serial-lanes",
+    ]);
+    expect(options.mutationReport).toBe(true);
+    expect(options.serialLanes).toBe(true);
+  });
+
   it("enables serial lane execution explicitly", () => {
     expect(parsePipelineRuntimeOptions(["--serial-lanes"]).serialLanes).toBe(true);
   });

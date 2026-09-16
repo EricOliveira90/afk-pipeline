@@ -1,0 +1,322 @@
+{
+  "version": 2,
+  "fileScope": {
+    "kind": "paths",
+    "paths": [
+      "src/cli-options.ts",
+      "src/cli-options.test.ts",
+      "src/afk-manifest.ts",
+      "src/afk-manifest.test.ts",
+      "src/preflight.ts",
+      "src/preflight.test.ts",
+      "src/orchestrator.ts",
+      "src/mutation-report.ts",
+      "src/mutation-report.test.ts",
+      "src/ship-gate.ts",
+      "src/ship-gate.test.ts",
+      "src/run-state.ts",
+      "src/run-state.test.ts",
+      "src/eval-boundary.test.ts",
+      "src/run-events.ts",
+      "src/logger.ts",
+      "src/logger.test.ts",
+      "architecture.md",
+      "docs/adr/0071-report-only-mutation-survivor-step.md",
+      ".kiro/specs/mutation-survivor-report/slices/01-mutation-report-step/contract.md",
+      ".kiro/specs/mutation-survivor-report/slices/01-mutation-report-step/acceptance-manifest.json",
+      ".kiro/specs/mutation-survivor-report/slices/01-mutation-report-step/contract-response.json",
+      "src/qa-orchestration.test.ts",
+      "src/qa-orchestration-gates.test.ts"
+    ]
+  },
+  "migrationCount": 0,
+  "behaviors": [
+    {
+      "id": "B-01",
+      "source": "GH #303 'Rejected — companion CLI flags'",
+      "given": "argv holding --mutation-report and argv holding neither it nor any mutation value flag",
+      "when": "the CLI options are parsed and passed to runPipeline",
+      "then": "the boolean flag is returned on the runtime options object and read by the orchestrator as an optional config field, defaulting to absent, with no --mutation-command or --mutation-report-path flag added",
+      "observableResult": "src/cli-options.test.ts asserts the parsed options carry the flag when present and leave it unset otherwise, and no mutation value flag is recognized",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-02",
+      "source": "GH #303 AC4",
+      "given": "an afk.json declaring mutationReport with a command and a reportPath needing normalization (backslashes, leading ./, surrounding whitespace)",
+      "when": "parseAfkManifest runs",
+      "then": "the returned manifest carries mutationReport with the reportPath normalized the way normalizeWaiverPath normalizes waiver paths",
+      "observableResult": "src/afk-manifest.test.ts asserts the returned object's mutationReport.reportPath equals the normalized string and mutationReport.command is preserved",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-03",
+      "source": "GH #303 AC3, AC4",
+      "given": "manifests whose present mutationReport has a blank command, a missing reportPath, a glob reportPath, an absolute reportPath, and a reportPath containing a .. segment",
+      "when": "parseAfkManifest runs on each",
+      "then": "each parse throws and the message names the offending member",
+      "observableResult": "src/afk-manifest.test.ts asserts each case throws with a message containing the offending member name",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-04",
+      "source": "GH #303 AC5, 'What the ADR must say about the version'",
+      "given": "a manifest with no mutationReport member",
+      "when": "parseAfkManifest runs",
+      "then": "the parse succeeds exactly as it does today, mutationReport is absent from the result, and version is still 1",
+      "observableResult": "src/afk-manifest.test.ts asserts the parsed object equals today's shape with version 1 and no mutationReport key",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-05",
+      "source": "GH #303 AC4",
+      "given": "an afk.json declaring mutationReport plus an unclaimed migration prefix",
+      "when": "trimUnclaimedMigrationPrefixes rewrites the file",
+      "then": "the mutationReport member is still present in the bytes on disk after the rewrite",
+      "observableResult": "src/afk-manifest.test.ts re-reads the written file and asserts mutationReport survives, the way waiver preservation is already asserted",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-06",
+      "source": "GH #303 'Config surface — settled 2026-09-14'",
+      "given": "the flag set with a manifest declaring no mutationReport, and the flag absent or a declared member",
+      "when": "the exported pure function in src/preflight.ts runs",
+      "then": "it returns a refusal reason in the first case and undefined in the others, and it is not a PreflightCheck or PreflightFinding",
+      "observableResult": "src/preflight.test.ts asserts the returned reason and undefined cases and that no PreflightFinding is produced for this condition",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-07",
+      "source": "GH #303 AC2; src/orchestrator.ts:8497-8508 (manifest fail-closed block), :8501, :8509, :8545, :9178; observable shape from src/eval-boundary.test.ts:166-183",
+      "given": "src/orchestrator.ts read as text by an in-scope test, where the refusal call site is the single call to B-06's exported pure function placed inside the manifest fail-closed block that already runs `assertWithinManifestScope` (src/orchestrator.ts:8497-8508) and throws its returned reason",
+      "when": "the source-position assertion in src/mutation-report.test.ts compares `indexOf` positions with `toBeLessThan`, in the shape of src/eval-boundary.test.ts:166-183's P-01 ordering case",
+      "then": "the positions run `assertWithinManifestScope({` (:8501) < the refusal call site < `const initialized = updateRunState(` (:8509) < `runLaunchPreflight(` (:8545) < `runWave(` (:9178), each trailing anchor occurring exactly once in the file — so the refusal precedes the run's first run-state mutation, precedes the launch preflight that `--preflight-report-only` governs and therefore cannot be downgraded by it (B-06, P-04, ADR 0042), and precedes `runWave(`, at or after which every worktree creation, branch creation and agent dispatch happens",
+      "observableResult": "src/mutation-report.test.ts's B-07 case asserts that ordering over src/orchestrator.ts's text, while the refusal reason itself is B-06's assertion in src/preflight.test.ts — both files are in this manifest's fileScope, src/orchestrator.test.ts is not in scope and is not edited, and no test in this slice drives runPipeline, so the non-goal \"New spawned pipeline scenarios (GH #303 AC17)\" holds",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-08",
+      "source": "GH #303 AC8",
+      "given": "a mutation-testing-elements fixture JSON with survived, killed, and no-coverage mutants, and ARCHITECTURE.md",
+      "when": "the pure survivor parser in src/mutation-report.ts runs, and the docs assertion reads ARCHITECTURE.md",
+      "then": "only survivors are returned with mutant identity, file, position, and mutator, and ARCHITECTURE.md names src/mutation-report.ts in the existing Ship path row's internals cell with no new row and no more than 150 lines",
+      "observableResult": "src/mutation-report.test.ts asserts the returned survivor list over the inline fixture and asserts the ARCHITECTURE.md cell text and line count",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-09",
+      "source": "GH #303 AC9",
+      "given": "each of (valid report + clean exit), (malformed JSON), (missing report file), (non-zero exit), and (deadline reached)",
+      "when": "the pure classifier over report parse result, step exit, and deadline state runs",
+      "then": "the outcome is MUTATION_REPORTED with the survivor list, or MUTATION_NOT_RUN with reason BOUND_REACHED, COMMAND_FAILED, REPORT_UNREADABLE, or REPORT_MALFORMED",
+      "observableResult": "src/mutation-report.test.ts asserts the returned outcome and reason for each input triple",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-10",
+      "source": "GH #303 AC7",
+      "given": "a ChangeSummary from buildChangeSummary over the run's base and merged tip listing source, test, and non-source changed files",
+      "when": "the pure mutation-eligible-source predicate in src/mutation-report.ts filters it",
+      "then": "only mutation-eligible source files are returned and the change-summary builder is the single producer, not duplicated",
+      "observableResult": "src/mutation-report.test.ts asserts the filtered path list excludes the test and non-source entries",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-11",
+      "source": "GH #303 'Concurrency with the guardians — settled 2026-09-15' AC1-AC3, AC6, AC8",
+      "given": "the flag set with a declared command, a mutationRun seam recording its arguments and returning a differently-shaped report on stdout, and separately a runMutationStep whose abandonment flag is already set when its scope derivation resolves",
+      "when": "the ship gate starts the step before the guardian mode fork and the step reaches its pre-seam abandonment check",
+      "then": "the seam is invoked on reviewDir before the first guardian invocation resolves with exactly B-10's filtered file list, the recorded outcome comes from the JSON at the declared reportPath and never from stdout, the run's gate ids are identical to the flag-absent run, and an already-set abandonment flag makes the step return without invoking the seam",
+      "observableResult": "src/ship-gate.test.ts asserts the seam's invocation order, recorded file list, outcome source and gate-id equality; src/mutation-report.test.ts asserts the abandoned step's seam invocation count is 0 and that the unabandoned path reads the flag with no await before invoking",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-12",
+      "source": "GH #303 AC1, AC3, AC10; ADR 0020, ADR 0035",
+      "given": "a step promise that never settles, an injected now past the exit's origin plus MUTATION_STEP_BOUND_MS and a now inside the bound, and a rejecting guardian in each guardian mode with mutationNow past that exit's origin plus the bound",
+      "when": "each exit that awaits the step calls the one bounded-await helper with that one constant",
+      "then": "the helper calls terminate before resolving MUTATION_NOT_RUN with reason BOUND_REACHED past the bound and awaits the step inside it, the rejoin exit's origin is the post-fork instant both guardian results are in hand, terminate is bound to quiesceWorktree on reviewDir with no second kill path, and the rejection exit leaves with the guardian's own reason under the same bound rather than awaiting settlement — including when terminate itself throws and is swallowed",
+      "observableResult": "src/mutation-report.test.ts asserts the terminate-then-classify ordering and both clock cases; src/ship-gate.test.ts asserts the captured rejoin origin, the terminate binding, that the gate has not returned while the seam promise is pending, and that a rejection with a never-settling seam and a clock past the bound still leaves the gate",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-13",
+      "source": "GH #303 AC15; prd.md:107; ARCHITECTURE.md placement rule (\"A new persisted fact extends src/run-state.ts's schema with a version bump and a reader\"); src/run-state.ts:67, :254, :1389; src/run-identity.ts:23; src/ship-gate.ts:584; src/run-events.ts:245; src/run-state.test.ts:990; src/eval-boundary.test.ts:127",
+      "given": "a mutation step outcome and the run's `runSlug` — the provider-qualified slug runSlugForProviderName produces (src/run-identity.ts:23), already the string the ship gate receives on RunShipGateArgs (src/ship-gate.ts:584) and already the key updateRunState writes the state file under (src/run-state.ts:1389) — as the run-ID provenance value, so no new identifier is minted",
+      "when": "the outcome lands in run state and in the event stream",
+      "then": "one optional field on RunState (src/run-state.ts:254) carries the outcome with that `runSlug`, RUN_STATE_VERSION moves `6 -> 7` (src/run-state.ts:67) with the accepted union widened to `3 | 4 | 5 | 6 | 7` so older records still load, one additive RunEventPayload member records the same outcome leaving EVENTS_SCHEMA_VERSION at `1` (the existing members' own rule at src/run-events.ts:245), and the two hard-pinned literals move with the bump — src/run-state.test.ts:990 (`expect(RUN_STATE_VERSION).toBe(6)` and its `[3, 4, 5, 6]` list) and src/eval-boundary.test.ts:127 inside the P-05 case — with their surrounding assertions and intent untouched; no future version number is reserved in prose (#249)",
+      "observableResult": "src/run-state.test.ts asserts the write->load round-trip through adaptLoadedState comparing the loaded provenance value against the `runSlug` the record was written under, the version pin reading `7` with its `[3, 4, 5, 6, 7]` list, and the older-record load; src/eval-boundary.test.ts's P-05 case reads `7` as a literal-and-comment update only; the report text is derived from the event stream (B-14), so the file and the stream cannot disagree",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "tests",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-14",
+      "source": "GH #303 AC11, AC12",
+      "given": "MUTATION_REPORTED with survivors, MUTATION_REPORTED with zero survivors, and MUTATION_NOT_RUN with a reason, in the persisted event stream",
+      "when": "run-summary.md is written from the exported reader in src/logger.ts",
+      "then": "the mutation section lists each survivor, states the empty case explicitly, or states the not-run reason, derived only from the event stream",
+      "observableResult": "src/logger.test.ts asserts the written run-summary.md text for each of the three cases",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-15",
+      "source": "GH #303 AC11, AC12, AC13",
+      "given": "the same three outcome cases",
+      "when": "buildPrCreationPlan builds the draft PR body at both plan sites",
+      "then": "the body carries the same survivor list or not-run reason from the same reader and the plan still opens a draft PR",
+      "observableResult": "src/ship-gate.test.ts asserts the plan's body text matches the reader's output and plan.open is true in all three cases",
+      "preservation": false,
+      "gateIds": [
+        "typecheck",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "B-16",
+      "source": "GH #303 AC14",
+      "given": "a run with the flag set reaching MUTATION_NOT_RUN and the same run with the flag absent",
+      "when": "the ship gate completes",
+      "then": "every gate result, guardian and QA verdict, and the PR-open decision are identical between the two runs, differing only by the added report text",
+      "observableResult": "src/ship-gate.test.ts asserts gate ids, verdicts and the PR-open decision are equal across the two runs",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests"
+      ]
+    },
+    {
+      "id": "B-17",
+      "source": "GH #303 AC16",
+      "given": "the ADR at docs/adr/0071-report-only-mutation-survivor-step.md",
+      "when": "the docs assertion in src/mutation-report.test.ts reads it as text",
+      "then": "it contains each declared heading line, the SwarmForge and Martin provenance strings, the decisions-file field names, the version-regime strings version: 1 and parseAfkManifest, and the five refusal strings verbatim",
+      "observableResult": "src/mutation-report.test.ts asserts the file's content contains every declared literal",
+      "preservation": false,
+      "gateIds": [
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-01",
+      "source": "GH #303 AC1",
+      "given": "--mutation-report absent",
+      "when": "runShipGate runs",
+      "then": "no mutation step is started, no process is spawned, and neither run-summary.md nor the PR body gains any mutation text",
+      "observableResult": "src/ship-gate.test.ts asserts the mutationRun seam was never invoked and the summary and PR body bytes match today's",
+      "preservation": true,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests"
+      ]
+    },
+    {
+      "id": "P-02",
+      "source": "ADR 0034",
+      "given": "a manifest with version 2 and a manifest carrying protectedChangeWaivers",
+      "when": "parseAfkManifest runs",
+      "then": "the version throw still fires and selectedSlices, migrationPrefixes, protectedIssues and protectedChangeWaivers are still validated and returned unchanged",
+      "observableResult": "src/afk-manifest.test.ts asserts the existing version-throw message and the unchanged returned members",
+      "preservation": true,
+      "gateIds": [
+        "acceptance:behaviors",
+        "tests"
+      ]
+    },
+    {
+      "id": "P-03",
+      "source": "GH #303 'Concurrency with the guardians — settled 2026-09-15' AC2; ADR 0035",
+      "given": "the flag set in both guardian modes, with a rejecting guardian in two cases — the mutationRun promise already pending, and the step held ahead of the seam by a mutationScope promise the test owns — plus the non-rejecting serial case",
+      "when": "the guardian rejection leaves the ship gate, and the test then releases mutationScope and flushes",
+      "then": "both fork branches behave byte-identically to today, terminate/quiesceWorktree was called on reviewDir before the throw propagated, no mutation process remains registered for reviewDir, the thrown reason is the guardian's own and identical to the flag-absent run's, and in the not-yet-spawned case mutationRun has still never been invoked",
+      "observableResult": "src/ship-gate.test.ts asserts, per mode and per case, the guardian ordering and rethrown reason equality, the terminate call on reviewDir, an empty registered-process set, and a mutationRun invocation count of 0 after the scope release",
+      "preservation": true,
+      "gateIds": [
+        "typecheck",
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-04",
+      "source": "ADR 0042",
+      "given": "a genuine PreflightFinding of severity refuse under --preflight-report-only",
+      "when": "the preflight report is formatted",
+      "then": "it is still reported as a warning rather than a refusal",
+      "observableResult": "src/preflight.test.ts asserts the formatted report still downgrades the finding",
+      "preservation": true,
+      "gateIds": [
+        "acceptance:behaviors"
+      ]
+    },
+    {
+      "id": "P-05",
+      "source": "GH #303 AC15; src/eval-boundary.test.ts P-05 case",
+      "given": "run-state records written at versions 3 through 6 and the eval-boundary P-05 case after the RUN_STATE_VERSION bump",
+      "when": "the records load through the existing adapter and the eval-boundary case runs",
+      "then": "every older record still loads, existing callers and fixtures holding an older version literal still compile, and that case keeps every import-boundary assertion and its EVENTS_SCHEMA_VERSION pin at 1 while only the RUN_STATE_VERSION literal moves 6 to 7",
+      "observableResult": "src/run-state.test.ts asserts the version 3-6 loads; src/eval-boundary.test.ts's P-05 case asserts RUN_STATE_VERSION is 7, EVENTS_SCHEMA_VERSION is 1, and no eval module imports the run-evidence machinery",
+      "preservation": true,
+      "gateIds": [
+        "typecheck",
+        "acceptance:behaviors",
+        "tests"
+      ]
+    }
+  ]
+}

@@ -12,10 +12,23 @@ import * as git from "./git.js";
 import { parseDraftPrNumber } from "./handoff.js";
 import {
   readAdvisoryGateOutcomes,
+  readMutationStepOutcome,
   readQualityStageOutcomes,
   type AdvisoryGateOutcome,
+  type MutationStepReport,
   type QualityStageOutcome,
 } from "./logger.js";
+import {
+  MUTATION_REPORT_HEADING,
+  MUTATION_STEP_BOUND_MS,
+  awaitMutationStepWithinBound,
+  formatMutationReportLines,
+  runMutationStep,
+  type MutationCommandRunner,
+  type MutationReportConfig,
+  type MutationStepOutcome,
+} from "./mutation-report.js";
+import { quiesceWorktree } from "./worktree-processes.js";
 import {
   runPreShipSanity,
   type SanityCommandRunner,
@@ -44,7 +57,10 @@ import {
   type FindingFilingOutcome,
   type FindingIssueDraft,
 } from "./finding-filing.js";
-import type { PersistedReviewPhase } from "./run-state.js";
+import {
+  recordMutationStepOutcome,
+  type PersistedReviewPhase,
+} from "./run-state.js";
 import type {
   PersistedFiledFinding,
   PersistedGuardianFinding,
@@ -365,6 +381,17 @@ export function buildPrCreationPlan(args: {
    * Reported, never a gate (ADR 0063).
    */
   qualityStages?: readonly QualityStageOutcome[];
+  /**
+   * What the report-only mutation step reported (#303 B-15), read by the caller
+   * via `readMutationStepOutcome` — the same reader `run-summary.md` derives its
+   * section from, rendered through the same formatter, so the PR and the summary
+   * cannot disagree about what survived.
+   *
+   * Absent adds no section, so every PR body on a run without
+   * `--mutation-report` is byte-identical (P-01). Both outcomes render and
+   * neither changes `open`: reported, never a gate (ADR 0063).
+   */
+  mutationStep?: MutationStepReport;
 }): PrCreationPlan {
   const architectOk = artifacts.isFavorableReviewOutcome(args.architect);
   const pmOk = artifacts.isFavorableReviewOutcome(args.pm);
@@ -496,6 +523,20 @@ export function buildPrCreationPlan(args: {
       ].join("\n"),
     );
   }
+  if (args.mutationStep !== undefined) {
+    sections.push(
+      [
+        MUTATION_REPORT_HEADING,
+        "",
+        "What survived the declared mutation command on this run's changed " +
+          "source files. Nothing here gated anything, failed anything, or " +
+          "changed a verdict (ADR 0063) — a survivor is a question for a " +
+          "reviewer, not a defect.",
+        "",
+        ...formatMutationReportLines(args.mutationStep),
+      ].join("\n"),
+    );
+  }
   sections.push(
     args.closesIssues.map((issue) => `Closes #${issue}`).join("\n"),
   );
@@ -605,6 +646,30 @@ export interface RunShipGateArgs {
    * bound to the real adapter — the gate decides *when* to persist either way.
    */
   guardianPersistence?: Partial<GuardianRoundPersistence>;
+  /**
+   * The declared mutation step (#303 B-11), present only when
+   * `--mutation-report` was set *and* the launch manifest declared a
+   * `mutationReport`. Absent means no step runs and the gate behaves exactly as
+   * it did before this member existed (P-01).
+   */
+  mutationReport?: MutationReportConfig;
+  /**
+   * Internal command seam used by direct tests for the mutation step, so no
+   * suite invokes a real mutation tool.
+   */
+  mutationRun?: MutationCommandRunner;
+  /**
+   * Internal seam used by direct tests to substitute the step's scope
+   * derivation, so a test can hold the step *ahead* of the runner invocation and
+   * observe the pre-spawn window a rejecting guardian closes (P-03).
+   */
+  mutationScope?: () => Promise<readonly string[]>;
+  /**
+   * Internal clock seam used by direct tests for the bounded await, so the
+   * thirty-minute bound is observable without a test waiting thirty minutes.
+   * It can never change {@link MUTATION_STEP_BOUND_MS}.
+   */
+  mutationNow?: () => number;
 }
 
 function blocked(
@@ -925,25 +990,177 @@ export async function runShipGate(
     });
   }
 
+  // --- Report-only mutation step (#303 B-11/B-12, ADR 0071).
+  //
+  // Started *before* the mode fork below and deliberately unawaited, so it runs
+  // concurrently with the guardians under `options.serialReviews` and under
+  // `Promise.allSettled` alike, and neither branch of the fork is restructured.
+  // It is not a third element of the `allSettled` array: an array element is
+  // awaited by the same `await` that observes the guardians finishing, which
+  // would make B-12's rejoin origin unobservable.
+  //
+  // Nothing here can gate, fail, or delay a decision. What it can do is hold a
+  // process inside `reviewDir`, so every exit from the fork region below both
+  // terminates the step and awaits it under one flat bound.
+  const mutationClock = args.mutationNow ?? Date.now;
+  // Owned here and read by `runMutationStep` immediately before it invokes the
+  // runner. Set before `terminate` on every rejection exit: that ordering is
+  // what makes a spawn-after-quiesce impossible.
+  let mutationAbandoned = false;
+  const mutationStep: Promise<MutationStepOutcome | undefined> | undefined =
+    args.mutationReport === undefined
+      ? undefined
+      : runMutationStep({
+          cwd: reviewDir,
+          fromRef: defaultBranch,
+          toRef: "HEAD",
+          config: args.mutationReport,
+          isAbandoned: () => mutationAbandoned,
+          ...(args.mutationRun ? { mutationRun: args.mutationRun } : {}),
+          ...(args.mutationScope ? { mutationScope: args.mutationScope } : {}),
+        });
+  // US-13 (#303): a ship gate holding for the step must be distinguishable from
+  // a stall. The step is opened as a run phase the moment it is kicked off, and
+  // closed below with its own status as the verdict, so `afk status` shows an
+  // active "Mutation step" stage while the guardians and the step run, and the
+  // run.log names the bound the operator is waiting on. Lifecycle only: the
+  // phase carries no gate id and its verdict feeds no decision (ADR 0071).
+  let mutationPhaseClosed = false;
+  const closeMutationPhase = (verdict: string): void => {
+    if (mutationStep === undefined || mutationPhaseClosed) return;
+    mutationPhaseClosed = true;
+    journal.event({ type: "run-phase-ended", phase: "mutation-step", verdict });
+  };
+  if (mutationStep !== undefined) {
+    journal.event({ type: "run-phase-started", phase: "mutation-step" });
+    journal.phase(
+      `  🧬 Mutation step: started alongside the guardian reviews; the ship gate ` +
+        `waits for it up to ${Math.round(MUTATION_STEP_BOUND_MS / 60_000)}m after ` +
+        `both reviews finish. Reported, never a gate.`,
+      "log",
+    );
+  }
+  // The one termination binding: the existing quiesce path on the review
+  // worktree (ADR 0020, ADR 0035). There is no second kill path, and both the
+  // bound-reached exit and every guardian-rejection exit invoke this same
+  // binding — so `reviewDir` holds no live `cwd` when the gate leaves.
+  //
+  // Setting the flag here rather than only in `abandonMutationStep` is what
+  // makes every terminating exit close the pre-spawn window, the bound-reached
+  // rejoin included: terminating a step that has not spawned yet and leaving it
+  // free to spawn afterwards would quiesce a worktree a command then enters.
+  const terminateMutationStep = (): Promise<unknown> => {
+    mutationAbandoned = true;
+    return quiesceWorktree(reviewDir);
+  };
+  /**
+   * Abandon, terminate, and await the in-flight step under the same bound the
+   * rejoin exit uses, then let the caller's own reason propagate unchanged. A
+   * step rejection or a failed quiesce is swallowed here for the same reason:
+   * neither may replace or mask a guardian's reason (P-03), and the bounded
+   * await — never a settlement await — is what keeps this exit bounded even when
+   * `terminate` failed and did nothing.
+   */
+  const abandonMutationStep = async (): Promise<void> => {
+    if (mutationStep === undefined) return;
+    mutationAbandoned = true;
+    const origin = mutationClock();
+    try {
+      await terminateMutationStep();
+    } catch {
+      // Swallowed: see above.
+    }
+    try {
+      await awaitMutationStepWithinBound({
+        step: mutationStep,
+        origin,
+        now: mutationClock,
+        terminate: terminateMutationStep,
+      });
+    } catch {
+      // Swallowed: see above.
+    }
+    // Publishes nothing about the step's result: this exit never reaches the
+    // gate's publish path, so there is no run-state entry, no `mutation-step`
+    // event, and no report text. The open run phase is still closed, so a
+    // status reader does not see an abandoned step as one still running.
+    try {
+      closeMutationPhase("ABANDONED");
+    } catch {
+      // Swallowed: see above.
+    }
+  };
+
   let architectResult: ReviewRunResult;
   let pmResult: ReviewRunResult;
-  if (options.serialReviews) {
-    architectResult =
-      cachedArchitect ?? (await runGuardianReview("architect"));
-    pmResult = cachedPm ?? (await runGuardianReview("pm"));
-  } else {
-    const [architectSettled, pmSettled] = await Promise.allSettled([
-      cachedArchitect
-        ? Promise.resolve(cachedArchitect)
-        : runGuardianReview("architect"),
-      cachedPm ? Promise.resolve(cachedPm) : runGuardianReview("pm"),
-    ]);
-    if (architectSettled.status === "rejected") {
-      throw architectSettled.reason;
+  try {
+    if (options.serialReviews) {
+      architectResult =
+        cachedArchitect ?? (await runGuardianReview("architect"));
+      pmResult = cachedPm ?? (await runGuardianReview("pm"));
+    } else {
+      const [architectSettled, pmSettled] = await Promise.allSettled([
+        cachedArchitect
+          ? Promise.resolve(cachedArchitect)
+          : runGuardianReview("architect"),
+        cachedPm ? Promise.resolve(cachedPm) : runGuardianReview("pm"),
+      ]);
+      if (architectSettled.status === "rejected") {
+        throw architectSettled.reason;
+      }
+      if (pmSettled.status === "rejected") throw pmSettled.reason;
+      architectResult = architectSettled.value;
+      pmResult = pmSettled.value;
     }
-    if (pmSettled.status === "rejected") throw pmSettled.reason;
-    architectResult = architectSettled.value;
-    pmResult = pmSettled.value;
+  } catch (error) {
+    await abandonMutationStep();
+    throw error;
+  }
+  // The rejoin origin, captured once immediately after either branch rejoins:
+  // the instant both guardian results are in hand, and the same instant in
+  // serial and in parallel mode.
+  const mutationRejoinOrigin = mutationClock();
+  if (mutationStep !== undefined) {
+    const outcome = await awaitMutationStepWithinBound({
+      step: mutationStep,
+      origin: mutationRejoinOrigin,
+      now: mutationClock,
+      terminate: terminateMutationStep,
+    });
+    if (outcome !== undefined) {
+      const record = {
+        runSlug,
+        status: outcome.status,
+        ...(outcome.status === "MUTATION_NOT_RUN"
+          ? { reason: outcome.reason }
+          : {}),
+        survivors:
+          outcome.status === "MUTATION_REPORTED" ? outcome.survivors : [],
+        // Carried, not re-derived: the step is the one producer of labels and
+        // notes, so the record and the event stream say what it said (#304 B-11).
+        ...(outcome.status === "MUTATION_REPORTED" &&
+        outcome.attributionNotes !== undefined
+          ? { attributionNotes: outcome.attributionNotes }
+          : {}),
+      };
+      // Run state carries the fact with its provenance; the event stream is what
+      // the summary and the PR body both derive their text from (B-13, B-14).
+      recordMutationStepOutcome(repoRoot, runSlug, record);
+      journal.event({ type: "mutation-step", ...record });
+      closeMutationPhase(outcome.status);
+      journal.phase(
+        `  🧬 Mutation step: ${
+          outcome.status === "MUTATION_REPORTED"
+            ? `${outcome.survivors.length} survivor(s) reported`
+            : `not run (${outcome.reason})`
+        }. Reported, never a gate.`,
+        "log",
+      );
+    } else {
+      // The step rejected or was abandoned before producing an outcome: nothing
+      // to publish, but the phase closes so it never reads as still running.
+      closeMutationPhase("NO_OUTCOME");
+    }
   }
 
   // Lineage resolves before outcomes are published so the durable round and
@@ -1284,6 +1501,10 @@ export async function runShipGate(
   // `advisoryGates` is, so the PR body and the run summary cannot disagree
   // about what a quality stage cost (#97 B-11).
   const qualityStages = readQualityStageOutcomes(journal.runDir);
+  // Read from that same stream and passed at both plan sites exactly as
+  // `qualityStages` is, so the PR body and the run summary render one
+  // derivation of what survived (#303 B-15).
+  const mutationStepReport = readMutationStepOutcome(journal.runDir);
   let prPlan = buildPrCreationPlan({
     prdSlug,
     specsDir,
@@ -1294,6 +1515,7 @@ export async function runShipGate(
     adoptions,
     advisoryGates,
     qualityStages,
+    ...(mutationStepReport ? { mutationStep: mutationStepReport } : {}),
   });
 
   // The gate has a clock (ADR 0057 decision 4). A blocked round that has spent
@@ -1358,6 +1580,7 @@ export async function runShipGate(
       adoptions,
       advisoryGates,
       qualityStages,
+      ...(mutationStepReport ? { mutationStep: mutationStepReport } : {}),
       capExit: {
         cap: capDecision.cap,
         unfavorableRounds: capDecision.unfavorableRounds,

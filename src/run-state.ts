@@ -13,6 +13,12 @@ import {
   type SlicePhase,
 } from "./slice-lifecycle.js";
 import type { PersistedRunScope } from "./slice-scope.js";
+import type {
+  MutationAttributionNote,
+  MutationNotRunReason,
+  MutationSurvivor,
+  MutationSurvivorLabel,
+} from "./mutation-report.js";
 import { withFileLock } from "./file-lock.js";
 import {
   sanitizeGuardianReviewFields,
@@ -51,9 +57,10 @@ export interface PersistedSliceState {
  * both keyed by GitHub issue and both optional: the per-slice approved baseline
  * locator below (#91) and `appliedWaivers` (#193). v5 adds a third of the same
  * shape, `finalEvaluations` (#96 B-02/B-09). v6 adds a fourth, `qualityStages`
- * (#87 B-14). `adaptLoadedState` normalizes a v3, v4 or v5 file to it in memory,
- * so a resumed run reads one shape, and `writeRunState` stamps it on every write
- * so a stale caller literal can never reach disk.
+ * (#87 B-14). v7 adds a fifth, the run-level `mutationStep` outcome with its
+ * run-ID provenance (#303 B-13). `adaptLoadedState` normalizes a v3, v4, v5 or
+ * v6 file to it in memory, so a resumed run reads one shape, and `writeRunState`
+ * stamps it on every write so a stale caller literal can never reach disk.
  *
  * The v6 bump is unconditional: a run that declares no `gatePolicy.clean`
  * persists version `6` with no `qualityStages` member, because "no stage ran"
@@ -64,7 +71,7 @@ export interface PersistedSliceState {
  * Exported because it is the one number a reader has to compare against, and a
  * duplicated literal is how two modules disagree about what "current" means.
  */
-export const RUN_STATE_VERSION = 6;
+export const RUN_STATE_VERSION = 7;
 
 /**
  * Where one slice's approved baseline artifact is, and which candidate it
@@ -247,11 +254,11 @@ export interface RunState {
   /**
    * Schema version. Writers emit {@link RUN_STATE_VERSION} and
    * `adaptLoadedState` returns it for every accepted file; the literals `3`,
-   * `4` and `5` stay assignable so callers and fixtures holding an older record
-   * keep compiling, and nothing reads a `3`, `4` or `5` back out of a loaded
-   * state.
+   * `4`, `5` and `6` stay assignable so callers and fixtures holding an older
+   * record keep compiling, and nothing reads a `3`, `4`, `5` or `6` back out of
+   * a loaded state.
    */
-  version: 3 | 4 | 5 | 6;
+  version: 3 | 4 | 5 | 6 | 7;
   prdSlug: string;
   featureBranch: string;
   /**
@@ -336,6 +343,45 @@ export interface RunState {
    * v5 file loads unchanged.
    */
   qualityStages?: Record<string, PersistedQualityStage[]>;
+  /**
+   * What the report-only mutation step reported — v7's single addition (#303
+   * B-13). Run-level rather than per-slice, because the step runs once per run
+   * on the merged review worktree, and absent when the run declared no step, so
+   * a v3–v6 file loads unchanged.
+   *
+   * Reported, never a gate (ADR 0063): no gate result, verdict, or PR-open
+   * decision reads this field.
+   */
+  mutationStep?: PersistedMutationStep;
+}
+
+/**
+ * The mutation step's outcome as persisted, with the run-ID provenance #303
+ * AC15 requires.
+ *
+ * `runSlug` is the run's own provider-qualified slug — the identifier
+ * `runSlugForProviderName` produced, which is already the key the state file is
+ * written under. No new identifier is minted: a second run id would be a second
+ * answer to "which run reported this".
+ */
+export interface PersistedMutationStep {
+  /** Run-ID provenance: the `runSlug` this record was written under. */
+  runSlug: string;
+  status: "MUTATION_REPORTED" | "MUTATION_NOT_RUN";
+  /** Present only under `MUTATION_NOT_RUN`. */
+  reason?: MutationNotRunReason;
+  /**
+   * Empty under `MUTATION_NOT_RUN`, and legitimately empty under the other.
+   * Each entry carries its optional attribution `label` (#304 B-11).
+   */
+  survivors: MutationSurvivor[];
+  /**
+   * Which attribution degradations the run observed (#304 B-11). Optional and
+   * absent in the ordinary case, so `RUN_STATE_VERSION` stays 7: an optional
+   * member every existing reader ignores is not a schema break, which is the
+   * rationale #303 recorded for the record itself.
+   */
+  attributionNotes?: MutationAttributionNote[];
 }
 
 /**
@@ -908,6 +954,97 @@ function sanitizeQualityStages(
 }
 
 /**
+ * Keep the mutation-step record only when it is whole, in the same style as
+ * {@link sanitizeQualityStages}: a malformed record degrades to absent rather
+ * than throwing. It is a report about a run, so a broken one costs a report,
+ * never the run.
+ */
+function sanitizeMutationStep(
+  value: unknown,
+): PersistedMutationStep | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const record = value as Partial<Record<keyof PersistedMutationStep, unknown>>;
+  const nonblank = (field: unknown): field is string =>
+    typeof field === "string" && field.trim() !== "";
+  // Provenance is the point of the record (#303 AC15): an outcome nobody can
+  // attribute to a run is worse than no outcome.
+  if (!nonblank(record.runSlug)) return undefined;
+  if (
+    record.status !== "MUTATION_REPORTED" &&
+    record.status !== "MUTATION_NOT_RUN"
+  ) {
+    return undefined;
+  }
+  if (!Array.isArray(record.survivors)) return undefined;
+  const survivors = record.survivors.filter(
+    (entry): entry is MutationSurvivor =>
+      typeof entry === "object" &&
+      entry !== null &&
+      nonblank((entry as MutationSurvivor).id) &&
+      nonblank((entry as MutationSurvivor).file) &&
+      nonblank((entry as MutationSurvivor).mutator) &&
+      typeof (entry as MutationSurvivor).position === "object" &&
+      (entry as MutationSurvivor).position !== null,
+  );
+  // A dropped survivor would report a shorter list than the tool produced, so
+  // the whole record degrades instead of quietly shrinking.
+  if (survivors.length !== record.survivors.length) return undefined;
+  // An unrecognized note is dropped rather than degrading the record: a note is
+  // one line of report text, so a stray one costs a sentence, never a survivor.
+  const attributionNotes = Array.isArray(record.attributionNotes)
+    ? record.attributionNotes.filter(
+        (note): note is MutationAttributionNote =>
+          note === "BASELINE_UNUSABLE" || note === "DECISIONS_UNUSABLE",
+      )
+    : [];
+  return {
+    runSlug: record.runSlug,
+    status: record.status,
+    ...(nonblank(record.reason)
+      ? { reason: record.reason as MutationNotRunReason }
+      : {}),
+    survivors: survivors.map((entry) => ({
+      id: entry.id,
+      file: entry.file,
+      mutator: entry.mutator,
+      position: { ...entry.position },
+      // Copied through, never defaulted: a survivor with no label *means*
+      // `unattributed`, and substituting it here would claim this run attributed
+      // a record that predates attribution (#304 B-11).
+      ...(isMutationSurvivorLabel(entry.label) ? { label: entry.label } : {}),
+    })),
+    ...(attributionNotes.length > 0 ? { attributionNotes } : {}),
+  };
+}
+
+function isMutationSurvivorLabel(
+  value: unknown,
+): value is MutationSurvivorLabel {
+  return (
+    value === "new-in-this-run" ||
+    value === "pre-existing" ||
+    value === "unattributed" ||
+    value === "accepted"
+  );
+}
+
+/**
+ * Record what the report-only mutation step reported (#303 B-13), keyed by
+ * nothing: one run, one step, one record. Written under the same `runSlug` the
+ * record carries as its provenance, so the two can never disagree.
+ */
+export function recordMutationStepOutcome(
+  repoRoot: string,
+  runSlug: string,
+  record: PersistedMutationStep,
+): void {
+  updateRunState(repoRoot, runSlug, (state) => {
+    state.version = RUN_STATE_VERSION;
+    state.mutationStep = record;
+  });
+}
+
+/**
  * One slice's quality-stage entries, oldest first (#87 B-14). The current run's
  * entry is the last one: a fresh entry is appended per approval, so the earlier
  * ones are the escalated attempts that came before it.
@@ -1001,7 +1138,8 @@ export function recordQualityStageOutcome(
  * locator, no waivers and no write. v5 adds `finalEvaluations` (#96) the same
  * way: a v4 file keeps its locator and its waivers and gains no final
  * evaluation, because it had none. v6 adds `qualityStages` (#87) the same way
- * again: a v5 file with no such member reads as "no stage ran" and the adapter
+ * again, and v7 adds the run-level `mutationStep` outcome (#303) once more: a v5
+ * file with no such member reads as "no stage ran" and the adapter
  * writes nothing. Throws on unknown status strings rather than
  * silently producing an invalid record.
  */
@@ -1038,6 +1176,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     appliedWaivers?: unknown;
     finalEvaluations?: unknown;
     qualityStages?: unknown;
+    mutationStep?: unknown;
   };
   const featureBranch = r.featureBranch ?? `feat/${prdSlug}`;
   const slicesIn = r.slices ?? {};
@@ -1055,7 +1194,8 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     r.version === 3 ||
     r.version === 4 ||
     r.version === 5 ||
-    r.version === 6
+    r.version === 6 ||
+    r.version === 7
   ) {
     const slices: Record<string, PersistedSliceState> = {};
     for (const [id, val] of Object.entries(slicesIn)) {
@@ -1071,6 +1211,7 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
     const appliedWaivers = sanitizeAppliedWaivers(r.appliedWaivers);
     const finalEvaluations = sanitizeFinalEvaluations(r.finalEvaluations);
     const qualityStages = sanitizeQualityStages(r.qualityStages);
+    const mutationStep = sanitizeMutationStep(r.mutationStep);
     return {
       version: RUN_STATE_VERSION,
       prdSlug,
@@ -1106,6 +1247,10 @@ export function adaptLoadedState(raw: unknown, prdSlug: string): RunState {
       // writes nothing: "no quality stage ran" and "this file predates quality
       // stages" are the same fact to every reader (#87 B-14).
       ...(qualityStages !== undefined ? { qualityStages } : {}),
+      // v1–v6 files have no such field, so the upgrade leaves it absent and
+      // writes nothing: "no mutation step ran" and "this file predates the
+      // mutation step" are the same fact to every reader (#303 B-13).
+      ...(mutationStep !== undefined ? { mutationStep } : {}),
     };
   }
 
